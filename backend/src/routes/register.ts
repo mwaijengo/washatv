@@ -12,6 +12,8 @@ export async function registerRoutes(
 ) {
   const { pool, sse, env } = deps;
 
+  const adminLoginConfigured = Boolean(env.ADMIN_EMAIL && env.ADMIN_PASSWORD_HASH);
+
   app.get('/health', async () => ({
     ok: true,
     service: 'washa-api',
@@ -101,11 +103,17 @@ export async function registerRoutes(
 
   /** --- Admin auth --- */
   app.post<{ Body: { email: string; password: string } }>('/api/v1/admin/auth/login', async (req, reply) => {
+    if (!adminLoginConfigured) {
+      return reply.code(503).send({
+        error: 'Admin login not configured',
+        hint: 'Set ADMIN_EMAIL and ADMIN_PASSWORD_HASH or use ADMIN_API_KEY',
+      });
+    }
     const { email, password } = req.body ?? { email: '', password: '' };
     if (email !== env.ADMIN_EMAIL || !password) {
       return reply.code(401).send({ error: 'Invalid credentials' });
     }
-    const ok = await bcrypt.compare(password, env.ADMIN_PASSWORD_HASH);
+    const ok = await bcrypt.compare(password, env.ADMIN_PASSWORD_HASH!);
     if (!ok) return reply.code(401).send({ error: 'Invalid credentials' });
     const token = await reply.jwtSign(
       { role: 'admin', sub: env.ADMIN_EMAIL } as Record<string, unknown>,
@@ -117,6 +125,9 @@ export async function registerRoutes(
   const adminPre = async (req: import('fastify').FastifyRequest, reply: import('fastify').FastifyReply) => {
     const key = req.headers['x-admin-key'];
     if (env.ADMIN_API_KEY && key === env.ADMIN_API_KEY) return;
+    if (!adminLoginConfigured) {
+      return reply.code(503).send({ error: 'Admin auth is not configured on server' });
+    }
     try {
       await req.jwtVerify();
       const p = req.user as { role?: string };

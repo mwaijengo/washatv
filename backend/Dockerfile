@@ -19,4 +19,4 @@ COPY --from=build /app/dist ./dist
 COPY --from=build /app/migrations ./migrations
 USER nodejs
 EXPOSE 8080
-CMD ["sh", "-c", "node dist/db/runMigrations.js && node dist/index.js"]
+CMD ["node", "dist/index.js"]
