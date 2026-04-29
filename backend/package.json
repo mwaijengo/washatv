@@ -1,0 +1,34 @@
+{
+  "name": "washa-api",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "start": "node dist/index.js",
+    "dev": "tsx watch src/index.ts",
+    "migrate": "node dist/db/runMigrations.js",
+    "migrate:dev": "tsx src/db/runMigrations.ts",
+    "lint": "tsc --noEmit -p tsconfig.json"
+  },
+  "dependencies": {
+    "@fastify/cors": "^10.0.2",
+    "@fastify/jwt": "^9.0.3",
+    "@fastify/sensible": "^6.0.2",
+    "bcrypt": "^5.1.1",
+    "fastify": "^5.2.1",
+    "nanoid": "^5.0.9",
+    "pg": "^8.13.1",
+    "zod": "^3.24.2"
+  },
+  "devDependencies": {
+    "@types/bcrypt": "^5.0.2",
+    "@types/node": "^22.13.5",
+    "@types/pg": "^8.11.11",
+    "tsx": "^4.19.3",
+    "typescript": "^5.7.3"
+  }
+}
