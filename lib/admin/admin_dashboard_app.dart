@@ -1941,8 +1941,14 @@ class _AdminScaffoldState extends State<_AdminScaffold> {
                   Expanded(
                     child: Text(
                       'Slides hazihifadhiwi kwa databesi bila ufunguo wa admin. '
-                      'Endesha app na --dart-define=WASHA_ADMIN_API_KEY=...(sawa na ADMIN_API_KEY ya server). '
-                      'Server lazima iendelee na databesi imeapply migrations.',
+                      'Weka thamani ya ADMIN_API_KEY ya Railway ndani ya WASHA_ADMIN_API_KEY kwenye admin/dev_defines.json. '
+                      'MUHIMU: lazima uendeshe na --dart-define-from-file (si flutter run tu). '
+                      'Kutoka mzizi wa mradi: flutter run -t lib/main_admin.dart -d chrome '
+                      '--dart-define-from-file=admin/dev_defines.json. '
+                      'Ukikatika folda admin/: flutter run -d chrome --dart-define-from-file=dev_defines.json '
+                      'au bash admin/run_admin_chrome.sh. '
+                      'Run & Debug: \"Admin · Chrome\" au \"Admin · Chrome (cwd admin/)\". '
+                      'Server na migrations lazima ziwe tayari.',
                       style: TextStyle(fontSize: 12, height: 1.38, color: Color(0xFFFED7AA)),
                     ),
                   ),
@@ -2510,8 +2516,8 @@ class _AdminScaffoldState extends State<_AdminScaffold> {
                 }
                 if (_adminApiKey.isEmpty) {
                   _showToast(
-                    'WASHA_ADMIN_API_KEY haipo. Endesha: flutter run ... --dart-define=WASHA_ADMIN_API_KEY=YAKO '
-                    '(sawa na ADMIN_API_KEY kwenye server).',
+                    'WASHA_ADMIN_API_KEY haipo. Tumia admin/dev_defines.json '
+                    '(ona .example) au --dart-define=WASHA_ADMIN_API_KEY=YAKO (sawa na Railway ADMIN_API_KEY).',
                     _ToastType.error,
                   );
                   return;

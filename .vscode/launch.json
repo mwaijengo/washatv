@@ -1,0 +1,29 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Admin · Chrome (defines from admin/dev_defines.json)",
+      "request": "launch",
+      "type": "dart",
+      "program": "lib/main_admin.dart",
+      "deviceId": "chrome",
+      "toolArgs": ["--dart-define-from-file=admin/dev_defines.json"]
+    },
+    {
+      "name": "Admin · Chrome (cwd admin/, dev_defines.json)",
+      "request": "launch",
+      "type": "dart",
+      "cwd": "admin",
+      "program": "lib/main.dart",
+      "deviceId": "chrome",
+      "toolArgs": ["--dart-define-from-file=dev_defines.json"]
+    },
+    {
+      "name": "Viewer · Chrome",
+      "request": "launch",
+      "type": "dart",
+      "program": "lib/main.dart",
+      "deviceId": "chrome"
+    }
+  ]
+}

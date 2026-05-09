@@ -43,3 +43,6 @@ app.*.map.json
 /android/app/debug
 /android/app/profile
 /android/app/release
+
+# Local Flutter --dart-define-from-file (copy from admin/dev_defines.json.example)
+admin/dev_defines.json
