@@ -70,7 +70,8 @@ class _WashaAppState extends State<WashaApp> with WidgetsBindingObserver {
       if (slides.isEmpty) return;
       setState(() => carousel = (carousel + 1) % slides.length);
     });
-    configPoller = Timer.periodic(const Duration(seconds: 5), (_) => _syncFromServer(silent: true));
+    // Tight cadence keeps carousel / pricing / channels close to Railway after admin publishes.
+    configPoller = Timer.periodic(const Duration(seconds: 2), (_) => _syncFromServer(silent: true));
   }
 
   Future<void> _init() async {
@@ -102,6 +103,9 @@ class _WashaAppState extends State<WashaApp> with WidgetsBindingObserver {
         try {
           await storage.setSupportWhatsapp(fetchedWa);
         } catch (_) {}
+        if (remote.plans.isNotEmpty) {
+          await persistPricingSnapshotFromPlans(remote.plans);
+        }
         try {
           await api.syncViewer(
             deviceId: dev,
@@ -167,6 +171,9 @@ class _WashaAppState extends State<WashaApp> with WidgetsBindingObserver {
         }
       });
       await storage.setSupportWhatsapp(remote.whatsappNumber);
+      if (remote.plans.isNotEmpty) {
+        await persistPricingSnapshotFromPlans(remote.plans);
+      }
     } catch (_) {
       if (!silent && mounted) {
         setState(() {
@@ -196,6 +203,9 @@ class _WashaAppState extends State<WashaApp> with WidgetsBindingObserver {
 
   void switchScreen(AppScreen s) {
     setState(() => current = s);
+    if (s == AppScreen.subscription) {
+      unawaited(_syncFromServer(silent: true));
+    }
     if (s == AppScreen.subscription && !premium) {
       Future<void>.delayed(const Duration(milliseconds: 350), () {
         if (!mounted) return;

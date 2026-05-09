@@ -246,6 +246,8 @@ class _AdminScaffoldState extends State<_AdminScaffold> {
           final price = (j['price'] as num?)?.toDouble();
           final days = (j['duration_days'] as num?)?.toInt();
           final enabled = j['enabled'] as bool?;
+          final name = (j['name'] as String?)?.trim();
+          if (name != null && name.isNotEmpty) existing.name = name;
           if (price != null) existing.price = price;
           existing.originalPrice = existing.price;
           existing.discount = 0;
@@ -291,9 +293,22 @@ class _AdminScaffoldState extends State<_AdminScaffold> {
         _settings.whatsappNumber = wa;
         _settingsWhatsapp.text = wa;
       });
+      if (mounted) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (mounted) unawaited(_persistPricingMapToPrefs());
+        });
+      }
     } catch (_) {
       // Local mode fallback.
     }
+  }
+
+  Future<void> _persistPricingMapToPrefs() async {
+    try {
+      final sp = await SharedPreferences.getInstance();
+      final map = {for (final e in _pricing.entries) e.key: _pricingToJson(e.value)};
+      await sp.setString('washatvPricing', jsonEncode(map));
+    } catch (_) {}
   }
 
   String _s(Object? value, {String fallback = ''}) => value?.toString().trim() ?? fallback;
@@ -2373,7 +2388,7 @@ class _AdminScaffoldState extends State<_AdminScaffold> {
           return;
         }
       }
-      _showToast('Slide imefutwa', _ToastType.error);
+      _showToast('Slide imefutwa kwenye databesi', _ToastType.success);
     }
   }
 
@@ -2586,6 +2601,7 @@ class _AdminScaffoldState extends State<_AdminScaffold> {
                     isEdit ? 'Slide imehifadhiwa kwenye databesi' : 'Slide imeongezwa kwenye databesi',
                     _ToastType.success,
                   );
+                  unawaited(_hydrateFromBackend());
                 } catch (e) {
                   if (!mounted) return;
                   _showToast('Imeshindikana kuhifadhi slide: $e', _ToastType.error);
@@ -3180,7 +3196,8 @@ class _AdminScaffoldState extends State<_AdminScaffold> {
           throw Exception('pricing ${e.key}: ${res.statusCode}');
         }
       }
-      _showToast('Bei zimehifadhiwa kwenye server. User app itajirefresh soon.', _ToastType.success);
+      await _hydrateFromBackend();
+      _showToast('Bei zimehifadhiwa. User app inasasisha moja kwa moja (sekunde 2).', _ToastType.success);
     } catch (_) {
       _showToast('Imeshindikana kuhifadhi bei kwenye server.', _ToastType.error);
     }

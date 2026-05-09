@@ -61,3 +61,33 @@ Future<List<Plan>> loadUserPlans() async {
     return defaults;
   }
 }
+
+int? _digitsFromFmtTzsDisplay(String formatted) => int.tryParse(formatted.replaceAll(RegExp(r'[^0-9]'), ''));
+
+/// After a successful bootstrap/sync, mirrors server plans into [kPricingStorageKey] so the next cold
+/// start matches the Railway catalog until bootstrap runs again.
+Future<void> persistPricingSnapshotFromPlans(List<Plan> plans) async {
+  if (plans.isEmpty) return;
+  try {
+    final sp = await SharedPreferences.getInstance();
+    final map = <String, dynamic>{};
+    for (final p in plans) {
+      final n = _digitsFromFmtTzsDisplay(p.price);
+      if (n == null) continue;
+      final priceNum = n.toDouble();
+      map[p.id] = <String, dynamic>{
+        'name': p.name,
+        'price': priceNum,
+        'originalPrice': priceNum,
+        'discount': 0,
+        'duration': p.days,
+        'features': <String>[],
+        'popular': false,
+        'enabled': true,
+        'color': '',
+      };
+    }
+    if (map.isEmpty) return;
+    await sp.setString(kPricingStorageKey, jsonEncode(map));
+  } catch (_) {}
+}
