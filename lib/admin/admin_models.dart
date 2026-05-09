@@ -70,6 +70,25 @@ class AdminChannel {
   }
 }
 
+class AdminSlide {
+  AdminSlide({
+    required this.id,
+    required this.title,
+    required this.subtitle,
+    required this.imageUrl,
+    required this.premium,
+    required this.active,
+    required this.sortOrder,
+  });
+  final String id;
+  String title;
+  String subtitle;
+  String imageUrl;
+  bool premium;
+  bool active;
+  int sortOrder;
+}
+
 class AdminSubscription {
   AdminSubscription({
     required this.id,

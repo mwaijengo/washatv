@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:math';
 import 'dart:ui';
@@ -6,6 +7,7 @@ import 'package:fl_chart/fl_chart.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:google_fonts/google_fonts.dart';
+import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../constants/app_channel_categories.dart';
@@ -47,6 +49,7 @@ enum AdminPageId {
   dashboard,
   users,
   channels,
+  slides,
   subscriptions,
   pricing,
   payments,
@@ -67,9 +70,16 @@ class _AdminScaffoldState extends State<_AdminScaffold> {
   final _rand = Random();
   final _globalSearch = TextEditingController();
   final _userSearch = TextEditingController();
+  /// Same Railway API as the viewer app unless overridden with `--dart-define=WASHA_API_BASE_URL=...`.
+  final String _apiBase = const String.fromEnvironment(
+    'WASHA_API_BASE_URL',
+    defaultValue: 'https://washatv-production.up.railway.app',
+  ).replaceAll(RegExp(r'/+$'), '');
+  final String _adminApiKey = const String.fromEnvironment('WASHA_ADMIN_API_KEY');
 
   late List<AdminUser> _users;
   late List<AdminChannel> _channels;
+  late List<AdminSlide> _slides;
   late List<AdminSubscription> _subscriptions;
   late List<AdminPayment> _payments;
   late List<AdminNotification> _notifications;
@@ -81,6 +91,8 @@ class _AdminScaffoldState extends State<_AdminScaffold> {
   late final TextEditingController _settingsWhatsapp = TextEditingController(text: _settings.whatsappNumber);
 
   AdminPageId _page = AdminPageId.dashboard;
+  String? _slideQuery = '';
+  String? _slideFilter = 'all';
   /// Desktop: whether sidebar is open (main gets left margin). HTML starts with main `full-width` → sidebar closed.
   bool _sidebarOpen = false;
   final List<_Toast> _toasts = [];
@@ -92,6 +104,7 @@ class _AdminScaffoldState extends State<_AdminScaffold> {
     super.initState();
     _users = generateUsers(_rand);
     _channels = generateChannels(_rand);
+    _slides = generateSlides();
     _pricing = defaultPricingPlans();
     _subscriptions = generateSubscriptions(_rand, _users, _pricing);
     _payments = generatePayments(_rand, _users);
@@ -99,6 +112,7 @@ class _AdminScaffoldState extends State<_AdminScaffold> {
     _logs = generateLogs(_rand);
     _loadSavedPricing();
     _loadSavedSettings();
+    _hydrateFromBackend();
   }
 
   Future<void> _loadSavedSettings() async {
@@ -125,6 +139,168 @@ class _AdminScaffoldState extends State<_AdminScaffold> {
         }
       });
     } catch (_) {}
+  }
+
+  Map<String, String> _adminHeaders() {
+    final h = <String, String>{'Content-Type': 'application/json'};
+    if (_adminApiKey.isNotEmpty) h['X-Admin-Key'] = _adminApiKey;
+    return h;
+  }
+
+  Future<void> _hydrateFromBackend() async {
+    try {
+      final bootstrapRes = await http.get(Uri.parse('$_apiBase/api/v1/public/bootstrap')).timeout(const Duration(seconds: 12));
+      if (bootstrapRes.statusCode < 200 || bootstrapRes.statusCode >= 300) return;
+      final map = jsonDecode(bootstrapRes.body) as Map<String, dynamic>;
+      final rawPlans = (map['plans'] as List?)?.cast<dynamic>() ?? const [];
+      final rawChannels = (map['channels'] as List?)?.cast<dynamic>() ?? const [];
+      final rawSlidesFromBootstrap = (map['slides'] as List?)?.cast<dynamic>() ?? const [];
+      final settings = (map['settings'] as Map?)?.cast<String, dynamic>() ?? const <String, dynamic>{};
+
+      List<AdminUser>? serverUsers;
+      List<AdminSlide>? serverSlides;
+      List<AdminPayment>? serverPayments;
+      List<AdminNotification>? serverNotifications;
+
+      if (_adminApiKey.isNotEmpty) {
+        try {
+          final usersRes = await http.get(Uri.parse('$_apiBase/api/v1/admin/users'), headers: _adminHeaders()).timeout(const Duration(seconds: 12));
+          final slidesRes = await http.get(Uri.parse('$_apiBase/api/v1/admin/slides'), headers: _adminHeaders()).timeout(const Duration(seconds: 12));
+          final txRes = await http.get(Uri.parse('$_apiBase/api/v1/admin/transactions'), headers: _adminHeaders()).timeout(const Duration(seconds: 12));
+          final notiRes = await http.get(Uri.parse('$_apiBase/api/v1/admin/notifications'), headers: _adminHeaders()).timeout(const Duration(seconds: 12));
+          if (usersRes.statusCode >= 200 && usersRes.statusCode < 300) {
+            final usersMap = jsonDecode(usersRes.body) as Map<String, dynamic>;
+            final rawUsers = (usersMap['users'] as List?)?.cast<dynamic>() ?? const [];
+            serverUsers = rawUsers.whereType<Map>().map((raw) {
+              final j = raw.cast<String, dynamic>();
+              return AdminUser(
+                id: _s(j['id']),
+                name: _s(j['name'], fallback: 'Viewer'),
+                phone: _s(j['phone'], fallback: 'N/A'),
+                deviceId: _s(j['device_id']),
+                status: _s(j['status'], fallback: 'active'),
+                subscription: _s(j['subscription'], fallback: 'free'),
+                createdAt: _dt(j['created_at']) ?? DateTime.now(),
+                adminAccessUntil: _dt(j['admin_access_until']),
+              );
+            }).toList();
+          }
+          if (slidesRes.statusCode >= 200 && slidesRes.statusCode < 300) {
+            final slidesMap = jsonDecode(slidesRes.body) as Map<String, dynamic>;
+            final raw = (slidesMap['slides'] as List?)?.cast<dynamic>() ?? const [];
+            serverSlides = raw.whereType<Map>().map((rawItem) {
+              final j = rawItem.cast<String, dynamic>();
+              return AdminSlide(
+                id: _s(j['id']),
+                title: _s(j['title']),
+                subtitle: _s(j['subtitle']),
+                imageUrl: _s(j['image_url']),
+                premium: j['premium'] as bool? ?? false,
+                active: j['active'] as bool? ?? true,
+                sortOrder: (j['sort_order'] as num?)?.toInt() ?? 0,
+              );
+            }).toList();
+          }
+          if (txRes.statusCode >= 200 && txRes.statusCode < 300) {
+            final txMap = jsonDecode(txRes.body) as Map<String, dynamic>;
+            final raw = (txMap['transactions'] as List?)?.cast<dynamic>() ?? const [];
+            serverPayments = raw.whereType<Map>().map((rawItem) {
+              final j = rawItem.cast<String, dynamic>();
+              return AdminPayment(
+                id: _s(j['id']),
+                userName: _s(j['user_name'], fallback: 'Viewer'),
+                amount: (j['amount'] as num?)?.toDouble() ?? 0,
+                method: _s(j['method'], fallback: 'N/A'),
+                status: _s(j['status'], fallback: 'completed'),
+                transactionId: _s(j['provider_ref'], fallback: _s(j['id'])),
+                createdAt: _dt(j['created_at']) ?? DateTime.now(),
+              );
+            }).toList();
+          }
+          if (notiRes.statusCode >= 200 && notiRes.statusCode < 300) {
+            final nMap = jsonDecode(notiRes.body) as Map<String, dynamic>;
+            final raw = (nMap['notifications'] as List?)?.cast<dynamic>() ?? const [];
+            serverNotifications = raw.whereType<Map>().map((rawItem) {
+              final j = rawItem.cast<String, dynamic>();
+              return AdminNotification(
+                id: _s(j['id']),
+                title: _s(j['title']),
+                message: _s(j['message']),
+                type: _s(j['type'], fallback: 'info'),
+                read: j['read'] as bool? ?? false,
+                createdAt: _dt(j['created_at']) ?? DateTime.now(),
+              );
+            }).toList();
+          }
+        } catch (_) {}
+      }
+
+      if (!mounted) return;
+      setState(() {
+        for (final p in rawPlans) {
+          if (p is! Map) continue;
+          final j = p.cast<String, dynamic>();
+          final key = _s(j['plan_key']);
+          final existing = _pricing[key];
+          if (existing == null) continue;
+          final price = (j['price'] as num?)?.toDouble();
+          final days = (j['duration_days'] as num?)?.toInt();
+          final enabled = j['enabled'] as bool?;
+          if (price != null) existing.price = price;
+          existing.originalPrice = existing.price;
+          existing.discount = 0;
+          if (days != null) existing.duration = days;
+          if (enabled != null) existing.enabled = enabled;
+        }
+        _channels = rawChannels.whereType<Map>().map((raw) {
+          final j = raw.cast<String, dynamic>();
+          final category = _s(j['category']);
+          return AdminChannel(
+            id: _s(j['id']),
+            name: _s(j['name']),
+            category: category.isEmpty ? kAppChannelCategories.first : category,
+            premium: j['premium'] as bool? ?? false,
+            live: j['live'] as bool? ?? false,
+            status: _s(j['status'], fallback: 'active'),
+            thumbnail: _s(j['thumbnail']),
+            viewers: (j['viewers'] as num?)?.toInt() ?? 0,
+            rating: _s(j['rating'], fallback: '5.0'),
+            drm: _s(j['drm'], fallback: 'none'),
+          );
+        }).where((c) => c.id.isNotEmpty && c.name.isNotEmpty).toList();
+        if (serverUsers != null) _users = serverUsers!;
+        if (serverSlides != null) {
+          _slides = serverSlides!;
+        } else {
+          _slides = rawSlidesFromBootstrap.whereType<Map>().map((rawItem) {
+            final j = rawItem.cast<String, dynamic>();
+            return AdminSlide(
+              id: _s(j['id']),
+              title: _s(j['title']),
+              subtitle: _s(j['subtitle']),
+              imageUrl: _s(j['image_url']),
+              premium: j['premium'] as bool? ?? false,
+              active: j['active'] as bool? ?? true,
+              sortOrder: (j['sort_order'] as num?)?.toInt() ?? 0,
+            );
+          }).where((s) => s.id.isNotEmpty && s.title.isNotEmpty && s.imageUrl.isNotEmpty).toList();
+        }
+        if (serverPayments != null) _payments = serverPayments!;
+        if (serverNotifications != null) _notifications = serverNotifications!;
+        final wa = _s(settings['whatsapp_number']);
+        _settings.whatsappNumber = wa;
+        _settingsWhatsapp.text = wa;
+      });
+    } catch (_) {
+      // Local mode fallback.
+    }
+  }
+
+  String _s(Object? value, {String fallback = ''}) => value?.toString().trim() ?? fallback;
+  DateTime? _dt(Object? value) {
+    final s = value?.toString();
+    if (s == null || s.isEmpty) return null;
+    return DateTime.tryParse(s);
   }
 
   PricingPlan _pricingFromJson(Map<String, dynamic> j, PricingPlan fallback) {
@@ -194,8 +370,10 @@ class _AdminScaffoldState extends State<_AdminScaffold> {
       child: Focus(
         autofocus: true,
         child: Scaffold(
-          body: Stack(
-            children: [
+          body: SafeArea(
+            bottom: false,
+            child: Stack(
+              children: [
           Row(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
@@ -249,6 +427,7 @@ class _AdminScaffoldState extends State<_AdminScaffold> {
           ],
           Positioned(top: 12, right: 12, child: _toastStack()),
             ],
+            ),
           ),
           bottomNavigationBar: mobile ? _bottomNav() : null,
         ),
@@ -389,6 +568,7 @@ class _AdminScaffoldState extends State<_AdminScaffold> {
                 _navRow(AdminPageId.dashboard, Icons.dashboard_rounded, 'Dashboard'),
                 _navRow(AdminPageId.users, Icons.groups_rounded, 'Users'),
                 _navRow(AdminPageId.channels, Icons.satellite_alt_rounded, 'Channels'),
+                _navRow(AdminPageId.slides, Icons.slideshow_rounded, 'Slides'),
                 _navRow(AdminPageId.subscriptions, Icons.workspace_premium_rounded, 'Subscriptions'),
                 _navRow(AdminPageId.pricing, Icons.sell_rounded, 'Pricing Plans'),
                 _navRow(AdminPageId.payments, Icons.credit_card_rounded, 'Payments'),
@@ -470,6 +650,7 @@ class _AdminScaffoldState extends State<_AdminScaffold> {
       (AdminPageId.dashboard, Icons.dashboard_rounded, 'Dashboard'),
       (AdminPageId.users, Icons.groups_rounded, 'Users'),
       (AdminPageId.channels, Icons.satellite_alt_rounded, 'Channels'),
+      (AdminPageId.slides, Icons.slideshow_rounded, 'Slides'),
       (AdminPageId.pricing, Icons.sell_rounded, 'Pricing'),
       (AdminPageId.settings, Icons.settings_rounded, 'Settings'),
     ];
@@ -517,6 +698,8 @@ class _AdminScaffoldState extends State<_AdminScaffold> {
         return _pageUsers();
       case AdminPageId.channels:
         return _pageChannels();
+      case AdminPageId.slides:
+        return _pageSlides();
       case AdminPageId.subscriptions:
         return _pageSubscriptions();
       case AdminPageId.pricing:
@@ -731,6 +914,15 @@ class _AdminScaffoldState extends State<_AdminScaffold> {
 
   Widget _userGrowthChart() {
     const labels = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul'];
+    const zeroSpots = <FlSpot>[
+      FlSpot(0, 0),
+      FlSpot(1, 0),
+      FlSpot(2, 0),
+      FlSpot(3, 0),
+      FlSpot(4, 0),
+      FlSpot(5, 0),
+      FlSpot(6, 0),
+    ];
     return LineChart(
       LineChartData(
         gridData: FlGridData(show: true, drawVerticalLine: false, horizontalInterval: 200, getDrawingHorizontalLine: (_) => FlLine(color: const Color(0x08FFFFFF), strokeWidth: 1)),
@@ -762,7 +954,7 @@ class _AdminScaffoldState extends State<_AdminScaffold> {
         ),
         lineBarsData: [
           LineChartBarData(
-            spots: const [FlSpot(0, 450), FlSpot(1, 620), FlSpot(2, 780), FlSpot(3, 950), FlSpot(4, 1100), FlSpot(5, 1180), FlSpot(6, 1248)],
+            spots: zeroSpots,
             isCurved: true,
             color: AdminColors.accentPrimary,
             barWidth: 2,
@@ -770,7 +962,7 @@ class _AdminScaffoldState extends State<_AdminScaffold> {
             belowBarData: BarAreaData(show: true, color: const Color(0x146366F1)),
           ),
           LineChartBarData(
-            spots: const [FlSpot(0, 120), FlSpot(1, 180), FlSpot(2, 240), FlSpot(3, 310), FlSpot(4, 380), FlSpot(5, 420), FlSpot(6, 456)],
+            spots: zeroSpots,
             isCurved: true,
             color: AdminColors.accentWarning,
             barWidth: 2,
@@ -787,12 +979,12 @@ class _AdminScaffoldState extends State<_AdminScaffold> {
 
   Widget _revenueBarChart() {
     const labels = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul'];
-    const vals = <double>[1200000, 1900000, 2400000, 3100000, 3800000, 4200000, 5200000];
+    const vals = <double>[0, 0, 0, 0, 0, 0, 0];
     return BarChart(
       BarChartData(
         gridData: FlGridData(show: true, drawVerticalLine: false, getDrawingHorizontalLine: (_) => FlLine(color: const Color(0x08FFFFFF), strokeWidth: 1)),
         borderData: FlBorderData(show: false),
-        maxY: 6000000,
+        maxY: 1,
         titlesData: FlTitlesData(
           topTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
           rightTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
@@ -1191,7 +1383,12 @@ class _AdminScaffoldState extends State<_AdminScaffold> {
                   color: const Color(0xFF818CF8),
                   onTap: () async {
                     final n = await _promptText('Badilisha jina', u.name);
-                    if (n != null && n.isNotEmpty) setState(() => u.name = n);
+                    if (n != null && n.isNotEmpty) {
+                      setState(() => u.name = n);
+                      try {
+                        await _syncUserToBackend(u, {'name': n});
+                      } catch (_) {}
+                    }
                     if (n != null && n.isNotEmpty) _showToast('Imehakikiwa', _ToastType.success);
                   },
                 ),
@@ -1205,8 +1402,12 @@ class _AdminScaffoldState extends State<_AdminScaffold> {
                   icon: Icons.workspace_premium_outlined,
                   label: u.subscription == 'premium' ? 'Malipo: ON' : 'Malipo: OFF',
                   color: u.subscription == 'premium' ? const Color(0xFFFBBF24) : const Color(0xFF6B7280),
-                  onTap: () {
-                    setState(() => u.subscription = u.subscription == 'premium' ? 'free' : 'premium');
+                  onTap: () async {
+                    final next = u.subscription == 'premium' ? 'free' : 'premium';
+                    setState(() => u.subscription = next);
+                    try {
+                      await _syncUserToBackend(u, {'subscription': next});
+                    } catch (_) {}
                     _showToast('Mfumo: ${u.subscription}', _ToastType.success);
                   },
                 ),
@@ -1344,17 +1545,63 @@ class _AdminScaffoldState extends State<_AdminScaffold> {
     return '${t(d.day)}/${t(d.month)}/${d.year} ${t(d.hour)}:${t(d.minute)}';
   }
 
-  void _applyAdminDuration(AdminUser u, Duration add) {
+  Future<void> _syncUserToBackend(AdminUser u, Map<String, dynamic> patch) async {
+    if (_adminApiKey.isEmpty) return;
+    final res = await http
+        .patch(
+          Uri.parse('$_apiBase/api/v1/admin/users/${u.id}'),
+          headers: _adminHeaders(),
+          body: jsonEncode(patch),
+        )
+        .timeout(const Duration(seconds: 12));
+    if (res.statusCode < 200 || res.statusCode >= 300) {
+      throw Exception('user sync failed ${res.statusCode}');
+    }
+  }
+
+  Future<void> _applyAdminDuration(AdminUser u, Duration add) async {
     final now = DateTime.now();
     final prev = u.adminAccessUntil;
     final base = (prev != null && prev.isAfter(now)) ? prev : now;
-    setState(() => u.adminAccessUntil = base.add(add));
+    final next = base.add(add);
+    setState(() => u.adminAccessUntil = next);
+    try {
+      await _syncUserToBackend(u, {'admin_access_until': next.toIso8601String()});
+    } catch (_) {}
     _showToast('Umeongeza muda wa premium (msimamizi)', _ToastType.success);
   }
 
-  void _clearAdminAccess(AdminUser u) {
+  Future<void> _clearAdminAccess(AdminUser u) async {
     setState(() => u.adminAccessUntil = null);
+    try {
+      await _syncUserToBackend(u, {'admin_access_until': null});
+    } catch (_) {}
     _showToast('Muda wa msimamizi umeondolewa', _ToastType.info);
+  }
+
+  Future<bool> _showDeleteConfirmModal({
+    required String title,
+    required String message,
+    String confirmLabel = 'Futa',
+  }) async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: AdminColors.bgSecondary,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+        title: Text(title, style: const TextStyle(fontWeight: FontWeight.w800)),
+        content: Text(message, style: const TextStyle(height: 1.35)),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Ghairi')),
+          FilledButton(
+            style: FilledButton.styleFrom(backgroundColor: const Color(0xFFDC2626)),
+            onPressed: () => Navigator.pop(ctx, true),
+            child: Text(confirmLabel),
+          ),
+        ],
+      ),
+    );
+    return ok == true;
   }
 
   Future<void> _showGrantAccessDialog(AdminUser u) async {
@@ -1440,14 +1687,27 @@ class _AdminScaffoldState extends State<_AdminScaffold> {
             ),
           ),
           actions: [
-            TextButton(onPressed: u.adminAccessUntil != null ? () { _clearAdminAccess(u); Navigator.pop(ctx); } : null, child: const Text('Futa muda wa msimamizi')),
+            TextButton(
+              onPressed: u.adminAccessUntil != null
+                  ? () async {
+                      final ok = await _showDeleteConfirmModal(
+                        title: 'Futa muda wa msimamizi?',
+                        message: 'Muda wa premium wa “${u.name}” utaondolewa mara moja.',
+                      );
+                      if (!mounted || !ok) return;
+                      await _clearAdminAccess(u);
+                      Navigator.pop(ctx);
+                    }
+                  : null,
+              child: const Text('Futa muda wa msimamizi'),
+            ),
             TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Funga')),
             FilledButton(
-              onPressed: () {
+              onPressed: () async {
                 final n = int.tryParse(customAmount.text.trim()) ?? 1;
                 if (n < 1) return;
                 final add = _durationFromUnit(n, unit);
-                _applyAdminDuration(u, add);
+                await _applyAdminDuration(u, add);
                 Navigator.pop(ctx);
               },
               child: const Text('Ongeza muda'),
@@ -1464,8 +1724,8 @@ class _AdminScaffoldState extends State<_AdminScaffold> {
   Widget _presetChip(BuildContext ctx, AdminUser u, String label, Duration d) {
     return ActionChip(
       label: Text(label, style: const TextStyle(fontSize: 11)),
-      onPressed: () {
-        _applyAdminDuration(u, d);
+      onPressed: () async {
+        await _applyAdminDuration(u, d);
         Navigator.pop(ctx);
       },
       backgroundColor: const Color(0xFF1A2332),
@@ -1547,9 +1807,9 @@ class _AdminScaffoldState extends State<_AdminScaffold> {
                           fit: StackFit.expand,
                           children: [
                             Image.network(
-                              ch.thumbnail,
+                              _safeImageUrl(ch.thumbnail),
                               fit: BoxFit.cover,
-                              errorBuilder: (_, __, ___) => Container(color: const Color(0xFF374151), child: const Icon(Icons.tv, color: Colors.white54)),
+                              errorBuilder: (_, __, ___) => _imageFallback(Icons.tv, 'Hakuna picha'),
                             ),
                             if (ch.status != 'active')
                               Positioned.fill(
@@ -1637,11 +1897,740 @@ class _AdminScaffoldState extends State<_AdminScaffold> {
     );
   }
 
+  // --- Slides ---
+  Widget _pageSlides() {
+    final slides = [..._slides]..sort((a, b) => a.sortOrder.compareTo(b.sortOrder));
+    final activeCount = slides.where((s) => s.active).length;
+    final premiumCount = slides.where((s) => s.premium).length;
+    final slideQuery = _slideQuery ?? '';
+    final slideFilter = _slideFilter ?? 'all';
+    final q = slideQuery.trim().toLowerCase();
+    final filtered = slides.where((s) {
+      final byQuery = q.isEmpty || s.title.toLowerCase().contains(q) || s.subtitle.toLowerCase().contains(q) || s.id.toLowerCase().contains(q);
+      final byFilter = switch (slideFilter) {
+        'active' => s.active,
+        'inactive' => !s.active,
+        'premium' => s.premium,
+        _ => true,
+      };
+      return byQuery && byFilter;
+    }).toList();
+
+    /// Full list visible only with no filters — reorder updates `sort_order` on all slides.
+    final canReorderSlides = q.isEmpty && slideFilter == 'all' && filtered.length >= 2;
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        if (_adminApiKey.isEmpty)
+          Padding(
+            padding: const EdgeInsets.only(bottom: 10),
+            child: Container(
+              width: double.infinity,
+              padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
+              decoration: BoxDecoration(
+                color: const Color(0x33451A03),
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(color: const Color(0x66EA580C)),
+              ),
+              child: const Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Icon(Icons.key_off_rounded, size: 20, color: Color(0xFFFDBA74)),
+                  SizedBox(width: 10),
+                  Expanded(
+                    child: Text(
+                      'Slides hazihifadhiwi kwa databesi bila ufunguo wa admin. '
+                      'Endesha app na --dart-define=WASHA_ADMIN_API_KEY=...(sawa na ADMIN_API_KEY ya server). '
+                      'Server lazima iendelee na databesi imeapply migrations.',
+                      style: TextStyle(fontSize: 12, height: 1.38, color: Color(0xFFFED7AA)),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        Container(
+          width: double.infinity,
+          padding: const EdgeInsets.fromLTRB(16, 14, 16, 14),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(14),
+            color: const Color(0xFF0F1419),
+            border: Border.all(color: const Color(0x226366F1)),
+            boxShadow: const [
+              BoxShadow(color: Color(0x12000000), blurRadius: 16, offset: Offset(0, 4)),
+            ],
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text('Slides', style: TextStyle(fontSize: 17, fontWeight: FontWeight.w700, letterSpacing: -0.3)),
+                        SizedBox(height: 2),
+                        Text('Carousel ya app · haraka kuscan', style: TextStyle(fontSize: 11.5, color: AdminColors.textSecondary, height: 1.3)),
+                      ],
+                    ),
+                  ),
+                  _btnPrimary(label: 'Ongeza', icon: Icons.add_rounded, small: true, onTap: () => _showSlideEditor()),
+                ],
+              ),
+              const SizedBox(height: 12),
+              Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: [
+                  _slideMetricPill('Total', '${slides.length}', const Color(0xFF818CF8)),
+                  _slideMetricPill('Active', '$activeCount', const Color(0xFF34D399)),
+                  _slideMetricPill('Premium', '$premiumCount', const Color(0xFFFBBF24)),
+                ],
+              ),
+            ],
+          ),
+        ),
+        const SizedBox(height: 10),
+        Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Expanded(
+              child: TextField(
+                onChanged: (v) => setState(() => _slideQuery = v),
+                decoration: _inputDeco().copyWith(
+                  isDense: true,
+                  hintText: 'Tafuta…',
+                  prefixIcon: const Icon(Icons.search_rounded, size: 18),
+                ),
+              ),
+            ),
+            const SizedBox(width: 8),
+            Wrap(
+              spacing: 4,
+              runSpacing: 4,
+              children: [
+                _slideFilterChip('all', 'All'),
+                _slideFilterChip('active', 'Active'),
+                _slideFilterChip('inactive', 'Off'),
+                _slideFilterChip('premium', 'Pro'),
+              ],
+            ),
+          ],
+        ),
+        const SizedBox(height: 10),
+        if (!canReorderSlides && filtered.isNotEmpty)
+          Padding(
+            padding: const EdgeInsets.only(bottom: 8),
+            child: Text(
+              'Weka filtari "All" na uondoe utafutaji ili kupanga slides kwa kuvuta kinara.',
+              style: TextStyle(fontSize: 11, height: 1.35, color: AdminColors.textSecondary.withValues(alpha: 0.95)),
+            ),
+          ),
+        if (filtered.isEmpty)
+          Container(
+            width: double.infinity,
+            padding: const EdgeInsets.symmetric(vertical: 28, horizontal: 16),
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(12),
+              color: AdminColors.bgTertiary,
+              border: Border.all(color: const Color(0x14FFFFFF)),
+            ),
+            child: const Column(
+              children: [
+                Icon(Icons.photo_library_outlined, size: 28, color: Color(0xFF64748B)),
+                SizedBox(height: 8),
+                Text('Hakuna slide', style: TextStyle(fontWeight: FontWeight.w600, fontSize: 13)),
+                SizedBox(height: 4),
+                Text('Badilisha filtari au ongeza mpya', style: TextStyle(fontSize: 11, color: AdminColors.textSecondary)),
+              ],
+            ),
+          )
+        else if (canReorderSlides)
+          ReorderableListView.builder(
+            shrinkWrap: true,
+            physics: const NeverScrollableScrollPhysics(),
+            buildDefaultDragHandles: false,
+            proxyDecorator: (child, index, animation) {
+              return AnimatedBuilder(
+                animation: animation,
+                builder: (context, _) {
+                  final t = Curves.easeOut.transform(animation.value);
+                  return Transform.scale(
+                    scale: 1.0 + 0.02 * t,
+                    child: Material(
+                      elevation: 8 * t,
+                      shadowColor: Colors.black54,
+                      borderRadius: BorderRadius.circular(12),
+                      color: Colors.transparent,
+                      child: child,
+                    ),
+                  );
+                },
+              );
+            },
+            itemCount: filtered.length,
+            onReorder: _onSlidesListReorder,
+            itemBuilder: (context, i) {
+              final s = filtered[i];
+              final sourceIndex = _slides.indexWhere((e) => e.id == s.id);
+              final bottom = i < filtered.length - 1 ? 8.0 : 0.0;
+              return Padding(
+                key: ValueKey(s.id),
+                padding: EdgeInsets.only(bottom: bottom),
+                child: _slideListRow(
+                  s,
+                  sourceIndex,
+                  listIndex: i,
+                  showDragHandle: true,
+                ),
+              );
+            },
+          )
+        else
+          ListView.separated(
+            shrinkWrap: true,
+            physics: const NeverScrollableScrollPhysics(),
+            itemCount: filtered.length,
+            separatorBuilder: (_, __) => const SizedBox(height: 8),
+            itemBuilder: (context, i) {
+              final s = filtered[i];
+              final sourceIndex = _slides.indexWhere((e) => e.id == s.id);
+              return _slideListRow(s, sourceIndex, listIndex: i, showDragHandle: false);
+            },
+          ),
+      ],
+    );
+  }
+
+  /// Single slide row — optional [ReorderableDragStartListener] via [showDragHandle] + [listIndex].
+  Widget _slideListRow(
+    AdminSlide s,
+    int sourceIndex, {
+    required int listIndex,
+    required bool showDragHandle,
+  }) {
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        borderRadius: BorderRadius.circular(12),
+        onTap: sourceIndex < 0 ? null : () => _showSlideEditor(index: sourceIndex),
+        child: Ink(
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(12),
+            color: const Color(0xFF151A22),
+            border: Border.all(color: const Color(0x1EFFFFFF)),
+          ),
+          padding: const EdgeInsets.all(8),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.center,
+            children: [
+              if (showDragHandle)
+                ReorderableDragStartListener(
+                  index: listIndex,
+                  child: MouseRegion(
+                    cursor: SystemMouseCursors.grab,
+                    child: Padding(
+                      padding: const EdgeInsets.only(right: 6),
+                      child: Icon(Icons.drag_indicator_rounded, size: 22, color: AdminColors.textSecondary.withValues(alpha: 0.75)),
+                    ),
+                  ),
+                ),
+              ClipRRect(
+                borderRadius: BorderRadius.circular(10),
+                child: SizedBox(
+                  width: 120,
+                  height: 67,
+                  child: Stack(
+                    fit: StackFit.expand,
+                    children: [
+                      Image.network(
+                        _safeImageUrl(s.imageUrl),
+                        fit: BoxFit.cover,
+                        errorBuilder: (_, __, ___) => _slideThumbFallback(Icons.broken_image_outlined),
+                      ),
+                      if (!s.active)
+                        Container(
+                          color: const Color(0x77000000),
+                          alignment: Alignment.center,
+                          child: const Text('OFF', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: Colors.white)),
+                        ),
+                    ],
+                  ),
+                ),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      s.title,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 13, height: 1.25),
+                    ),
+                    if (s.subtitle.isNotEmpty)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 2),
+                        child: Text(
+                          s.subtitle,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(fontSize: 11.5, color: AdminColors.textSecondary, height: 1.2),
+                        ),
+                      ),
+                    const SizedBox(height: 6),
+                    Wrap(
+                      spacing: 6,
+                      runSpacing: 4,
+                      crossAxisAlignment: WrapCrossAlignment.center,
+                      children: [
+                        _tinyBadge('#${s.sortOrder}', const Color(0xFF334155)),
+                        _tinyBadge(s.premium ? 'PRO' : 'FREE', s.premium ? const Color(0xFFEAB308) : const Color(0xFF475569), darkText: s.premium),
+                        if (!s.active) _tinyBadge('Inactive', const Color(0xFFBE123C)),
+                        Text(
+                          s.id,
+                          style: TextStyle(fontSize: 10, fontFamily: 'monospace', color: AdminColors.textSecondary.withValues(alpha: 0.85)),
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(width: 6),
+              Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  IconButton(
+                    tooltip: 'Hariri',
+                    onPressed: sourceIndex < 0 ? null : () => _showSlideEditor(index: sourceIndex),
+                    icon: const Icon(Icons.edit_rounded, size: 18, color: Color(0xFF93C5FD)),
+                    visualDensity: VisualDensity.compact,
+                    padding: EdgeInsets.zero,
+                    constraints: const BoxConstraints(minWidth: 34, minHeight: 34),
+                    style: IconButton.styleFrom(
+                      backgroundColor: const Color(0x146366F1),
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                    ),
+                  ),
+                  IconButton(
+                    tooltip: 'Futa',
+                    onPressed: sourceIndex < 0 ? null : () => _confirmDeleteSlide(sourceIndex),
+                    icon: const Icon(Icons.delete_outline_rounded, size: 18, color: Color(0xFFFCA5A5)),
+                    visualDensity: VisualDensity.compact,
+                    padding: EdgeInsets.zero,
+                    constraints: const BoxConstraints(minWidth: 34, minHeight: 34),
+                    style: IconButton.styleFrom(
+                      backgroundColor: const Color(0x14EF4444),
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                    ),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  void _onSlidesListReorder(int oldIndex, int newIndex) {
+    var newIdx = newIndex;
+    if (newIdx > oldIndex) newIdx--;
+    if (oldIndex == newIdx) return;
+    final ordered = [..._slides]..sort((a, b) => a.sortOrder.compareTo(b.sortOrder));
+    final moved = ordered.removeAt(oldIndex);
+    ordered.insert(newIdx, moved);
+    for (var i = 0; i < ordered.length; i++) {
+      ordered[i].sortOrder = i + 1;
+    }
+    setState(() {});
+    unawaited(_persistSlideSortOrders(ordered));
+  }
+
+  Future<void> _persistSlideSortOrders(List<AdminSlide> ordered) async {
+    if (_adminApiKey.isEmpty) return;
+    try {
+      final results = await Future.wait(
+        ordered.map(
+          (s) => http
+              .patch(
+                Uri.parse('$_apiBase/api/v1/admin/slides/${s.id}'),
+                headers: _adminHeaders(),
+                body: jsonEncode({'sort_order': s.sortOrder}),
+              )
+              .timeout(const Duration(seconds: 12)),
+        ),
+      );
+      for (final res in results) {
+        if (res.statusCode < 200 || res.statusCode >= 300) {
+          throw Exception('sort_order ${res.statusCode}');
+        }
+      }
+    } catch (_) {
+      if (mounted) {
+        _showToast('Mpangilio umebadilika hapa, lakini sync ya server imeshindikana.', _ToastType.warning);
+      }
+    }
+  }
+
+  Widget _slideMetricPill(String label, String value, Color tone) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 6),
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(8),
+        color: const Color(0xFF111827),
+        border: Border.all(color: const Color(0x2294A3B8)),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Container(width: 5, height: 5, decoration: BoxDecoration(color: tone, shape: BoxShape.circle)),
+          const SizedBox(width: 7),
+          Text(label, style: const TextStyle(fontSize: 10, color: AdminColors.textSecondary, fontWeight: FontWeight.w500)),
+          const SizedBox(width: 6),
+          Text(value, style: const TextStyle(fontSize: 12.5, fontWeight: FontWeight.w700)),
+        ],
+      ),
+    );
+  }
+
+  Widget _slideThumbFallback(IconData icon) {
+    return Container(
+      decoration: const BoxDecoration(
+        gradient: LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          colors: [Color(0xFF1E293B), Color(0xFF0F172A)],
+        ),
+      ),
+      child: Icon(icon, size: 24, color: const Color(0xFF64748B)),
+    );
+  }
+
+  Widget _slideFilterChip(String id, String label) {
+    final selected = (_slideFilter ?? 'all') == id;
+    return ChoiceChip(
+      label: Text(label),
+      visualDensity: VisualDensity.compact,
+      materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+      padding: const EdgeInsets.symmetric(horizontal: 6),
+      selected: selected,
+      onSelected: (_) => setState(() => _slideFilter = id),
+      labelStyle: TextStyle(
+        fontSize: 11,
+        fontWeight: FontWeight.w600,
+        color: selected ? const Color(0xFFE0E7FF) : const Color(0xFF94A3B8),
+      ),
+      selectedColor: const Color(0x334F46E5),
+      backgroundColor: const Color(0x22111B2C),
+      side: BorderSide(color: selected ? const Color(0x665B7CFA) : const Color(0x1FFFFFFF)),
+    );
+  }
+
+  String _nextSlideId() {
+    var maxN = 0;
+    for (final s in _slides) {
+      final n = int.tryParse(s.id.replaceAll(RegExp(r'\D'), ''));
+      if (n != null && n > maxN) maxN = n;
+    }
+    return 'SL-${(maxN + 1).toString().padLeft(3, '0')}';
+  }
+
+  Future<void> _confirmDeleteSlide(int index) async {
+    final s = _slides[index];
+    final ok = await _showDeleteConfirmModal(
+      title: 'Futa slide?',
+      message: '“${s.title}” itaondolewa kwenye app moja kwa moja.',
+    );
+    if (ok && mounted) {
+      final previousSlides = List<AdminSlide>.from(_slides);
+      final deletedId = s.id;
+      setState(() => _slides.removeAt(index));
+      if (_adminApiKey.isNotEmpty) {
+        try {
+          final res = await http.delete(
+            Uri.parse('$_apiBase/api/v1/admin/slides/$deletedId'),
+            headers: _adminHeaders(),
+          ).timeout(const Duration(seconds: 12));
+          if (res.statusCode < 200 || res.statusCode >= 300) {
+            throw Exception('slide delete ${res.statusCode}');
+          }
+          await _hydrateFromBackend();
+        } catch (_) {
+          if (!mounted) return;
+          setState(() => _slides = previousSlides);
+          _showToast('Kufuta slide kumeshindikana kwa server.', _ToastType.error);
+          return;
+        }
+      }
+      _showToast('Slide imefutwa', _ToastType.error);
+    }
+  }
+
+  void _showSlideEditor({int? index}) {
+    final existing = index != null ? _slides[index] : null;
+    final isEdit = existing != null;
+    final title = TextEditingController(text: existing?.title ?? '');
+    final subtitle = TextEditingController(text: existing?.subtitle ?? '');
+    final imageUrl = TextEditingController(text: existing?.imageUrl ?? '');
+    var premium = existing?.premium ?? false;
+    var active = existing?.active ?? true;
+    final sortCtl = TextEditingController(text: '${existing?.sortOrder ?? (_slides.length + 1)}');
+
+    showDialog<void>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setModal) => AlertDialog(
+          backgroundColor: AdminColors.bgSecondary,
+          elevation: 0,
+          insetPadding: const EdgeInsets.symmetric(horizontal: 22, vertical: 22),
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
+          titlePadding: const EdgeInsets.fromLTRB(18, 14, 10, 0),
+          contentPadding: const EdgeInsets.fromLTRB(18, 10, 18, 0),
+          actionsPadding: const EdgeInsets.fromLTRB(10, 0, 10, 10),
+          title: Row(
+            children: [
+              Container(
+                padding: const EdgeInsets.all(8),
+                decoration: BoxDecoration(
+                  color: const Color(0x186366F1),
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                child: const Icon(Icons.slideshow_rounded, size: 18, color: Color(0xFFA5B4FC)),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Text(
+                  isEdit ? 'Hariri slide' : 'Slide mpya',
+                  style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 16, letterSpacing: -0.2),
+                ),
+              ),
+            ],
+          ),
+          content: SingleChildScrollView(
+            child: SizedBox(
+              width: 340,
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  ClipRRect(
+                    borderRadius: BorderRadius.circular(10),
+                    child: AspectRatio(
+                      aspectRatio: 16 / 9,
+                      child: imageUrl.text.trim().isEmpty
+                          ? _slideThumbFallback(Icons.add_photo_alternate_outlined)
+                          : Image.network(
+                              _safeImageUrl(imageUrl.text.trim()),
+                              fit: BoxFit.cover,
+                              loadingBuilder: (context, child, progress) {
+                                if (progress == null) return child;
+                                return Center(
+                                  child: SizedBox(
+                                    width: 22,
+                                    height: 22,
+                                    child: CircularProgressIndicator(strokeWidth: 2, color: AdminColors.accentPrimary.withValues(alpha: 0.8)),
+                                  ),
+                                );
+                              },
+                              errorBuilder: (_, __, ___) => _slideThumbFallback(Icons.hide_image_outlined),
+                            ),
+                    ),
+                  ),
+                  const SizedBox(height: 10),
+                  TextField(
+                    controller: title,
+                    style: const TextStyle(fontSize: 13),
+                    decoration: _inputDeco().copyWith(labelText: 'Kichwa', isDense: true),
+                  ),
+                  const SizedBox(height: 8),
+                  TextField(
+                    controller: subtitle,
+                    style: const TextStyle(fontSize: 13),
+                    decoration: _inputDeco().copyWith(labelText: 'Subtitle', isDense: true),
+                  ),
+                  const SizedBox(height: 8),
+                  TextField(
+                    controller: imageUrl,
+                    style: const TextStyle(fontSize: 12),
+                    decoration: _inputDeco().copyWith(
+                      labelText: 'URL ya picha',
+                      hintText: 'https://…',
+                      isDense: true,
+                    ),
+                    onChanged: (_) => setModal(() {}),
+                  ),
+                  const SizedBox(height: 8),
+                  SizedBox(
+                    width: 120,
+                    child: TextField(
+                      controller: sortCtl,
+                      keyboardType: TextInputType.number,
+                      style: const TextStyle(fontSize: 13),
+                      decoration: _inputDeco().copyWith(labelText: 'Mpangilio', isDense: true),
+                    ),
+                  ),
+                  const SizedBox(height: 6),
+                  SwitchListTile(
+                    dense: true,
+                    contentPadding: EdgeInsets.zero,
+                    title: const Text('Ni slide ya premium', style: TextStyle(fontSize: 12.5)),
+                    value: premium,
+                    onChanged: (v) => setModal(() => premium = v),
+                  ),
+                  SwitchListTile(
+                    dense: true,
+                    contentPadding: EdgeInsets.zero,
+                    title: const Text('Inaonekana kwenye app', style: TextStyle(fontSize: 12.5)),
+                    value: active,
+                    onChanged: (v) => setModal(() => active = v),
+                  ),
+                ],
+              ),
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: Text('Ghairi', style: TextStyle(fontSize: 13, color: AdminColors.textSecondary)),
+            ),
+            FilledButton(
+              onPressed: () async {
+                final t = title.text.trim();
+                final st = subtitle.text.trim();
+                final img = imageUrl.text.trim();
+                final order = int.tryParse(sortCtl.text.trim()) ?? (_slides.length + 1);
+                if (t.isEmpty || img.isEmpty) {
+                  _showToast('Jaza title na URL ya picha', _ToastType.error);
+                  return;
+                }
+                if (_adminApiKey.isEmpty) {
+                  _showToast(
+                    'WASHA_ADMIN_API_KEY haipo. Endesha: flutter run ... --dart-define=WASHA_ADMIN_API_KEY=YAKO '
+                    '(sawa na ADMIN_API_KEY kwenye server).',
+                    _ToastType.error,
+                  );
+                  return;
+                }
+
+                final payloadBody = <String, dynamic>{
+                  'title': t,
+                  'subtitle': st,
+                  'image_url': img,
+                  'premium': premium,
+                  'active': active,
+                  'sort_order': order,
+                };
+
+                try {
+                  if (isEdit && index != null) {
+                    final editIndex = index;
+                    final id = _slides[editIndex].id;
+                    final res = await http
+                        .patch(
+                          Uri.parse('$_apiBase/api/v1/admin/slides/$id'),
+                          headers: _adminHeaders(),
+                          body: jsonEncode(payloadBody),
+                        )
+                        .timeout(const Duration(seconds: 25));
+                    if (res.statusCode < 200 || res.statusCode >= 300) {
+                      throw Exception(res.body.isNotEmpty ? res.body : 'HTTP ${res.statusCode}');
+                    }
+                    if (!mounted) return;
+                    setState(() {
+                      final s = _slides[editIndex];
+                      s.title = t;
+                      s.subtitle = st;
+                      s.imageUrl = img;
+                      s.premium = premium;
+                      s.active = active;
+                      s.sortOrder = order;
+                    });
+                  } else {
+                    final newSlide = AdminSlide(
+                      id: _nextSlideId(),
+                      title: t,
+                      subtitle: st,
+                      imageUrl: img,
+                      premium: premium,
+                      active: active,
+                      sortOrder: order,
+                    );
+                    final res = await http
+                        .post(
+                          Uri.parse('$_apiBase/api/v1/admin/slides'),
+                          headers: _adminHeaders(),
+                          body: jsonEncode({'id': newSlide.id, ...payloadBody}),
+                        )
+                        .timeout(const Duration(seconds: 25));
+                    if (res.statusCode < 200 || res.statusCode >= 300) {
+                      throw Exception(res.body.isNotEmpty ? res.body : 'HTTP ${res.statusCode}');
+                    }
+                    if (!mounted) return;
+                    setState(() => _slides.insert(0, newSlide));
+                  }
+
+                  if (!mounted) return;
+                  Navigator.pop(ctx);
+                  _showToast(
+                    isEdit ? 'Slide imehifadhiwa kwenye databesi' : 'Slide imeongezwa kwenye databesi',
+                    _ToastType.success,
+                  );
+                } catch (e) {
+                  if (!mounted) return;
+                  _showToast('Imeshindikana kuhifadhi slide: $e', _ToastType.error);
+                }
+              },
+              style: FilledButton.styleFrom(
+                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 9),
+                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                textStyle: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
+              ),
+              child: Text(isEdit ? 'Hifadhi' : 'Ongeza'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   Widget _tinyBadge(String t, Color bg, {bool darkText = false}) {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
       decoration: BoxDecoration(color: bg, borderRadius: BorderRadius.circular(99)),
       child: Text(t, style: TextStyle(fontSize: 9, fontWeight: FontWeight.w700, color: darkText ? const Color(0xFF111827) : Colors.white)),
+    );
+  }
+
+  String _safeImageUrl(String raw) {
+    final u = raw.trim();
+    if (u.startsWith('http://')) return 'https://${u.substring(7)}';
+    return u;
+  }
+
+  Widget _imageFallback(IconData icon, String label) {
+    return Container(
+      decoration: const BoxDecoration(
+        gradient: LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          colors: [Color(0xFF1F2937), Color(0xFF111827)],
+        ),
+      ),
+      child: Center(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(icon, color: const Color(0xFF9CA3AF), size: 28),
+            const SizedBox(height: 8),
+            Text(label, style: const TextStyle(fontSize: 11, color: Color(0xFF9CA3AF))),
+          ],
+        ),
+      ),
     );
   }
 
@@ -1664,25 +2653,20 @@ class _AdminScaffoldState extends State<_AdminScaffold> {
 
   Future<void> _confirmDeleteChannel(int index) async {
     final ch = _channels[index];
-    final ok = await showDialog<bool>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        backgroundColor: AdminColors.bgSecondary,
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-        title: const Text('Futa chaneli?', style: TextStyle(fontWeight: FontWeight.w800)),
-        content: Text('“${ch.name}” itaondolewa kwenye app moja kwa moja.', style: const TextStyle(height: 1.35)),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Ghairi')),
-          FilledButton(
-            style: FilledButton.styleFrom(backgroundColor: const Color(0xFFDC2626)),
-            onPressed: () => Navigator.pop(ctx, true),
-            child: const Text('Futa'),
-          ),
-        ],
-      ),
+    final ok = await _showDeleteConfirmModal(
+      title: 'Futa chaneli?',
+      message: '“${ch.name}” itaondolewa kwenye app moja kwa moja.',
     );
-    if (ok == true && mounted) {
+    if (ok && mounted) {
       setState(() => _channels.removeAt(index));
+      if (_adminApiKey.isNotEmpty) {
+        try {
+          await http.delete(
+            Uri.parse('$_apiBase/api/v1/admin/channels/${ch.id}'),
+            headers: _adminHeaders(),
+          ).timeout(const Duration(seconds: 12));
+        } catch (_) {}
+      }
       _showToast('Chaneli imefutwa', _ToastType.error);
     }
   }
@@ -1805,13 +2789,14 @@ class _AdminScaffoldState extends State<_AdminScaffold> {
             actions: [
               TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Ghairi')),
               FilledButton(
-                onPressed: () {
+                onPressed: () async {
                   final n = name.text.trim();
                   if (n.isEmpty) {
                     _showToast('Andika jina la chaneli', _ToastType.error);
                     return;
                   }
                   final tUrl = thumb.text.trim();
+                  late AdminChannel syncChannel;
                   setState(() {
                     if (isEdit && index != null) {
                       final u = _channels[index];
@@ -1822,24 +2807,62 @@ class _AdminScaffoldState extends State<_AdminScaffold> {
                       u.live = live;
                       u.status = active ? 'active' : 'inactive';
                       u.drm = drm;
+                      syncChannel = u;
                     } else {
+                      final created = AdminChannel(
+                        id: _nextChannelId(),
+                        name: n,
+                        category: category,
+                        premium: premium,
+                        live: live,
+                        status: active ? 'active' : 'inactive',
+                        thumbnail: tUrl.isEmpty ? 'https://picsum.photos/400/225?random=${DateTime.now().millisecondsSinceEpoch}' : tUrl,
+                        viewers: 0,
+                        rating: '5.0',
+                        drm: drm,
+                      );
                       _channels.insert(
                         0,
-                        AdminChannel(
-                          id: _nextChannelId(),
-                          name: n,
-                          category: category,
-                          premium: premium,
-                          live: live,
-                          status: active ? 'active' : 'inactive',
-                          thumbnail: tUrl.isEmpty ? 'https://picsum.photos/400/225?random=${DateTime.now().millisecondsSinceEpoch}' : tUrl,
-                          viewers: 0,
-                          rating: '5.0',
-                          drm: drm,
-                        ),
+                        created,
                       );
+                      syncChannel = created;
                     }
                   });
+                  if (_adminApiKey.isNotEmpty) {
+                    final payload = jsonEncode({
+                      'name': syncChannel.name,
+                      'category': syncChannel.category,
+                      'premium': syncChannel.premium,
+                      'live': syncChannel.live,
+                      'status': syncChannel.status,
+                      'thumbnail': syncChannel.thumbnail,
+                      'viewers': syncChannel.viewers,
+                      'rating': syncChannel.rating,
+                      'drm': syncChannel.effectiveDrm,
+                      'sort_order': 0,
+                    });
+                    try {
+                      final res = isEdit
+                          ? await http.patch(
+                              Uri.parse('$_apiBase/api/v1/admin/channels/${syncChannel.id}'),
+                              headers: _adminHeaders(),
+                              body: payload,
+                            )
+                          : await http.post(
+                              Uri.parse('$_apiBase/api/v1/admin/channels'),
+                              headers: _adminHeaders(),
+                              body: jsonEncode({
+                                'id': syncChannel.id,
+                                ...jsonDecode(payload) as Map<String, dynamic>,
+                              }),
+                            );
+                      if (res.statusCode < 200 || res.statusCode >= 300) {
+                        throw Exception('channel ${res.statusCode}');
+                      }
+                    } catch (_) {
+                      _showToast('Channel local saved, lakini server sync imeshindikana.', _ToastType.warning);
+                    }
+                  }
                   Navigator.pop(ctx);
                   _showToast(isEdit ? 'Mabadiliko yamehifadhiwa' : 'Chaneli imeongezwa', _ToastType.success);
                 },
@@ -2124,7 +3147,37 @@ class _AdminScaffoldState extends State<_AdminScaffold> {
     final sp = await SharedPreferences.getInstance();
     final map = {for (final e in _pricing.entries) e.key: _pricingToJson(e.value)};
     await sp.setString('washatvPricing', jsonEncode(map));
-    _showToast('Imehifadhiwa — fungua upya app ya mtumiaji kuona mabadiliko.', _ToastType.success);
+
+    if (_adminApiKey.isEmpty) {
+      _showToast('Imehifadhiwa local pekee. Weka WASHA_ADMIN_API_KEY ili kusukuma kwenye server.', _ToastType.warning);
+      return;
+    }
+
+    try {
+      for (final e in _pricing.entries) {
+        final p = e.value;
+        final res = await http
+            .put(
+              Uri.parse('$_apiBase/api/v1/admin/pricing/${e.key}'),
+              headers: _adminHeaders(),
+              body: jsonEncode({
+                'name': p.name,
+                'price': p.price,
+                'original_price': p.price,
+                'discount': 0,
+                'duration_days': p.duration,
+                'enabled': p.enabled,
+              }),
+            )
+            .timeout(const Duration(seconds: 12));
+        if (res.statusCode < 200 || res.statusCode >= 300) {
+          throw Exception('pricing ${e.key}: ${res.statusCode}');
+        }
+      }
+      _showToast('Bei zimehifadhiwa kwenye server. User app itajirefresh soon.', _ToastType.success);
+    } catch (_) {
+      _showToast('Imeshindikana kuhifadhi bei kwenye server.', _ToastType.error);
+    }
   }
 
   void _resetPricing() {
@@ -2246,6 +3299,15 @@ class _AdminScaffoldState extends State<_AdminScaffold> {
   }
 
   Widget _dailyRegChart() {
+    const zeroSpots = <FlSpot>[
+      FlSpot(0, 0),
+      FlSpot(1, 0),
+      FlSpot(2, 0),
+      FlSpot(3, 0),
+      FlSpot(4, 0),
+      FlSpot(5, 0),
+      FlSpot(6, 0),
+    ];
     return LineChart(
       LineChartData(
         gridData: const FlGridData(show: false),
@@ -2253,7 +3315,7 @@ class _AdminScaffoldState extends State<_AdminScaffold> {
         titlesData: const FlTitlesData(show: false),
         lineBarsData: [
           LineChartBarData(
-            spots: const [FlSpot(0, 12), FlSpot(1, 19), FlSpot(2, 15), FlSpot(3, 25), FlSpot(4, 22), FlSpot(5, 30), FlSpot(6, 18)],
+            spots: zeroSpots,
             isCurved: true,
             color: AdminColors.accentPrimary,
             barWidth: 2,
@@ -2270,10 +3332,10 @@ class _AdminScaffoldState extends State<_AdminScaffold> {
         sectionsSpace: 2,
         centerSpaceRadius: 44,
         sections: [
-          PieChartSectionData(value: 45, color: const Color(0xFFF59E0B), title: 'Gold', radius: 48, titleStyle: const TextStyle(fontSize: 10, color: Colors.white)),
-          PieChartSectionData(value: 20, color: const Color(0xFF8B5CF6), title: 'Plat', radius: 48, titleStyle: const TextStyle(fontSize: 10, color: Colors.white)),
-          PieChartSectionData(value: 15, color: const Color(0xFF3B82F6), title: 'Week', radius: 48, titleStyle: const TextStyle(fontSize: 10, color: Colors.white)),
-          PieChartSectionData(value: 20, color: const Color(0xFF6B7280), title: 'Free', radius: 48, titleStyle: const TextStyle(fontSize: 10, color: Colors.white)),
+          PieChartSectionData(value: 0, color: const Color(0xFFF59E0B), title: 'Gold', radius: 48, titleStyle: const TextStyle(fontSize: 10, color: Colors.white)),
+          PieChartSectionData(value: 0, color: const Color(0xFF8B5CF6), title: 'Plat', radius: 48, titleStyle: const TextStyle(fontSize: 10, color: Colors.white)),
+          PieChartSectionData(value: 0, color: const Color(0xFF3B82F6), title: 'Week', radius: 48, titleStyle: const TextStyle(fontSize: 10, color: Colors.white)),
+          PieChartSectionData(value: 0, color: const Color(0xFF6B7280), title: 'Free', radius: 48, titleStyle: const TextStyle(fontSize: 10, color: Colors.white)),
         ],
       ),
     );
@@ -2340,8 +3402,31 @@ class _AdminScaffoldState extends State<_AdminScaffold> {
                   _settings.whatsappNumber = wa;
                   final sp = await SharedPreferences.getInstance();
                   await sp.setString(StorageService.supportWhatsappPrefsKey, wa);
+                  if (_adminApiKey.isNotEmpty) {
+                    try {
+                      final res = await http
+                          .patch(
+                            Uri.parse('$_apiBase/api/v1/admin/settings'),
+                            headers: _adminHeaders(),
+                            body: jsonEncode({
+                              'site_name': _settingsSiteName.text.trim(),
+                              'subscription_enabled': _settings.subscriptionEnabled,
+                              'maintenance_mode': _settings.maintenanceMode,
+                              'whatsapp_number': wa,
+                            }),
+                          )
+                          .timeout(const Duration(seconds: 12));
+                      if (res.statusCode < 200 || res.statusCode >= 300) {
+                        throw Exception('settings ${res.statusCode}');
+                      }
+                    } catch (_) {
+                      if (!mounted) return;
+                      _showToast('Imeshindikana kuhifadhi mipangilio kwenye server.', _ToastType.error);
+                      return;
+                    }
+                  }
                   if (!mounted) return;
-                  _showToast('Imehifadhiwa — fungua upya app ya mtumiaji kuona mabadiliko.', _ToastType.success);
+                  _showToast('Mabadiliko yamehifadhiwa.', _ToastType.success);
                 },
               ),
             ],
@@ -2490,24 +3575,44 @@ class _AdminScaffoldState extends State<_AdminScaffold> {
         actions: [
           TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
           FilledButton(
-            onPressed: () {
+            onPressed: () async {
               if (title.text.trim().isEmpty || msg.text.trim().isEmpty) {
                 _showToast('Fill all fields', _ToastType.error);
                 return;
               }
+              final newNotification = AdminNotification(
+                id: 'NOT-${_notifications.length + 1}',
+                title: title.text.trim(),
+                message: msg.text.trim(),
+                type: 'info',
+                read: false,
+                createdAt: DateTime.now(),
+              );
               setState(() {
-                _notifications.insert(
-                  0,
-                  AdminNotification(
-                    id: 'NOT-${_notifications.length + 1}',
-                    title: title.text.trim(),
-                    message: msg.text.trim(),
-                    type: 'info',
-                    read: false,
-                    createdAt: DateTime.now(),
-                  ),
-                );
+                _notifications.insert(0, newNotification);
               });
+              if (_adminApiKey.isNotEmpty) {
+                try {
+                  final res = await http
+                      .post(
+                        Uri.parse('$_apiBase/api/v1/admin/notifications'),
+                        headers: _adminHeaders(),
+                        body: jsonEncode({
+                          'id': newNotification.id,
+                          'title': newNotification.title,
+                          'message': newNotification.message,
+                          'type': newNotification.type,
+                          'read': false,
+                        }),
+                      )
+                      .timeout(const Duration(seconds: 12));
+                  if (res.statusCode < 200 || res.statusCode >= 300) {
+                    throw Exception('notification sync ${res.statusCode}');
+                  }
+                } catch (_) {
+                  _showToast('Notification local only, server sync failed.', _ToastType.warning);
+                }
+              }
               Navigator.pop(ctx);
               _showToast('Sent!', _ToastType.success);
             },

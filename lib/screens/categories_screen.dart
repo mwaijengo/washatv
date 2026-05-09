@@ -1,6 +1,5 @@
 import 'package:flutter/material.dart';
 
-import '../app.dart';
 import '../constants/app_channel_categories.dart';
 import '../models/channel.dart';
 import '../widgets/channel_card.dart';
@@ -12,11 +11,13 @@ class CategoriesScreen extends StatefulWidget {
     required this.premium,
     required this.onOpenPlayer,
     required this.onOpenSubscription,
+    required this.channels,
   });
 
   final bool premium;
   final ValueChanged<Channel> onOpenPlayer;
   final VoidCallback onOpenSubscription;
+  final List<Channel> channels;
 
   @override
   State<CategoriesScreen> createState() => _CategoriesScreenState();
@@ -61,7 +62,7 @@ class _CategoriesScreenState extends State<CategoriesScreen> {
               gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(crossAxisCount: 2, crossAxisSpacing: 12, mainAxisSpacing: 12),
               itemBuilder: (_, i) {
                 final c = visibleCategories[i];
-                final count = allChannels.where((e) => e.category == c).length;
+                final count = widget.channels.where((e) => e.category == c).length;
                 return GestureDetector(
                   onTap: () => setState(() {
                     selected = c;
@@ -91,7 +92,7 @@ class _CategoriesScreenState extends State<CategoriesScreen> {
       );
     }
     final effectiveCategory = selectedCategory == 'All' ? selected : selectedCategory;
-    final list = allChannels.where((e) {
+    final list = widget.channels.where((e) {
       final byCategory = e.category == effectiveCategory;
       final byQuery = matchesQuery(e.name) || matchesQuery(e.category);
       return byCategory && byQuery;

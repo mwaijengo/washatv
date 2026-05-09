@@ -1,8 +1,11 @@
+import 'dotenv/config';
 import { loadEnv } from './config/env.js';
 import { buildApp } from './app.js';
+import { applyMigrations } from './db/applyMigrations.js';
 
 async function main() {
   const env = loadEnv();
+  await applyMigrations(env.DATABASE_URL);
   const { app } = await buildApp(env);
   await app.listen({ port: env.PORT, host: '0.0.0.0' });
   app.log.info(`washa-api listening on ${env.PORT}`);

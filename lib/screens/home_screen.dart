@@ -1,11 +1,25 @@
 import 'package:flutter/material.dart';
 
-import '../app.dart';
 import '../constants/app_channel_categories.dart';
 import '../models/channel.dart';
+import '../models/hero_slide.dart';
 import '../theme/app_theme.dart';
 import '../widgets/channel_card.dart';
 import '../widgets/glass_panel.dart';
+
+/// Busts cached images when the bootstrap `version` changes but the image URL string is unchanged.
+String carouselImageUrlWithCacheEpoch(String imageUrl, int configVersion) {
+  if (configVersion <= 0 || imageUrl.trim().isEmpty) return imageUrl;
+  try {
+    final u = Uri.parse(imageUrl.trim());
+    final q = Map<String, String>.from(u.queryParameters);
+    q['washa_cv'] = '$configVersion';
+    return u.replace(queryParameters: q).toString();
+  } catch (_) {
+    final sep = imageUrl.contains('?') ? '&' : '?';
+    return '$imageUrl${sep}washa_cv=$configVersion';
+  }
+}
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({
@@ -15,6 +29,10 @@ class HomeScreen extends StatefulWidget {
     required this.onOpenPlayer,
     required this.onOpenSubscription,
     required this.premium,
+    required this.channels,
+    required this.slides,
+    /// From bootstrap `version` — carousel images reload after admin publishes changes.
+    this.carouselConfigVersion = 0,
     this.displayName,
   });
 
@@ -23,6 +41,9 @@ class HomeScreen extends StatefulWidget {
   final ValueChanged<Channel> onOpenPlayer;
   final VoidCallback onOpenSubscription;
   final bool premium;
+  final List<Channel> channels;
+  final List<HeroSlide> slides;
+  final int carouselConfigVersion;
   final String? displayName;
 
   @override
@@ -45,9 +66,11 @@ class _HomeScreenState extends State<HomeScreen> {
       return byCategory && byQuery;
     }
 
-    final free = allChannels.where((e) => !e.premium && matches(e)).toList();
-    final premiumChannels = allChannels.where((e) => e.premium && matches(e)).toList();
-    final slide = heroSlides[widget.carouselIndex];
+    final free = widget.channels.where((e) => !e.premium && matches(e)).toList();
+    final premiumChannels = widget.channels.where((e) => e.premium && matches(e)).toList();
+    final slideCount = widget.slides.length;
+    final HeroSlide? slide =
+        slideCount == 0 ? null : widget.slides[widget.carouselIndex.clamp(0, slideCount - 1)];
     return SingleChildScrollView(
       padding: const EdgeInsets.fromLTRB(16, 18, 16, 120),
       child: Column(
@@ -55,72 +78,94 @@ class _HomeScreenState extends State<HomeScreen> {
         children: [
           _header(context),
           const SizedBox(height: 22),
-          ClipRRect(
-            borderRadius: BorderRadius.circular(32),
-            child: SizedBox(
-              height: 420,
-              child: Stack(
-                fit: StackFit.expand,
-                children: [
-                  AnimatedSwitcher(
-                    duration: const Duration(milliseconds: 700),
-                    child: Image.network(
-                      slide.imageUrl,
-                      fit: BoxFit.cover,
-                      key: ValueKey(slide.imageUrl),
-                      errorBuilder: (_, __, ___) => Container(
-                        color: const Color(0xFF0F172A),
-                        alignment: Alignment.center,
-                        child: const Icon(Icons.broken_image_outlined, size: 40, color: Color(0xFF6B7280)),
+          if (slide != null) ...[
+            ClipRRect(
+              borderRadius: BorderRadius.circular(32),
+              child: SizedBox(
+                height: 420,
+                child: Stack(
+                  fit: StackFit.expand,
+                  children: [
+                    AnimatedSwitcher(
+                      duration: const Duration(milliseconds: 700),
+                      child: Image.network(
+                        carouselImageUrlWithCacheEpoch(slide.imageUrl, widget.carouselConfigVersion),
+                        fit: BoxFit.cover,
+                        key: ValueKey('${slide.id}|${widget.carouselConfigVersion}|${slide.imageUrl}'),
+                        errorBuilder: (_, __, ___) => Container(
+                          color: const Color(0xFF0F172A),
+                          alignment: Alignment.center,
+                          child: const Icon(Icons.broken_image_outlined, size: 40, color: Color(0xFF6B7280)),
+                        ),
                       ),
                     ),
-                  ),
-                  Container(
-                    decoration: const BoxDecoration(
-                      gradient: LinearGradient(
-                        begin: Alignment.bottomCenter,
-                        end: Alignment.topCenter,
-                        colors: [Color(0xDD000000), Color(0x66000000), Colors.transparent],
+                    Container(
+                      decoration: const BoxDecoration(
+                        gradient: LinearGradient(
+                          begin: Alignment.bottomCenter,
+                          end: Alignment.topCenter,
+                          colors: [Color(0xDD000000), Color(0x66000000), Colors.transparent],
+                        ),
                       ),
                     ),
-                  ),
-                  Positioned(
-                    left: 22,
-                    right: 22,
-                    bottom: 24,
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(slide.title, style: const TextStyle(fontSize: 28, fontWeight: FontWeight.w800)),
-                        Text(slide.subtitle, style: const TextStyle(color: Color(0xFFE5E7EB))),
-                      ],
+                    Positioned(
+                      left: 22,
+                      right: 22,
+                      bottom: 24,
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(slide.title, style: const TextStyle(fontSize: 28, fontWeight: FontWeight.w800)),
+                          Text(slide.subtitle, style: const TextStyle(color: Color(0xFFE5E7EB))),
+                        ],
+                      ),
                     ),
-                  ),
-                ],
+                  ],
+                ),
               ),
             ),
-          ),
-          const SizedBox(height: 12),
-          Row(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: List.generate(heroSlides.length, (i) {
-              final active = i == widget.carouselIndex;
-              return GestureDetector(
-                onTap: () => widget.onCarouselDot(i),
-                child: AnimatedContainer(
-                  duration: const Duration(milliseconds: 250),
-                  margin: const EdgeInsets.symmetric(horizontal: 4),
-                  width: active ? 28 : 10,
-                  height: 10,
-                  decoration: BoxDecoration(
-                    color: active ? Colors.white : Colors.white30,
-                    borderRadius: BorderRadius.circular(12),
+            const SizedBox(height: 12),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: List.generate(slideCount, (i) {
+                final active = i == widget.carouselIndex;
+                return GestureDetector(
+                  onTap: () => widget.onCarouselDot(i),
+                  child: AnimatedContainer(
+                    duration: const Duration(milliseconds: 250),
+                    margin: const EdgeInsets.symmetric(horizontal: 4),
+                    width: active ? 28 : 10,
+                    height: 10,
+                    decoration: BoxDecoration(
+                      color: active ? Colors.white : Colors.white30,
+                      borderRadius: BorderRadius.circular(12),
+                    ),
                   ),
+                );
+              }),
+            ),
+            const SizedBox(height: 18),
+          ] else ...[
+            GlassPanel(
+              radius: 22,
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+                child: Row(
+                  children: [
+                    Icon(Icons.slideshow_rounded, color: AppTheme.indigo.withValues(alpha: 0.9)),
+                    const SizedBox(width: 12),
+                    const Expanded(
+                      child: Text(
+                        'Hakuna matangazo ya slides kwa sasa.',
+                        style: TextStyle(fontSize: 13, height: 1.35, color: Color(0xFFCBD5E1)),
+                      ),
+                    ),
+                  ],
                 ),
-              );
-            }),
-          ),
-          const SizedBox(height: 18),
+              ),
+            ),
+            const SizedBox(height: 18),
+          ],
           _searchAndFilter(),
           const SizedBox(height: 18),
           const Text('Free Channels', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w700)),
@@ -153,7 +198,7 @@ class _HomeScreenState extends State<HomeScreen> {
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
                         Text('Fungua Channel Zote', style: TextStyle(fontWeight: FontWeight.w800, fontSize: 20)),
-                        Text('30+ premium channels · TSh 25,000', style: TextStyle(color: Color(0xFF9CA3AF), fontSize: 12)),
+                        Text('Zaidi ya channel 30 za premium', style: TextStyle(color: Color(0xFF9CA3AF), fontSize: 12, fontWeight: FontWeight.w500)),
                       ],
                     ),
                   ),

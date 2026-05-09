@@ -17,10 +17,23 @@ export async function buildApp(env: Env) {
   });
 
   await app.register(sensible);
+  /** Allow Flutter web / admin from any localhost port (dev) even when prod lists fixed origins */
+  const localhostOriginPatterns = [
+    /^https?:\/\/localhost(?::\d+)?$/i,
+    /^https?:\/\/127\.0\.0\.1(?::\d+)?$/i,
+  ];
+
   await app.register(cors, {
-    origin: env.CORS_ORIGIN === '*' ? true : env.CORS_ORIGIN.split(',').map((s) => s.trim()),
+    origin:
+      env.CORS_ORIGIN === '*'
+        ? true
+        : [
+            ...env.CORS_ORIGIN.split(',').map((s) => s.trim()).filter(Boolean),
+            ...localhostOriginPatterns,
+          ],
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization', 'X-Admin-Key', 'If-None-Match'],
+    // Omit allowedHeaders: @fastify/cors defaults to echoing Access-Control-Request-Headers.
+    // A fixed short list breaks Flutter web (Chrome preflight sends Accept / others).
   });
   await app.register(jwt, { secret: env.JWT_SECRET });
   await registerRoutes(app, { pool, sse, env });

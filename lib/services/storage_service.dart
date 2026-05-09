@@ -51,4 +51,9 @@ class StorageService {
     final p = await SharedPreferences.getInstance();
     return p.getString(supportWhatsappPrefsKey) ?? '';
   }
+
+  Future<void> setSupportWhatsapp(String value) async {
+    final p = await SharedPreferences.getInstance();
+    await p.setString(supportWhatsappPrefsKey, value);
+  }
 }

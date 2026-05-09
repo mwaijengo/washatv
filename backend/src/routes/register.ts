@@ -25,9 +25,10 @@ export async function registerRoutes(
     const since = Number((req.query as { since?: string }).since ?? 0);
     const version = await getConfigVersion(pool);
     if (since > 0 && since >= version) {
+      reply.header('Cache-Control', 'private, no-store');
       return reply.code(304).send();
     }
-    const [settings, plans, channels] = await Promise.all([
+    const [settings, plans, channels, slides] = await Promise.all([
       pool.query(`SELECT site_name, subscription_enabled, maintenance_mode, whatsapp_number, updated_at FROM app_settings WHERE id = 1`),
       pool.query(
         `SELECT plan_key, name, original_price, price, discount, duration_days, features, popular, enabled, color_key, updated_at
@@ -37,12 +38,18 @@ export async function registerRoutes(
         `SELECT id, name, category, premium, live, status, thumbnail, viewers, rating, drm, sort_order, updated_at
          FROM channels WHERE status = 'active' ORDER BY sort_order, name`,
       ),
+      pool.query(
+        `SELECT id, title, subtitle, image_url, premium, active, sort_order, updated_at
+         FROM slides WHERE active = true ORDER BY sort_order, id`,
+      ),
     ]);
+    reply.header('Cache-Control', 'private, no-store');
     return {
       version,
       settings: settings.rows[0],
       plans: plans.rows,
       channels: channels.rows,
+      slides: slides.rows,
     };
   });
 
@@ -50,13 +57,13 @@ export async function registerRoutes(
     const since = Number((req.query as { since?: string }).since ?? 0);
     const version = await getConfigVersion(pool);
     if (since > 0 && since >= version) {
-      reply.header('Cache-Control', 'public, max-age=15');
+      reply.header('Cache-Control', 'private, no-store');
       return reply.code(304).send();
     }
     const r = await pool.query(
       `SELECT site_name, subscription_enabled, maintenance_mode, whatsapp_number, updated_at FROM app_settings WHERE id = 1`,
     );
-    reply.header('Cache-Control', 'public, max-age=15');
+    reply.header('Cache-Control', 'private, no-store');
     reply.header('ETag', `"${version}"`);
     return { version, settings: r.rows[0] };
   });
@@ -77,6 +84,109 @@ export async function registerRoutes(
     );
     const v = await getConfigVersion(pool);
     return { version: v, channels: r.rows };
+  });
+
+  app.post<{ Body: { name?: string; phone?: string; device_id?: string } }>(
+    '/api/v1/public/users/sync',
+    async (req, reply) => {
+      const b = req.body ?? {};
+      const name = (b.name ?? '').trim();
+      const phone = (b.phone ?? '').trim();
+      const deviceId = (b.device_id ?? '').trim();
+      if (!deviceId) return reply.code(400).send({ error: 'device_id is required' });
+
+      const userId = `USR-${nanoid(10)}`;
+      const row = await pool.query(
+        `INSERT INTO users (id, name, phone, device_id, status, subscription, created_at)
+         VALUES ($1, $2, $3, $4, 'active', 'free', now())
+         ON CONFLICT (device_id) DO UPDATE SET
+           name = CASE WHEN EXCLUDED.name <> '' THEN EXCLUDED.name ELSE users.name END,
+           phone = CASE WHEN EXCLUDED.phone <> '' THEN EXCLUDED.phone ELSE users.phone END
+         RETURNING id, name, phone, device_id, status, subscription, admin_access_until, created_at`,
+        [userId, name || 'Viewer', phone || 'N/A', deviceId],
+      );
+      return { ok: true, user: row.rows[0] };
+    },
+  );
+
+  app.post<{
+    Body: {
+      device_id?: string;
+      user_name?: string;
+      phone?: string;
+      amount?: number;
+      method?: string;
+      plan_key?: string;
+      provider?: string;
+      provider_ref?: string;
+    };
+  }>('/api/v1/public/transactions/complete', async (req, reply) => {
+    const b = req.body ?? {};
+    const deviceId = (b.device_id ?? '').trim();
+    const amount = Number(b.amount ?? 0);
+    if (!deviceId || amount <= 0) {
+      return reply.code(400).send({ error: 'device_id and positive amount are required' });
+    }
+
+    const name = (b.user_name ?? '').trim();
+    const phone = (b.phone ?? '').trim();
+    const method = (b.method ?? 'M-Pesa').trim() || 'M-Pesa';
+    const planKey = (b.plan_key ?? '').trim();
+    const provider = (b.provider ?? 'mobile').trim() || 'mobile';
+    const providerRef = (b.provider_ref ?? `TX-${Date.now()}-${nanoid(6)}`).trim();
+
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      const upsertUser = await client.query(
+        `INSERT INTO users (id, name, phone, device_id, status, subscription, created_at)
+         VALUES ($1, $2, $3, $4, 'active', 'free', now())
+         ON CONFLICT (device_id) DO UPDATE SET
+           name = CASE WHEN EXCLUDED.name <> '' THEN EXCLUDED.name ELSE users.name END,
+           phone = CASE WHEN EXCLUDED.phone <> '' THEN EXCLUDED.phone ELSE users.phone END
+         RETURNING id`,
+        [`USR-${nanoid(10)}`, name || 'Viewer', phone || 'N/A', deviceId],
+      );
+      const userId = String(upsertUser.rows[0].id);
+
+      const txId = `TRX-${nanoid(10)}`;
+      await client.query(
+        `INSERT INTO transactions
+           (id, user_id, phone, amount, currency, method, provider, provider_ref, plan_key, status, completed_at, metadata, created_at, updated_at)
+         VALUES
+           ($1,$2,$3,$4,'TZS',$5,$6,$7,$8,'completed',now(),$9::jsonb,now(),now())
+         ON CONFLICT (provider, provider_ref) DO UPDATE SET
+           user_id = EXCLUDED.user_id,
+           phone = EXCLUDED.phone,
+           amount = EXCLUDED.amount,
+           method = EXCLUDED.method,
+           plan_key = EXCLUDED.plan_key,
+           status = 'completed',
+           completed_at = now(),
+           metadata = EXCLUDED.metadata,
+           updated_at = now()`,
+        [
+          txId,
+          userId,
+          phone || null,
+          amount,
+          method,
+          provider,
+          providerRef,
+          planKey || null,
+          JSON.stringify({ source: 'viewer-app' }),
+        ],
+      );
+
+      await client.query(`UPDATE users SET subscription = 'premium' WHERE id = $1`, [userId]);
+      await client.query('COMMIT');
+      return { ok: true, transaction_ref: providerRef };
+    } catch (e) {
+      await client.query('ROLLBACK');
+      throw e;
+    } finally {
+      client.release();
+    }
   });
 
   /** SSE: clients reconnect automatically; receive config version pushes after admin writes */
@@ -406,8 +516,158 @@ export async function registerRoutes(
     return { payments: r.rows };
   });
 
+  app.get('/api/v1/admin/transactions', { preHandler: adminPre }, async () => {
+    const r = await pool.query(
+      `SELECT t.*, COALESCE(u.name, 'Viewer') AS user_name
+       FROM transactions t
+       LEFT JOIN users u ON u.id = t.user_id
+       ORDER BY t.created_at DESC
+       LIMIT 500`,
+    );
+    return { transactions: r.rows };
+  });
+
+  app.get('/api/v1/admin/revenue/summary', { preHandler: adminPre }, async () => {
+    const r = await pool.query(
+      `SELECT
+         COALESCE(SUM(amount) FILTER (WHERE status = 'completed'), 0) AS total_revenue,
+         COUNT(*) FILTER (WHERE status = 'completed') AS completed_transactions
+       FROM transactions`,
+    );
+    return {
+      revenue: Number(r.rows[0]?.total_revenue ?? 0),
+      completed_transactions: Number(r.rows[0]?.completed_transactions ?? 0),
+      currency: 'TZS',
+    };
+  });
+
   app.get('/api/v1/admin/notifications', { preHandler: adminPre }, async () => {
     const r = await pool.query(`SELECT * FROM notifications ORDER BY created_at DESC LIMIT 100`);
     return { notifications: r.rows };
+  });
+
+  app.post<{ Body: Record<string, unknown> }>('/api/v1/admin/notifications', { preHandler: adminPre }, async (req, reply) => {
+    const b = req.body ?? {};
+    const title = String(b.title ?? '').trim();
+    const message = String(b.message ?? '').trim();
+    if (!title || !message) return reply.code(400).send({ error: 'title and message required' });
+    const id = (b.id as string) ?? `NOT-${nanoid(10)}`;
+    const type = String(b.type ?? 'info');
+    const read = Boolean(b.read ?? false);
+    await pool.query(
+      `INSERT INTO notifications (id, title, message, type, read, created_at)
+       VALUES ($1,$2,$3,$4,$5, now())`,
+      [id, title, message, type, read],
+    );
+    const row = await pool.query(`SELECT * FROM notifications WHERE id = $1`, [id]);
+    return reply.code(201).send({ notification: row.rows[0] });
+  });
+
+  app.get('/api/v1/admin/slides', { preHandler: adminPre }, async () => {
+    const r = await pool.query(
+      `SELECT id, title, subtitle, image_url, premium, active, sort_order, updated_at
+       FROM slides ORDER BY sort_order, id`,
+    );
+    return { slides: r.rows };
+  });
+
+  app.post<{ Body: Record<string, unknown> }>('/api/v1/admin/slides', { preHandler: adminPre }, async (req, reply) => {
+    const b = req.body ?? {};
+    const title = String(b.title ?? '').trim();
+    const imageUrl = String(b.image_url ?? '').trim();
+    if (!title || !imageUrl) return reply.code(400).send({ error: 'title and image_url required' });
+    const id = (b.id as string) ?? `SL-${nanoid(8)}`;
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query(
+        `INSERT INTO slides (id, title, subtitle, image_url, premium, active, sort_order, updated_at)
+         VALUES ($1,$2,$3,$4,$5,$6,$7, now())`,
+        [
+          id,
+          title,
+          String(b.subtitle ?? ''),
+          imageUrl,
+          Boolean(b.premium ?? false),
+          Boolean(b.active ?? true),
+          Number(b.sort_order ?? 0),
+        ],
+      );
+      const v = await bumpConfigVersion(client);
+      await client.query('COMMIT');
+      sse.notifyConfigVersion(v);
+      const row = await pool.query(`SELECT * FROM slides WHERE id = $1`, [id]);
+      return reply.code(201).send({ ok: true, version: v, slide: row.rows[0] });
+    } catch (e) {
+      await client.query('ROLLBACK');
+      throw e;
+    } finally {
+      client.release();
+    }
+  });
+
+  app.patch<{ Params: { id: string }; Body: Record<string, unknown> }>(
+    '/api/v1/admin/slides/:id',
+    { preHandler: adminPre },
+    async (req) => {
+      const id = req.params.id;
+      const b = req.body ?? {};
+      const client = await pool.connect();
+      try {
+        await client.query('BEGIN');
+        const sets: string[] = [];
+        const vals: unknown[] = [];
+        let i = 1;
+        const map: Record<string, string> = {
+          title: 'title',
+          subtitle: 'subtitle',
+          image_url: 'image_url',
+          premium: 'premium',
+          active: 'active',
+          sort_order: 'sort_order',
+        };
+        for (const [k, col] of Object.entries(map)) {
+          if (b[k] !== undefined) {
+            sets.push(`${col} = $${i++}`);
+            vals.push(b[k]);
+          }
+        }
+        if (!sets.length) {
+          await client.query('COMMIT');
+          const row = await pool.query(`SELECT * FROM slides WHERE id = $1`, [id]);
+          return { ok: true, slide: row.rows[0] };
+        }
+        sets.push(`updated_at = now()`);
+        vals.push(id);
+        await client.query(`UPDATE slides SET ${sets.join(', ')} WHERE id = $${i}`, vals);
+        const v = await bumpConfigVersion(client);
+        await client.query('COMMIT');
+        sse.notifyConfigVersion(v);
+        const row = await pool.query(`SELECT * FROM slides WHERE id = $1`, [id]);
+        return { ok: true, version: v, slide: row.rows[0] };
+      } catch (e) {
+        await client.query('ROLLBACK');
+        throw e;
+      } finally {
+        client.release();
+      }
+    },
+  );
+
+  app.delete<{ Params: { id: string } }>('/api/v1/admin/slides/:id', { preHandler: adminPre }, async (req) => {
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query(`DELETE FROM slides WHERE id = $1`, [req.params.id]);
+      const v = await bumpConfigVersion(client);
+      await client.query('COMMIT');
+      sse.notifyConfigVersion(v);
+      return { ok: true, version: v };
+    } catch (e) {
+      await client.query('ROLLBACK');
+      throw e;
+    } finally {
+      client.release();
+    }
   });
 }

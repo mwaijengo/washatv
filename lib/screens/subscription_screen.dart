@@ -492,18 +492,19 @@ class _TutorialPlayerModal extends StatefulWidget {
 class _TutorialPlayerModalState extends State<_TutorialPlayerModal> {
   final AudioPlayer _audioPlayer = AudioPlayer();
   bool _isPlaying = false;
+  bool _isLoadingAudio = false;
   int _priceSelection = 0;
   Timer? _priceTimer;
   Timer? _typingTimer;
   Timer? _step5Timer;
-  Timer? _autoAdvanceTimer;
+  StreamSubscription<PlayerState>? _playerStateSub;
   int _phoneChars = 0;
   int _nameChars = 0;
   bool _payPressed = false;
   int _pinFilled = 0;
   bool _sendPressed = false;
   bool _step5Success = false;
-  bool _autoProgressScheduled = false;
+  int? _loadedStep;
 
   static const List<String> _titles = <String>[
     'Karibu Washa Tv',
@@ -516,28 +517,34 @@ class _TutorialPlayerModalState extends State<_TutorialPlayerModal> {
   @override
   void initState() {
     super.initState();
-    _audioPlayer.setSpeed(1.15);
-    _audioPlayer.playerStateStream.listen((state) {
+    _playerStateSub = _audioPlayer.playerStateStream.listen((state) {
       if (!mounted) return;
       final done = state.processingState == ProcessingState.completed;
-      if (done || !state.playing) {
-        setState(() => _isPlaying = false);
+      final isPlaying = state.playing && !done;
+      if (_isPlaying != isPlaying) {
+        setState(() => _isPlaying = isPlaying);
       }
       if (done) {
-        _scheduleAutoProgress();
+        _audioPlayer.seek(Duration.zero);
+        setState(() => _isPlaying = false);
       }
     });
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      _safePlayStepAudio();
+      _safePlayStepAudio(forceRestart: true);
     });
     _startPriceAnimation();
   }
 
-  Future<void> _safePlayStepAudio() async {
+  Future<void> _safePlayStepAudio({bool forceRestart = false}) async {
     try {
-      await _playStepAudio();
+      await _playStepAudio(forceRestart: forceRestart);
     } catch (_) {
-      if (mounted) setState(() => _isPlaying = false);
+      if (mounted) {
+        setState(() {
+          _isPlaying = false;
+          _isLoadingAudio = false;
+        });
+      }
     }
   }
 
@@ -545,9 +552,7 @@ class _TutorialPlayerModalState extends State<_TutorialPlayerModal> {
   void didUpdateWidget(covariant _TutorialPlayerModal oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.step != widget.step) {
-      _autoAdvanceTimer?.cancel();
-      _autoProgressScheduled = false;
-      _safePlayStepAudio();
+      _safePlayStepAudio(forceRestart: true);
       if (widget.step == 3) {
         _startPriceAnimation();
       } else {
@@ -566,10 +571,7 @@ class _TutorialPlayerModalState extends State<_TutorialPlayerModal> {
     }
   }
 
-  Future<void> _playStepAudio() async {
-    await _audioPlayer.stop();
-    if (!mounted) return;
-    setState(() => _isPlaying = false);
+  Future<void> _playStepAudio({bool forceRestart = false}) async {
     const audioByStep = <int, String>{
       1: 'assets/audio/1.Salamu.mp3',
       2: 'assets/audio/2.dhumuni.mp3',
@@ -579,10 +581,25 @@ class _TutorialPlayerModalState extends State<_TutorialPlayerModal> {
     };
     final asset = audioByStep[widget.step];
     if (asset == null) return;
-    await _audioPlayer.setAsset(asset);
+    if (mounted) {
+      setState(() {
+        _isLoadingAudio = true;
+        _isPlaying = false;
+      });
+    }
+    if (_loadedStep != widget.step || forceRestart) {
+      await _audioPlayer.stop();
+      await _audioPlayer.setAsset(asset);
+      _loadedStep = widget.step;
+    } else {
+      await _audioPlayer.seek(Duration.zero);
+    }
     await _audioPlayer.play();
     if (!mounted) return;
-    setState(() => _isPlaying = true);
+    setState(() {
+      _isPlaying = true;
+      _isLoadingAudio = false;
+    });
   }
 
   @override
@@ -590,23 +607,9 @@ class _TutorialPlayerModalState extends State<_TutorialPlayerModal> {
     _priceTimer?.cancel();
     _typingTimer?.cancel();
     _step5Timer?.cancel();
-    _autoAdvanceTimer?.cancel();
+    _playerStateSub?.cancel();
     _audioPlayer.dispose();
     super.dispose();
-  }
-
-  void _scheduleAutoProgress() {
-    if (_autoProgressScheduled) return;
-    _autoProgressScheduled = true;
-    _autoAdvanceTimer?.cancel();
-    _autoAdvanceTimer = Timer(const Duration(milliseconds: 900), () {
-      if (!mounted) return;
-      if (widget.step < 5) {
-        widget.onNext();
-      } else {
-        widget.onFinish();
-      }
-    });
   }
 
   void _startPriceAnimation() {
@@ -742,18 +745,56 @@ class _TutorialPlayerModalState extends State<_TutorialPlayerModal> {
   Widget _step1Brand() {
     return Container(
       margin: const EdgeInsets.only(bottom: 12),
-      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+      width: double.infinity,
+      padding: const EdgeInsets.all(14),
       decoration: BoxDecoration(
-        color: const Color(0x331E293B),
-        borderRadius: BorderRadius.circular(14),
+        gradient: const LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          colors: [Color(0x331E293B), Color(0x22111B2C)],
+        ),
+        borderRadius: BorderRadius.circular(16),
         border: Border.all(color: const Color(0x26FFFFFF)),
       ),
-      child: const Row(
-        mainAxisSize: MainAxisSize.min,
+      child: Column(
         children: [
-          Icon(Icons.workspace_premium, color: AppTheme.amber, size: 20),
-          SizedBox(width: 8),
-          Text('WASHA TV', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w900, letterSpacing: 0.4)),
+          Container(
+            width: 200,
+            height: 200,
+            clipBehavior: Clip.antiAlias,
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(16),
+              border: Border.all(color: const Color(0x33FFFFFF)),
+            ),
+            child: Stack(
+              fit: StackFit.expand,
+              children: [
+                Image.asset('assets/images/tutorial_home.png', fit: BoxFit.cover),
+                Container(color: const Color(0x66000000)),
+                const Center(
+                  child: Text(
+                    'Punguzo la hadi\nasilimia 65',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(
+                      fontSize: 22,
+                      height: 1.15,
+                      fontWeight: FontWeight.w900,
+                      color: Colors.white,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 10),
+          const Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Icon(Icons.workspace_premium, color: AppTheme.amber, size: 20),
+              SizedBox(width: 8),
+              Text('WASHA TV', style: TextStyle(fontSize: 15, fontWeight: FontWeight.w900, letterSpacing: 0.4)),
+            ],
+          ),
         ],
       ),
     );
@@ -842,19 +883,41 @@ class _TutorialPlayerModalState extends State<_TutorialPlayerModal> {
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
           FilledButton.tonalIcon(
-            onPressed: _safePlayStepAudio,
+            onPressed: _isLoadingAudio
+                ? null
+                : () async {
+                    if (_isPlaying) {
+                      await _audioPlayer.pause();
+                      if (!mounted) return;
+                      setState(() => _isPlaying = false);
+                      return;
+                    }
+                    if (_loadedStep == widget.step) {
+                      await _audioPlayer.play();
+                      if (!mounted) return;
+                      setState(() => _isPlaying = true);
+                      return;
+                    }
+                    await _safePlayStepAudio(forceRestart: true);
+                  },
             style: FilledButton.styleFrom(
               backgroundColor: const Color(0x406366F1),
               foregroundColor: const Color(0xFFA5B4FC),
               padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
               shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
             ),
-            icon: Icon(_isPlaying ? Icons.graphic_eq_rounded : Icons.volume_up_rounded),
-            label: const Text('Spika'),
+            icon: Icon(
+              _isLoadingAudio
+                  ? Icons.hourglass_top_rounded
+                  : _isPlaying
+                      ? Icons.pause_circle_outline_rounded
+                      : Icons.play_circle_outline_rounded,
+            ),
+            label: Text(_isPlaying ? 'Sitisha' : 'Cheza'),
           ),
           const SizedBox(width: 12),
           FilledButton.tonalIcon(
-            onPressed: _safePlayStepAudio,
+            onPressed: _isLoadingAudio ? null : () => _safePlayStepAudio(forceRestart: true),
             style: FilledButton.styleFrom(
               backgroundColor: const Color(0x4038BDF8),
               foregroundColor: const Color(0xFFBAE6FD),

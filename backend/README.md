@@ -31,6 +31,8 @@ npm run migrate:dev
 npm run dev
 ```
 
+`loadEnv()` reads **`process.env`**. Locally, placing variables in `.env` is enough because **`src/index.ts` imports `dotenv/config`** before loading env. Railway injects variables and does not need a `.env` file in the image.
+
 Generate `ADMIN_PASSWORD_HASH`:
 
 ```bash
@@ -53,10 +55,11 @@ Paste the printed hash into `.env` as `ADMIN_PASSWORD_HASH=...`.
    | `JWT_SECRET` | Long random string (≥16 chars) |
    | `ADMIN_EMAIL` | Your admin login email |
    | `ADMIN_PASSWORD_HASH` | Output of `hash-password.mjs` |
+   | `ADMIN_API_KEY` | Shared secret — use the **same value** as Flutter `--dart-define=WASHA_ADMIN_API_KEY`
    | `CORS_ORIGIN` | `*` dev, or comma-separated origins for prod |
    | `PORT` | Railway sets automatically (match **8080** in Dockerfile or override) |
 
-4. Deploy. The container runs **migrations then the server** (`Dockerfile` `CMD`).
+4. Deploy. On startup, **`index.ts` applies SQL migrations** then starts the HTTP server (`Dockerfile` only runs `node dist/index.js`).
 5. Health check: `GET /health`.
 
 ---

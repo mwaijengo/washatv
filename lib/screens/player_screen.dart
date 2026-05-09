@@ -1,6 +1,5 @@
 import 'package:flutter/material.dart';
 
-import '../app.dart';
 import '../models/channel.dart';
 import '../theme/app_theme.dart';
 import '../widgets/channel_card.dart';
@@ -14,6 +13,7 @@ class PlayerScreen extends StatefulWidget {
     required this.onBack,
     required this.onOpenPlayer,
     required this.onOpenSubscription,
+    required this.channels,
   });
 
   final Channel? channel;
@@ -21,6 +21,7 @@ class PlayerScreen extends StatefulWidget {
   final VoidCallback onBack;
   final ValueChanged<Channel> onOpenPlayer;
   final VoidCallback onOpenSubscription;
+  final List<Channel> channels;
 
   @override
   State<PlayerScreen> createState() => _PlayerScreenState();
@@ -33,10 +34,13 @@ class _PlayerScreenState extends State<PlayerScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final c = widget.channel ?? allChannels.first;
+    if (widget.channels.isEmpty) {
+      return const Center(child: Text('Hakuna channel kwa sasa'));
+    }
+    final c = widget.channel ?? widget.channels.first;
     final channels = widget.premium
-        ? allChannels.where((e) => e.id != c.id).take(12).toList()
-        : allChannels.where((e) => e.premium && e.id != c.id).take(12).toList();
+        ? widget.channels.where((e) => e.id != c.id).take(12).toList()
+        : widget.channels.where((e) => e.premium && e.id != c.id).take(12).toList();
     return Column(
       children: [
         Column(
