@@ -4,6 +4,7 @@ import 'dart:math';
 import 'dart:ui';
 
 import 'package:fl_chart/fl_chart.dart';
+import 'package:flutter/foundation.dart' show kReleaseMode;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:google_fonts/google_fonts.dart';
@@ -1937,7 +1938,8 @@ class _AdminScaffoldState extends State<_AdminScaffold> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        if (_adminApiKey.isEmpty)
+        /// Dev-only banner: release IPAs/APKs built with [--dart-define-from-file] omit this panel.
+        if (_adminApiKey.isEmpty && !kReleaseMode)
           Padding(
             padding: const EdgeInsets.only(bottom: 10),
             child: Container(
@@ -1963,6 +1965,7 @@ class _AdminScaffoldState extends State<_AdminScaffold> {
                       'Ukikatika folda admin/: flutter run -d chrome --dart-define-from-file=dev_defines.json '
                       'au bash admin/run_admin_chrome.sh. '
                       'Run & Debug: \"Admin · Chrome\" au \"Admin · Chrome (cwd admin/)\". '
+                      'IPA: bash admin/build_ipa.sh. '
                       'Server na migrations lazima ziwe tayari.',
                       style: TextStyle(fontSize: 12, height: 1.38, color: Color(0xFFFED7AA)),
                     ),
