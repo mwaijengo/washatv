@@ -12,12 +12,14 @@ class CategoriesScreen extends StatefulWidget {
     required this.onOpenPlayer,
     required this.onOpenSubscription,
     required this.channels,
+    this.channelImageCacheEpoch = 0,
   });
 
   final bool premium;
   final ValueChanged<Channel> onOpenPlayer;
   final VoidCallback onOpenSubscription;
   final List<Channel> channels;
+  final int channelImageCacheEpoch;
 
   @override
   State<CategoriesScreen> createState() => _CategoriesScreenState();
@@ -124,6 +126,7 @@ class _CategoriesScreenState extends State<CategoriesScreen> {
               final c = list[i];
               return ChannelCard(
                 channel: c,
+                imageCacheEpoch: widget.channelImageCacheEpoch,
                 locked: c.premium && !widget.premium,
                 onTap: () => c.premium && !widget.premium ? widget.onOpenSubscription() : widget.onOpenPlayer(c),
               );

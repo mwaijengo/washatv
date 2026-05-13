@@ -2682,18 +2682,34 @@ class _AdminScaffoldState extends State<_AdminScaffold> {
       title: 'Futa chaneli?',
       message: '“${ch.name}” itaondolewa kwenye app moja kwa moja.',
     );
-    if (ok && mounted) {
-      setState(() => _channels.removeAt(index));
-      if (_adminApiKey.isNotEmpty) {
-        try {
-          await http.delete(
-            Uri.parse('$_apiBase/api/v1/admin/channels/${ch.id}'),
-            headers: _adminHeaders(),
-          ).timeout(const Duration(seconds: 12));
-        } catch (_) {}
+    if (!ok || !mounted) return;
+    final previous = List<AdminChannel>.from(_channels);
+    final id = ch.id;
+    if (_adminApiKey.isNotEmpty) {
+      try {
+        final res = await http
+            .delete(
+              Uri.parse('$_apiBase/api/v1/admin/channels/$id'),
+              headers: _adminHeaders(),
+            )
+            .timeout(const Duration(seconds: 12));
+        if (res.statusCode < 200 || res.statusCode >= 300) {
+          throw Exception('HTTP ${res.statusCode}');
+        }
+        if (!mounted) return;
+        setState(() => _channels.removeWhere((e) => e.id == id));
+        await _hydrateFromBackend();
+        if (!mounted) return;
+        _showToast('Chaneli imefutwa kwenye databesi', _ToastType.success);
+      } catch (_) {
+        if (!mounted) return;
+        setState(() => _channels = previous);
+        _showToast('Kufuta chaneli kumeshindikana kwa server.', _ToastType.error);
       }
-      _showToast('Chaneli imefutwa', _ToastType.error);
+      return;
     }
+    setState(() => _channels.removeAt(index));
+    _showToast('Imefutwa local pekee. Weka ufunguo wa admin ili kusawazisha na server.', _ToastType.warning);
   }
 
   void _showChannelEditor({int? index}) {
@@ -2884,10 +2900,12 @@ class _AdminScaffoldState extends State<_AdminScaffold> {
                       if (res.statusCode < 200 || res.statusCode >= 300) {
                         throw Exception('channel ${res.statusCode}');
                       }
+                      if (mounted) unawaited(_hydrateFromBackend());
                     } catch (_) {
                       _showToast('Channel local saved, lakini server sync imeshindikana.', _ToastType.warning);
                     }
                   }
+                  if (!mounted) return;
                   Navigator.pop(ctx);
                   _showToast(isEdit ? 'Mabadiliko yamehifadhiwa' : 'Chaneli imeongezwa', _ToastType.success);
                 },

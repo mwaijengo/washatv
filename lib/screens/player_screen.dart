@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../models/channel.dart';
 import '../theme/app_theme.dart';
+import '../utils/cache_bust_image_url.dart';
 import '../widgets/channel_card.dart';
 import '../widgets/player_controls.dart';
 
@@ -14,6 +15,7 @@ class PlayerScreen extends StatefulWidget {
     required this.onOpenPlayer,
     required this.onOpenSubscription,
     required this.channels,
+    this.channelImageCacheEpoch = 0,
   });
 
   final Channel? channel;
@@ -22,6 +24,7 @@ class PlayerScreen extends StatefulWidget {
   final ValueChanged<Channel> onOpenPlayer;
   final VoidCallback onOpenSubscription;
   final List<Channel> channels;
+  final int channelImageCacheEpoch;
 
   @override
   State<PlayerScreen> createState() => _PlayerScreenState();
@@ -38,6 +41,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
       return const Center(child: Text('Hakuna channel kwa sasa'));
     }
     final c = widget.channel ?? widget.channels.first;
+    final heroUrl = imageUrlWithCacheEpoch(c.imageUrl, widget.channelImageCacheEpoch);
     final channels = widget.premium
         ? widget.channels.where((e) => e.id != c.id).take(12).toList()
         : widget.channels.where((e) => e.premium && e.id != c.id).take(12).toList();
@@ -51,8 +55,9 @@ class _PlayerScreenState extends State<PlayerScreen> {
                 fit: StackFit.expand,
                 children: [
                   Image.network(
-                    c.imageUrl,
+                    heroUrl,
                     fit: BoxFit.cover,
+                    key: ValueKey('player-hero|${c.id}|$heroUrl'),
                     errorBuilder: (_, __, ___) => Container(
                       color: const Color(0xFF0B1220),
                       alignment: Alignment.center,
@@ -133,6 +138,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
               final cc = channels[i];
               return ChannelCard(
                 channel: cc,
+                imageCacheEpoch: widget.channelImageCacheEpoch,
                 locked: cc.premium && !widget.premium,
                 onTap: () => cc.premium && !widget.premium ? widget.onOpenSubscription() : widget.onOpenPlayer(cc),
               );

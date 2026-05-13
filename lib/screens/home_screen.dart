@@ -4,22 +4,9 @@ import '../constants/app_channel_categories.dart';
 import '../models/channel.dart';
 import '../models/hero_slide.dart';
 import '../theme/app_theme.dart';
+import '../utils/cache_bust_image_url.dart';
 import '../widgets/channel_card.dart';
 import '../widgets/glass_panel.dart';
-
-/// Busts cached images when the bootstrap `version` changes but the image URL string is unchanged.
-String carouselImageUrlWithCacheEpoch(String imageUrl, int configVersion) {
-  if (configVersion <= 0 || imageUrl.trim().isEmpty) return imageUrl;
-  try {
-    final u = Uri.parse(imageUrl.trim());
-    final q = Map<String, String>.from(u.queryParameters);
-    q['washa_cv'] = '$configVersion';
-    return u.replace(queryParameters: q).toString();
-  } catch (_) {
-    final sep = imageUrl.contains('?') ? '&' : '?';
-    return '$imageUrl${sep}washa_cv=$configVersion';
-  }
-}
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({
@@ -89,7 +76,7 @@ class _HomeScreenState extends State<HomeScreen> {
                     AnimatedSwitcher(
                       duration: const Duration(milliseconds: 700),
                       child: Image.network(
-                        carouselImageUrlWithCacheEpoch(slide.imageUrl, widget.carouselConfigVersion),
+                        imageUrlWithCacheEpoch(slide.imageUrl, widget.carouselConfigVersion),
                         fit: BoxFit.cover,
                         key: ValueKey('${slide.id}|${widget.carouselConfigVersion}|${slide.imageUrl}'),
                         errorBuilder: (_, __, ___) => Container(
@@ -231,6 +218,7 @@ class _HomeScreenState extends State<HomeScreen> {
         final c = list[i];
         return ChannelCard(
           channel: c,
+          imageCacheEpoch: widget.carouselConfigVersion,
           locked: c.premium && !widget.premium,
           onTap: () => c.premium && !widget.premium ? widget.onOpenSubscription() : widget.onOpenPlayer(c),
         );

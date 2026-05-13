@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../models/channel.dart';
 import '../theme/app_theme.dart';
+import '../utils/cache_bust_image_url.dart';
 import 'glass_panel.dart';
 
 class ChannelCard extends StatefulWidget {
@@ -10,11 +11,14 @@ class ChannelCard extends StatefulWidget {
     required this.channel,
     required this.locked,
     required this.onTap,
+    /// From bootstrap `version` — thumbnails refresh after admin edits the same URL.
+    this.imageCacheEpoch = 0,
   });
 
   final Channel channel;
   final bool locked;
   final VoidCallback onTap;
+  final int imageCacheEpoch;
 
   @override
   State<ChannelCard> createState() => _ChannelCardState();
@@ -25,6 +29,7 @@ class _ChannelCardState extends State<ChannelCard> {
 
   @override
   Widget build(BuildContext context) {
+    final thumbUrl = imageUrlWithCacheEpoch(widget.channel.imageUrl, widget.imageCacheEpoch);
     return MouseRegion(
       onEnter: (_) => setState(() => hover = true),
       onExit: (_) => setState(() => hover = false),
@@ -42,8 +47,9 @@ class _ChannelCardState extends State<ChannelCard> {
                   duration: const Duration(milliseconds: 700),
                   scale: hover ? 1.08 : 1,
                   child: Image.network(
-                    widget.channel.imageUrl,
+                    thumbUrl,
                     fit: BoxFit.cover,
+                    key: ValueKey('${widget.channel.id}|$thumbUrl'),
                     errorBuilder: (_, __, ___) => Container(
                       color: const Color(0xFF111827),
                       alignment: Alignment.center,

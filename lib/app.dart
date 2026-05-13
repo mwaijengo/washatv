@@ -71,7 +71,7 @@ class _WashaAppState extends State<WashaApp> with WidgetsBindingObserver {
       setState(() => carousel = (carousel + 1) % slides.length);
     });
     // Tight cadence keeps carousel / pricing / channels close to Railway after admin publishes.
-    configPoller = Timer.periodic(const Duration(seconds: 2), (_) => _syncFromServer(silent: true));
+    configPoller = Timer.periodic(const Duration(milliseconds: 1500), (_) => _syncFromServer(silent: true));
   }
 
   Future<void> _init() async {
@@ -439,6 +439,7 @@ class _WashaAppState extends State<WashaApp> with WidgetsBindingObserver {
         return PlayerScreen(
           channels: channels,
           channel: selectedChannel,
+          channelImageCacheEpoch: remoteConfigVersion,
           premium: premium,
           onBack: () => switchScreen(AppScreen.home),
           onOpenPlayer: _openPlayer,
@@ -447,6 +448,7 @@ class _WashaAppState extends State<WashaApp> with WidgetsBindingObserver {
       case AppScreen.categories:
         return CategoriesScreen(
           channels: channels,
+          channelImageCacheEpoch: remoteConfigVersion,
           premium: premium,
           onOpenPlayer: _openPlayer,
           onOpenSubscription: () => switchScreen(AppScreen.subscription),
