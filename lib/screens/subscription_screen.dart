@@ -9,6 +9,8 @@ import '../models/plan.dart';
 import '../theme/app_theme.dart';
 import '../widgets/glass_panel.dart';
 
+enum SonicpesaPaymentPhase { idle, initiating, waitingOnPhone, success, failed, cancelled }
+
 class SubscriptionScreen extends StatefulWidget {
   const SubscriptionScreen({
     super.key,
@@ -17,6 +19,7 @@ class SubscriptionScreen extends StatefulWidget {
     required this.selectedPlan,
     required this.onPlanChange,
     required this.onPay,
+    this.paymentSucceeded = false,
   });
 
   final List<Plan> plans;
@@ -24,55 +27,115 @@ class SubscriptionScreen extends StatefulWidget {
   final Plan selectedPlan;
   final ValueChanged<Plan> onPlanChange;
   final Future<void> Function(String phone, String name) onPay;
+  /// Set by parent after SonicPesa confirms payment.
+  final bool paymentSucceeded;
 
-  static Widget buildPinModal({
+  /// Full-screen SonicPesa / M-Pesa wait overlay (USSD push on customer phone).
+  static Widget buildSonicpesaPaymentOverlay({
+    required SonicpesaPaymentPhase phase,
+    required String planLabel,
+    required String amountLabel,
+    String? statusLine,
+    String? errorMessage,
     required VoidCallback onCancel,
-    required Future<void> Function() onConfirm,
+    VoidCallback? onRetry,
   }) {
+    final isFailed = phase == SonicpesaPaymentPhase.failed || phase == SonicpesaPaymentPhase.cancelled;
+    final isSuccess = phase == SonicpesaPaymentPhase.success;
+
     return Positioned.fill(
       child: Container(
-        color: const Color(0xE0000000),
+        color: const Color(0xE8000000),
         child: Center(
-          child: GlassPanel(
-            radius: 28,
-            child: Padding(
-              padding: const EdgeInsets.all(24),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  const Text('🔐', style: TextStyle(fontSize: 50)),
-                  const SizedBox(height: 10),
-                  const Text('Thibitisha Malipo', style: TextStyle(fontWeight: FontWeight.w800, fontSize: 24)),
-                  const SizedBox(height: 8),
-                  const Text('Ingiza PIN yako ya simu'),
-                  const SizedBox(height: 14),
-                  Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: List.generate(
-                      4,
-                      (_) => Container(
-                        margin: const EdgeInsets.symmetric(horizontal: 5),
-                        width: 46,
-                        height: 46,
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 400),
+            child: GlassPanel(
+              radius: 28,
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(24, 26, 24, 22),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    if (isSuccess)
+                      Container(
+                        width: 72,
+                        height: 72,
                         decoration: BoxDecoration(
-                          color: const Color(0xCC1F2937),
-                          borderRadius: BorderRadius.circular(12),
+                          color: const Color(0xFF22C55E),
+                          shape: BoxShape.circle,
+                          boxShadow: [
+                            BoxShadow(
+                              color: const Color(0xFF22C55E).withValues(alpha: 0.4),
+                              blurRadius: 24,
+                            ),
+                          ],
                         ),
-                        alignment: Alignment.center,
-                        child: const Text('•', style: TextStyle(fontSize: 24)),
+                        child: const Icon(Icons.check_rounded, color: Colors.white, size: 40),
+                      )
+                    else if (isFailed)
+                      const Icon(Icons.error_outline_rounded, color: Color(0xFFF87171), size: 52)
+                    else
+                      const SizedBox(
+                        width: 52,
+                        height: 52,
+                        child: CircularProgressIndicator(strokeWidth: 3, color: Color(0xFF60A5FA)),
+                      ),
+                    const SizedBox(height: 16),
+                    Text(
+                      isSuccess
+                          ? 'Malipo Yamethibitishwa!'
+                          : isFailed
+                              ? 'Malipo Hayajakamilika'
+                              : phase == SonicpesaPaymentPhase.initiating
+                                  ? 'Inatuma ombi la malipo…'
+                                  : 'Thibitisha kwenye simu yako',
+                      textAlign: TextAlign.center,
+                      style: const TextStyle(fontWeight: FontWeight.w900, fontSize: 22, height: 1.2),
+                    ),
+                    const SizedBox(height: 8),
+                    Text(
+                      isFailed
+                          ? (errorMessage ?? 'Jaribu tena au hakikisha una salio la M-Pesa.')
+                          : isSuccess
+                              ? 'Hongera! Sasa unaweza ku-stream channels zote.'
+                              : '$planLabel · $amountLabel\n${statusLine ?? 'Angalia simu yako — thibitisha PIN ya M-Pesa.'}',
+                      textAlign: TextAlign.center,
+                      style: TextStyle(
+                        fontSize: 13.5,
+                        height: 1.45,
+                        color: isFailed ? const Color(0xFFFCA5A5) : const Color(0xFF9CA3AF),
                       ),
                     ),
-                  ),
-                  const SizedBox(height: 16),
-                  Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      FilledButton(onPressed: onConfirm, child: const Text('Thibitisha')),
-                      const SizedBox(width: 8),
-                      OutlinedButton(onPressed: onCancel, child: const Text('Ghairi')),
+                    if (!isSuccess) ...[
+                      const SizedBox(height: 18),
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          _mpesaChip('M-Pesa'),
+                          const SizedBox(width: 8),
+                          _mpesaChip('SonicPesa'),
+                        ],
+                      ),
                     ],
-                  ),
-                ],
+                    const SizedBox(height: 20),
+                    if (isFailed && onRetry != null)
+                      FilledButton.icon(
+                        onPressed: onRetry,
+                        icon: const Icon(Icons.refresh_rounded, size: 20),
+                        label: const Text('Jaribu tena'),
+                        style: FilledButton.styleFrom(
+                          backgroundColor: const Color(0xFF2563EB),
+                          minimumSize: const Size(double.infinity, 46),
+                        ),
+                      ),
+                    if (!isSuccess || onRetry != null) const SizedBox(height: 8),
+                    if (!isSuccess)
+                      TextButton(
+                        onPressed: onCancel,
+                        child: Text(isFailed ? 'Funga' : 'Ghairi', style: const TextStyle(color: Color(0xFF94A3B8))),
+                      ),
+                  ],
+                ),
               ),
             ),
           ),
@@ -81,12 +144,25 @@ class SubscriptionScreen extends StatefulWidget {
     );
   }
 
+  static Widget _mpesaChip(String label) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+      decoration: BoxDecoration(
+        color: const Color(0x221E3A8A),
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: const Color(0x3393C5FD)),
+      ),
+      child: Text(label, style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w700, color: Color(0xFFBFDBFE))),
+    );
+  }
+
   @override
   State<SubscriptionScreen> createState() => _SubscriptionScreenState();
 }
 
 class _SubscriptionScreenState extends State<SubscriptionScreen> {
-  bool success = false;
+  bool get success => widget.paymentSucceeded || _localSuccess;
+  bool _localSuccess = false;
   bool hasSelectedPlan = false;
   final phone = TextEditingController();
   final name = TextEditingController();
@@ -96,6 +172,14 @@ class _SubscriptionScreenState extends State<SubscriptionScreen> {
     phone.dispose();
     name.dispose();
     super.dispose();
+  }
+
+  @override
+  void didUpdateWidget(SubscriptionScreen oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (widget.paymentSucceeded && !_localSuccess) {
+      _localSuccess = true;
+    }
   }
 
   @override
@@ -257,9 +341,11 @@ class _SubscriptionScreenState extends State<SubscriptionScreen> {
                             onTap: !_isFormValid
                                 ? null
                                 : () async {
-                                    await widget.onPay(phone.text.trim(), name.text.trim());
-                                    if (!mounted) return;
-                                    setState(() => success = true);
+                                    try {
+                                      await widget.onPay(phone.text.trim(), name.text.trim());
+                                    } catch (_) {
+                                      return;
+                                    }
                                   },
                             child: Padding(
                               padding: const EdgeInsets.symmetric(horizontal: 16),

@@ -219,6 +219,46 @@ class _AdminScaffoldState extends State<AdminScaffold> {
   Uri _adminSlideUri(String slideId) =>
       Uri.parse('$_apiBase/api/v1/admin/slides/${Uri.encodeComponent(slideId)}');
 
+  Uri _adminChannelUri(String channelId) =>
+      Uri.parse('$_apiBase/api/v1/admin/channels/${Uri.encodeComponent(channelId)}');
+
+  List<AdminChannel> _parseAdminChannelsJson(List<dynamic> raw) {
+    return raw.whereType<Map>().map((rawItem) {
+      final j = rawItem.cast<String, dynamic>();
+      final category = _s(j['category']);
+      return AdminChannel(
+        id: _s(j['id']),
+        name: _s(j['name']),
+        category: category.isEmpty ? kAppChannelCategories.first : category,
+        premium: j['premium'] as bool? ?? false,
+        live: j['live'] as bool? ?? false,
+        status: _s(j['status'], fallback: 'active'),
+        thumbnail: _s(j['thumbnail']),
+        streamUrl: _s(j['stream_url'] ?? j['streamUrl']),
+        viewers: (j['viewers'] as num?)?.toInt() ?? 0,
+        rating: _s(j['rating'], fallback: '5.0'),
+        drm: _s(j['drm'], fallback: 'none'),
+      );
+    }).where((c) => c.id.isNotEmpty && c.name.isNotEmpty).toList();
+  }
+
+  Future<bool> _refreshChannelsFromServer() async {
+    if (!_hasAdminSession) return false;
+    try {
+      final res = await http
+          .get(Uri.parse('$_apiBase/api/v1/admin/channels'), headers: _adminHeadersForDelete())
+          .timeout(const Duration(seconds: 12));
+      if (res.statusCode < 200 || res.statusCode >= 300) return false;
+      final map = jsonDecode(res.body) as Map<String, dynamic>;
+      final raw = (map['channels'] as List?)?.cast<dynamic>() ?? const [];
+      if (!mounted) return false;
+      setState(() => _channels = _parseAdminChannelsJson(raw));
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
   Future<bool> _refreshSlidesFromServer() async {
     if (!_hasAdminSession) return false;
     try {
@@ -259,6 +299,7 @@ class _AdminScaffoldState extends State<AdminScaffold> {
       final settings = (map['settings'] as Map?)?.cast<String, dynamic>() ?? const <String, dynamic>{};
 
       List<AdminUser>? serverUsers;
+      List<AdminChannel>? serverChannels;
       List<AdminSlide>? serverSlides;
       List<AdminPayment>? serverPayments;
       List<AdminNotification>? serverNotifications;
@@ -266,6 +307,7 @@ class _AdminScaffoldState extends State<AdminScaffold> {
       if (_hasAdminSession) {
         try {
           final usersRes = await http.get(Uri.parse('$_apiBase/api/v1/admin/users'), headers: _adminHeaders()).timeout(const Duration(seconds: 12));
+          final channelsRes = await http.get(Uri.parse('$_apiBase/api/v1/admin/channels'), headers: _adminHeaders()).timeout(const Duration(seconds: 12));
           final slidesRes = await http.get(Uri.parse('$_apiBase/api/v1/admin/slides'), headers: _adminHeaders()).timeout(const Duration(seconds: 12));
           final txRes = await http.get(Uri.parse('$_apiBase/api/v1/admin/transactions'), headers: _adminHeaders()).timeout(const Duration(seconds: 12));
           final notiRes = await http.get(Uri.parse('$_apiBase/api/v1/admin/notifications'), headers: _adminHeaders()).timeout(const Duration(seconds: 12));
@@ -285,6 +327,11 @@ class _AdminScaffoldState extends State<AdminScaffold> {
                 adminAccessUntil: _dt(j['admin_access_until']),
               );
             }).toList();
+          }
+          if (channelsRes.statusCode >= 200 && channelsRes.statusCode < 300) {
+            final channelsMap = jsonDecode(channelsRes.body) as Map<String, dynamic>;
+            final raw = (channelsMap['channels'] as List?)?.cast<dynamic>() ?? const [];
+            serverChannels = _parseAdminChannelsJson(raw);
           }
           if (slidesRes.statusCode >= 200 && slidesRes.statusCode < 300) {
             final slidesMap = jsonDecode(slidesRes.body) as Map<String, dynamic>;
@@ -353,23 +400,11 @@ class _AdminScaffoldState extends State<AdminScaffold> {
           if (days != null) existing.duration = days;
           if (enabled != null) existing.enabled = enabled;
         }
-        _channels = rawChannels.whereType<Map>().map((raw) {
-          final j = raw.cast<String, dynamic>();
-          final category = _s(j['category']);
-          return AdminChannel(
-            id: _s(j['id']),
-            name: _s(j['name']),
-            category: category.isEmpty ? kAppChannelCategories.first : category,
-            premium: j['premium'] as bool? ?? false,
-            live: j['live'] as bool? ?? false,
-            status: _s(j['status'], fallback: 'active'),
-            thumbnail: _s(j['thumbnail']),
-            streamUrl: _s(j['stream_url'] ?? j['streamUrl']),
-            viewers: (j['viewers'] as num?)?.toInt() ?? 0,
-            rating: _s(j['rating'], fallback: '5.0'),
-            drm: _s(j['drm'], fallback: 'none'),
-          );
-        }).where((c) => c.id.isNotEmpty && c.name.isNotEmpty).toList();
+        if (serverChannels != null) {
+          _channels = serverChannels!;
+        } else {
+          _channels = _parseAdminChannelsJson(rawChannels);
+        }
         if (serverUsers != null) _users = serverUsers!;
         if (serverSlides != null) {
           _slides = serverSlides!;
@@ -2082,7 +2117,7 @@ class _AdminScaffoldState extends State<AdminScaffold> {
                               visualDensity: VisualDensity.compact,
                             ),
                             IconButton(
-                              onPressed: () => _confirmDeleteChannel(i),
+                              onPressed: () => _confirmDeleteChannel(ch.id),
                               icon: const Icon(Icons.delete_outline_rounded, size: 18, color: Color(0xFFF87171)),
                               tooltip: 'Delete channel',
                               padding: EdgeInsets.zero,
@@ -2838,7 +2873,12 @@ class _AdminScaffoldState extends State<AdminScaffold> {
     return 'CH-${(maxN + 1).toString().padLeft(4, '0')}';
   }
 
-  Future<void> _confirmDeleteChannel(int index) async {
+  Future<void> _confirmDeleteChannel(String channelId) async {
+    final index = _channels.indexWhere((e) => e.id == channelId);
+    if (index < 0) {
+      if (mounted) _showToast('Chaneli haipatikani.', _ToastType.error);
+      return;
+    }
     final ch = _channels[index];
     final ok = await _showDeleteConfirmModal(
       title: 'Futa chaneli?',
@@ -2846,32 +2886,30 @@ class _AdminScaffoldState extends State<AdminScaffold> {
     );
     if (!ok || !mounted) return;
     final previous = List<AdminChannel>.from(_channels);
-    final id = ch.id;
+    final id = channelId;
     if (_hasAdminSession) {
       try {
         final res = await http
-            .delete(
-              Uri.parse('$_apiBase/api/v1/admin/channels/$id'),
-              headers: _adminHeaders(),
-            )
+            .delete(_adminChannelUri(id), headers: _adminHeadersForDelete())
             .timeout(const Duration(seconds: 12));
-        if (res.statusCode < 200 || res.statusCode >= 300) {
-          throw Exception('HTTP ${res.statusCode}');
+        if (res.statusCode != 404 && (res.statusCode < 200 || res.statusCode >= 300)) {
+          throw Exception(_adminHttpError(res));
         }
         if (!mounted) return;
         setState(() => _channels.removeWhere((e) => e.id == id));
-        await _hydrateFromBackend();
+        final refreshed = await _refreshChannelsFromServer();
+        if (!refreshed) await _hydrateFromBackend();
         if (!mounted) return;
         _showToast('Chaneli imefutwa kwenye databesi', _ToastType.success);
-      } catch (_) {
+      } catch (e) {
         if (!mounted) return;
         setState(() => _channels = previous);
-        _showToast('Kufuta chaneli kumeshindikana kwa server.', _ToastType.error);
+        _showToast('Kufuta chaneli kumeshindikana: $e', _ToastType.error);
       }
       return;
     }
-    setState(() => _channels.removeAt(index));
-    _showToast('Imefutwa local pekee. Weka ufunguo wa admin ili kusawazisha na server.', _ToastType.warning);
+    setState(() => _channels.removeWhere((e) => e.id == id));
+    _showToast('Imefutwa local pekee. Ingia ili kusawazisha na server.', _ToastType.warning);
   }
 
   void _showChannelEditor({int? index}) {
@@ -3064,7 +3102,7 @@ class _AdminScaffoldState extends State<AdminScaffold> {
                     try {
                       final res = isEdit
                           ? await http.patch(
-                              Uri.parse('$_apiBase/api/v1/admin/channels/${syncChannel.id}'),
+                              _adminChannelUri(syncChannel.id),
                               headers: _adminHeaders(),
                               body: payload,
                             )

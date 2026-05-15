@@ -8,7 +8,7 @@
 PRODUCT_NAME = washa
 
 // The application's bundle identifier
-PRODUCT_BUNDLE_IDENTIFIER = com.example.washa
+PRODUCT_BUNDLE_IDENTIFIER = com.washatv
 
 // The copyright displayed in application information
-PRODUCT_COPYRIGHT = Copyright © 2026 com.example. All rights reserved.
+PRODUCT_COPYRIGHT = Copyright © 2026 Washa TV. All rights reserved.

@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../models/plan.dart';
@@ -126,24 +127,49 @@ class ProfileScreen extends StatelessWidget {
                         ),
                       ),
                       const SizedBox(width: 8),
-                      Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-                        decoration: BoxDecoration(
-                          color: const Color(0xFF0F172A).withValues(alpha: 0.7),
-                          borderRadius: BorderRadius.circular(12),
-                          border: Border.all(color: const Color(0x26FFFFFF)),
-                        ),
-                        child: Row(
-                          children: [
-                            const Icon(Icons.smartphone, size: 13, color: Color(0xFF6366F1)),
-                            const SizedBox(width: 6),
-                            Text(
-                              deviceId,
-                              style: const TextStyle(fontSize: 11, color: Color(0xFF9CA3AF), fontWeight: FontWeight.w600),
+                      Flexible(
+                        child: Material(
+                          color: Colors.transparent,
+                          child: InkWell(
+                            onTap: deviceId.trim().isEmpty ? null : () => _copyDeviceId(context),
+                            borderRadius: BorderRadius.circular(12),
+                            child: Tooltip(
+                              message: deviceId.trim().isEmpty ? 'Hakuna Device ID' : 'Gusa kunakili Device ID',
+                              child: Container(
+                                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                                decoration: BoxDecoration(
+                                  color: const Color(0xFF0F172A).withValues(alpha: 0.7),
+                                  borderRadius: BorderRadius.circular(12),
+                                  border: Border.all(color: const Color(0x26FFFFFF)),
+                                ),
+                                child: Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    const Icon(Icons.smartphone, size: 13, color: Color(0xFF6366F1)),
+                                    const SizedBox(width: 6),
+                                    Flexible(
+                                      child: Text(
+                                        deviceId.trim().isEmpty ? '—' : deviceId,
+                                        maxLines: 1,
+                                        overflow: TextOverflow.ellipsis,
+                                        style: const TextStyle(
+                                          fontSize: 11,
+                                          color: Color(0xFF9CA3AF),
+                                          fontWeight: FontWeight.w600,
+                                        ),
+                                      ),
+                                    ),
+                                    const SizedBox(width: 6),
+                                    Icon(
+                                      Icons.copy,
+                                      size: 13,
+                                      color: deviceId.trim().isEmpty ? const Color(0xFF475569) : const Color(0xFF818CF8),
+                                    ),
+                                  ],
+                                ),
+                              ),
                             ),
-                            const SizedBox(width: 6),
-                            const Icon(Icons.copy, size: 13, color: Color(0xFF64748B)),
-                          ],
+                          ),
                         ),
                       ),
                     ],
@@ -427,6 +453,19 @@ class ProfileScreen extends StatelessWidget {
     if (p.isEmpty) return 'FU';
     if (p.length == 1) return p.first.substring(0, p.first.length.clamp(1, 2)).toUpperCase();
     return '${p.first[0]}${p.last[0]}'.toUpperCase();
+  }
+
+  void _copyDeviceId(BuildContext context) {
+    final id = deviceId.trim();
+    if (id.isEmpty) return;
+    Clipboard.setData(ClipboardData(text: id));
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text('Device ID imenakiliwa: $id'),
+        behavior: SnackBarBehavior.floating,
+        duration: const Duration(seconds: 2),
+      ),
+    );
   }
 }
 

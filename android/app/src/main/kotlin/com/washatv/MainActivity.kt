@@ -1,4 +1,4 @@
-package com.example.washa
+package com.washatv
 
 import io.flutter.embedding.android.FlutterActivity
 

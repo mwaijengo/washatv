@@ -3,6 +3,17 @@ import type { Env } from '../config/env.js';
 import type { DbPool } from '../db/pool.js';
 import { bumpConfigVersion, getConfigMeta, getConfigVersion } from '../lib/version.js';
 import type { SseHub } from '../lib/sseHub.js';
+import { grantPremiumFromPayment, upsertPendingSonicpesaTransaction } from '../lib/premiumPayment.js';
+import {
+  isSonicpesaFailure,
+  isSonicpesaSuccess,
+  normalizePaymentStatus,
+  normalizeTzPhone,
+  sonicpesaConfigured,
+  sonicpesaCreateOrder,
+  sonicpesaOrderStatus,
+} from '../lib/sonicpesa.js';
+import { forwardNotificationToSupasoka } from '../lib/supasokaNotifyBridge.js';
 import bcrypt from 'bcrypt';
 import { nanoid } from 'nanoid';
 
@@ -177,78 +188,299 @@ export async function registerRoutes(
     const provider = (b.provider ?? 'mobile').trim() || 'mobile';
     const providerRef = (b.provider_ref ?? `TX-${Date.now()}-${nanoid(6)}`).trim();
 
-    const client = await pool.connect();
     try {
-      await client.query('BEGIN');
-      const upsertUser = await client.query(
-        `INSERT INTO users (id, name, phone, device_id, status, subscription, created_at)
-         VALUES ($1, $2, $3, $4, 'active', 'free', now())
-         ON CONFLICT (device_id) DO UPDATE SET
-           name = CASE WHEN EXCLUDED.name <> '' THEN EXCLUDED.name ELSE users.name END,
-           phone = CASE WHEN EXCLUDED.phone <> '' THEN EXCLUDED.phone ELSE users.phone END
-         RETURNING id`,
-        [`USR-${nanoid(10)}`, name || 'Viewer', phone || 'N/A', deviceId],
-      );
-      const userId = String(upsertUser.rows[0].id);
+      const result = await grantPremiumFromPayment(pool, {
+        deviceId,
+        userName: name || 'Viewer',
+        phone,
+        amount,
+        method,
+        planKey,
+        provider,
+        providerRef,
+        metadata: { source: 'viewer-app' },
+      });
+      return { ok: true, transaction_ref: result.transaction_ref, premium_until: result.premium_until };
+    } catch (e) {
+      req.log.error(e);
+      return reply.code(500).send({ error: 'Failed to record payment' });
+    }
+  });
 
-      const txId = `TRX-${nanoid(10)}`;
-      await client.query(
-        `INSERT INTO transactions
-           (id, user_id, phone, amount, currency, method, provider, provider_ref, plan_key, status, completed_at, metadata, created_at, updated_at)
-         VALUES
-           ($1,$2,$3,$4,'TZS',$5,$6,$7,$8,'completed',now(),$9::jsonb,now(),now())
-         ON CONFLICT (provider, provider_ref) DO UPDATE SET
-           user_id = EXCLUDED.user_id,
-           phone = EXCLUDED.phone,
-           amount = EXCLUDED.amount,
-           method = EXCLUDED.method,
-           plan_key = EXCLUDED.plan_key,
-           status = 'completed',
-           completed_at = now(),
-           metadata = EXCLUDED.metadata,
-           updated_at = now()`,
+  /** Start SonicPesa M-Pesa push (USSD prompt on customer phone). */
+  app.post<{
+    Body: { device_id?: string; user_name?: string; phone?: string; plan_key?: string; buyer_email?: string };
+  }>('/api/v1/public/payments/sonicpesa/initiate', async (req, reply) => {
+    if (!sonicpesaConfigured(env)) {
+      return reply.code(503).send({ error: 'SonicPesa is not configured on server (SONICPESA_API_KEY)' });
+    }
+
+    const b = req.body ?? {};
+    const deviceId = (b.device_id ?? '').trim();
+    const planKey = (b.plan_key ?? '').trim();
+    const userName = (b.user_name ?? '').trim() || 'Viewer';
+    const phoneRaw = (b.phone ?? '').trim();
+    const buyerPhone = normalizeTzPhone(phoneRaw);
+
+    if (!deviceId || !planKey) {
+      return reply.code(400).send({ error: 'device_id and plan_key are required' });
+    }
+    if (!buyerPhone) {
+      return reply.code(400).send({ error: 'phone must be a valid Tanzanian number (e.g. 07XXXXXXXX)' });
+    }
+
+    const settings = await pool.query(`SELECT subscription_enabled FROM app_settings WHERE id = 1`);
+    const subEnabled = settings.rows[0]?.subscription_enabled;
+    if (subEnabled === false) {
+      return reply.code(403).send({ error: 'Subscriptions are disabled' });
+    }
+
+    const planRow = await pool.query(
+      `SELECT plan_key, name, price, duration_days, enabled FROM pricing_plans WHERE plan_key = $1`,
+      [planKey],
+    );
+    if (!planRow.rowCount) return reply.code(404).send({ error: 'plan not found' });
+    const plan = planRow.rows[0] as { price: number; enabled: boolean; name: string };
+    if (!plan.enabled) return reply.code(400).send({ error: 'plan is not available' });
+
+    const amount = Math.round(Number(plan.price));
+    if (amount <= 0) return reply.code(400).send({ error: 'invalid plan price' });
+
+    const emailBase = deviceId.replace(/[^a-zA-Z0-9._-]/g, '').slice(0, 40) || 'viewer';
+    const buyerEmail = (b.buyer_email ?? '').trim() || `${emailBase}@washatv.app`;
+
+    const order = await sonicpesaCreateOrder(env, {
+      buyer_email: buyerEmail,
+      buyer_name: userName,
+      buyer_phone: buyerPhone,
+      amount,
+      currency: 'TZS',
+    });
+
+    if (!order.ok || !order.order_id) {
+      return reply.code(502).send({
+        error: order.error ?? 'SonicPesa create_order failed',
+        details: order.raw ?? null,
+      });
+    }
+
+    await upsertPendingSonicpesaTransaction(pool, {
+      deviceId,
+      userName,
+      phone: phoneRaw,
+      amount,
+      planKey,
+      orderId: order.order_id,
+      metadata: { reference: order.reference, initial_status: order.payment_status },
+    });
+
+    return {
+      ok: true,
+      order_id: order.order_id,
+      reference: order.reference ?? null,
+      amount,
+      currency: 'TZS',
+      plan_key: planKey,
+      payment_status: order.payment_status ?? 'PENDING',
+      message: 'Angalia simu yako na thibitisha malipo ya M-Pesa.',
+    };
+  });
+
+  /** Poll SonicPesa order — completes premium when payment succeeds. */
+  app.post<{ Body: { device_id?: string; order_id?: string } }>(
+    '/api/v1/public/payments/sonicpesa/status',
+    async (req, reply) => {
+      if (!sonicpesaConfigured(env)) {
+        return reply.code(503).send({ error: 'SonicPesa is not configured on server' });
+      }
+
+      const deviceId = (req.body?.device_id ?? '').trim();
+      const orderId = (req.body?.order_id ?? '').trim();
+      if (!deviceId || !orderId) {
+        return reply.code(400).send({ error: 'device_id and order_id are required' });
+      }
+
+      const txRow = await pool.query(
+        `SELECT t.id, t.status, t.amount, t.plan_key, t.phone, t.metadata, u.device_id
+         FROM transactions t
+         LEFT JOIN users u ON u.id = t.user_id
+         WHERE t.provider = 'sonicpesa' AND t.provider_ref = $1
+         LIMIT 1`,
+        [orderId],
+      );
+      if (!txRow.rowCount) return reply.code(404).send({ error: 'payment session not found' });
+      const tx = txRow.rows[0] as {
+        status: string;
+        amount: number;
+        plan_key: string | null;
+        phone: string | null;
+        device_id: string | null;
+      };
+      if (tx.device_id && tx.device_id !== deviceId) {
+        return reply.code(403).send({ error: 'device mismatch' });
+      }
+      if (tx.status === 'completed') {
+        const prem = await pool.query(`SELECT premium_until FROM users WHERE device_id = $1`, [deviceId]);
+        return {
+          ok: true,
+          payment_status: 'SUCCESS',
+          completed: true,
+          premium_until: prem.rows[0]?.premium_until
+            ? new Date(prem.rows[0].premium_until as Date).toISOString()
+            : null,
+        };
+      }
+
+      const remote = await sonicpesaOrderStatus(env, orderId);
+      if (!remote.ok) {
+        return reply.code(502).send({ error: remote.error ?? 'status check failed' });
+      }
+
+      const paymentStatus = normalizePaymentStatus(remote.payment_status ?? remote.status ?? 'PENDING');
+
+      if (isSonicpesaSuccess(paymentStatus)) {
+        const granted = await grantPremiumFromPayment(pool, {
+          deviceId,
+          userName: (req.body as { user_name?: string })?.user_name?.trim() || 'Viewer',
+          phone: tx.phone ?? '',
+          amount: Number(tx.amount),
+          method: 'M-Pesa',
+          planKey: tx.plan_key ?? '',
+          provider: 'sonicpesa',
+          providerRef: orderId,
+          metadata: { sonicpesa_status: paymentStatus, reference: remote.reference },
+        });
+        return {
+          ok: true,
+          payment_status: paymentStatus,
+          completed: true,
+          premium_until: granted.premium_until,
+        };
+      }
+
+      if (isSonicpesaFailure(paymentStatus)) {
+        await pool.query(
+          `UPDATE transactions SET status = 'failed', updated_at = now(), metadata = metadata || $2::jsonb
+           WHERE provider = 'sonicpesa' AND provider_ref = $1`,
+          [orderId, JSON.stringify({ sonicpesa_status: paymentStatus })],
+        );
+        return {
+          ok: true,
+          payment_status: paymentStatus,
+          completed: false,
+          failed: true,
+          message: 'Malipo hayajakamilika. Jaribu tena.',
+        };
+      }
+
+      return {
+        ok: true,
+        payment_status: paymentStatus,
+        completed: false,
+        pending: true,
+      };
+    },
+  );
+
+  /**
+   * SonicPesa webhook — paste this URL in SonicPesa dashboard → Webhook System.
+   * Example payload: { "event": "payment.completed", "order_id": "sp_…", "amount": 10000, "status": "SUCCESS", "transid": "…" }
+   */
+  app.post('/api/v1/webhooks/sonicpesa', async (req, reply) => {
+    const b = (req.body ?? {}) as Record<string, unknown>;
+    const orderId = String(b.order_id ?? b.orderId ?? '').trim();
+    const status = normalizePaymentStatus(b.status ?? b.payment_status);
+    const event = String(b.event ?? '').trim().toLowerCase();
+    const transid = String(b.transid ?? b.transaction_id ?? '').trim();
+
+    if (env.SONICPESA_WEBHOOK_SECRET) {
+      const headerSecret = String(
+        req.headers['x-webhook-secret'] ?? req.headers['x-sonicpesa-secret'] ?? '',
+      ).trim();
+      if (headerSecret !== env.SONICPESA_WEBHOOK_SECRET) {
+        return reply.code(401).send({ error: 'invalid webhook secret' });
+      }
+    }
+
+    if (!orderId) {
+      return reply.code(400).send({ error: 'order_id is required' });
+    }
+
+    const txRow = await pool.query(
+      `SELECT t.status, t.amount, t.plan_key, t.phone, t.metadata, u.device_id, u.name
+       FROM transactions t
+       LEFT JOIN users u ON u.id = t.user_id
+       WHERE t.provider = 'sonicpesa' AND t.provider_ref = $1
+       LIMIT 1`,
+      [orderId],
+    );
+
+    if (!txRow.rowCount) {
+      req.log.warn({ orderId, event }, 'SonicPesa webhook: unknown order_id');
+      return { ok: true, ignored: true, reason: 'order_not_found' };
+    }
+
+    const tx = txRow.rows[0] as {
+      status: string;
+      amount: number;
+      plan_key: string | null;
+      phone: string | null;
+      metadata: Record<string, unknown> | null;
+      device_id: string | null;
+      name: string | null;
+    };
+
+    const meta = tx.metadata ?? {};
+    const deviceId = String(tx.device_id ?? meta.device_id ?? '').trim();
+    const completedEvent = event === 'payment.completed' || event === 'payment.success';
+    const success = completedEvent || isSonicpesaSuccess(status);
+    const failed = isSonicpesaFailure(status);
+
+    if (tx.status === 'completed') {
+      return { ok: true, already_completed: true, order_id: orderId };
+    }
+
+    if (success) {
+      if (!deviceId) {
+        req.log.error({ orderId }, 'SonicPesa webhook: missing device_id on transaction');
+        return reply.code(422).send({ error: 'cannot grant premium without device_id' });
+      }
+      await grantPremiumFromPayment(pool, {
+        deviceId,
+        userName: String(tx.name ?? 'Viewer').trim() || 'Viewer',
+        phone: tx.phone ?? '',
+        amount: Number(tx.amount),
+        method: 'M-Pesa',
+        planKey: tx.plan_key ?? '',
+        provider: 'sonicpesa',
+        providerRef: orderId,
+        metadata: {
+          source: 'sonicpesa-webhook',
+          sonicpesa_status: status,
+          sonicpesa_event: event,
+          transid: transid || undefined,
+        },
+      });
+      return { ok: true, completed: true, order_id: orderId };
+    }
+
+    if (failed) {
+      await pool.query(
+        `UPDATE transactions SET status = 'failed', updated_at = now(), metadata = metadata || $2::jsonb
+         WHERE provider = 'sonicpesa' AND provider_ref = $1`,
         [
-          txId,
-          userId,
-          phone || null,
-          amount,
-          method,
-          provider,
-          providerRef,
-          planKey || null,
-          JSON.stringify({ source: 'viewer-app' }),
+          orderId,
+          JSON.stringify({
+            sonicpesa_status: status,
+            sonicpesa_event: event,
+            transid: transid || undefined,
+          }),
         ],
       );
-
-      let durationDays = 30;
-      if (planKey) {
-        const planRow = await client.query(
-          `SELECT duration_days FROM pricing_plans WHERE plan_key = $1 AND enabled = true`,
-          [planKey],
-        );
-        if (planRow.rowCount) {
-          durationDays = Number((planRow.rows[0] as { duration_days: number }).duration_days) || durationDays;
-        }
-      }
-      const premiumUntil = new Date(Date.now() + durationDays * 24 * 60 * 60 * 1000);
-      await client.query(
-        `UPDATE users SET
-           subscription = 'premium',
-           premium_until = CASE
-             WHEN premium_until IS NOT NULL AND premium_until > now() THEN premium_until + ($2 || ' days')::interval
-             ELSE $3::timestamptz
-           END
-         WHERE id = $1`,
-        [userId, String(durationDays), premiumUntil],
-      );
-      await client.query('COMMIT');
-      return { ok: true, transaction_ref: providerRef };
-    } catch (e) {
-      await client.query('ROLLBACK');
-      throw e;
-    } finally {
-      client.release();
+      return { ok: true, failed: true, order_id: orderId };
     }
+
+    return { ok: true, pending: true, order_id: orderId, payment_status: status };
   });
 
   /** SSE: clients reconnect automatically; receive config version pushes after admin writes */
@@ -402,6 +634,14 @@ export async function registerRoutes(
     },
   );
 
+  app.get('/api/v1/admin/channels', { preHandler: adminPre }, async () => {
+    const r = await pool.query(
+      `SELECT id, name, category, premium, live, status, thumbnail, stream_url, viewers, rating, drm, sort_order, updated_at
+       FROM channels ORDER BY sort_order, name, id`,
+    );
+    return { channels: r.rows };
+  });
+
   app.post<{ Body: Record<string, unknown> }>('/api/v1/admin/channels', { preHandler: adminPre }, async (req, reply) => {
     const b = req.body ?? {};
     if (!b.name || !b.category) return reply.code(400).send({ error: 'name and category required' });
@@ -494,15 +734,21 @@ export async function registerRoutes(
     },
   );
 
-  app.delete<{ Params: { id: string } }>('/api/v1/admin/channels/:id', { preHandler: adminPre }, async (req) => {
+  app.delete<{ Params: { id: string } }>('/api/v1/admin/channels/:id', { preHandler: adminPre }, async (req, reply) => {
+    const id = decodeURIComponent(req.params.id).trim();
+    if (!id) return reply.code(400).send({ error: 'id required' });
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
-      await client.query(`DELETE FROM channels WHERE id = $1`, [req.params.id]);
+      const del = await client.query(`DELETE FROM channels WHERE id = $1`, [id]);
+      if ((del.rowCount ?? 0) === 0) {
+        await client.query('ROLLBACK');
+        return reply.code(404).send({ error: 'channel not found', id });
+      }
       const v = await bumpConfigVersion(client);
       await client.query('COMMIT');
       sse.notifyConfigVersion(v);
-      return { ok: true, version: v };
+      return { ok: true, version: v, deleted: id };
     } catch (e) {
       await client.query('ROLLBACK');
       throw e;
@@ -625,7 +871,16 @@ export async function registerRoutes(
       [id, title, message, type, read],
     );
     const row = await pool.query(`SELECT * FROM notifications WHERE id = $1`, [id]);
-    return reply.code(201).send({ notification: row.rows[0] });
+    const push = await forwardNotificationToSupasoka(env, {
+      title,
+      body: message,
+      target: String(b.target ?? 'all'),
+    });
+    return reply.code(201).send({
+      notification: row.rows[0],
+      supasoka_push: push.forwarded ? 'sent' : 'skipped',
+      ...(push.error ? { supasoka_push_error: push.error } : {}),
+    });
   });
 
   app.get('/api/v1/admin/slides', { preHandler: adminPre }, async () => {

@@ -10,6 +10,15 @@ const envSchema = z.object({
   ADMIN_API_KEY: z.string().optional(),
   LOG_LEVEL: z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace']).default('info'),
   CORS_ORIGIN: z.string().default('*'),
+  /** SonicPesa mobile money — server-side only (never expose in Flutter). */
+  SONICPESA_API_KEY: z.string().optional(),
+  SONICPESA_SECRET_KEY: z.string().optional(),
+  SONICPESA_BASE_URL: z.string().default('https://api.sonicpesa.com'),
+  /** Optional — if set, webhook requests must send the same value in X-Webhook-Secret header. */
+  SONICPESA_WEBHOOK_SECRET: z.string().optional(),
+  /** Optional — forward Washa admin notifications to Supasoka FCM (`POST /api/v1/admin/notify`). */
+  SUPASOKA_API_BASE_URL: z.string().optional(),
+  SUPASOKA_ADMIN_API_KEY: z.string().optional(),
 });
 
 export type Env = z.infer<typeof envSchema>;
