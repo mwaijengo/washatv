@@ -719,15 +719,21 @@ export async function registerRoutes(
     },
   );
 
-  app.delete<{ Params: { id: string } }>('/api/v1/admin/slides/:id', { preHandler: adminPre }, async (req) => {
+  app.delete<{ Params: { id: string } }>('/api/v1/admin/slides/:id', { preHandler: adminPre }, async (req, reply) => {
+    const id = decodeURIComponent(req.params.id).trim();
+    if (!id) return reply.code(400).send({ error: 'id required' });
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
-      await client.query(`DELETE FROM slides WHERE id = $1`, [req.params.id]);
+      const del = await client.query(`DELETE FROM slides WHERE id = $1`, [id]);
+      if ((del.rowCount ?? 0) === 0) {
+        await client.query('ROLLBACK');
+        return reply.code(404).send({ error: 'slide not found', id });
+      }
       const v = await bumpConfigVersion(client);
       await client.query('COMMIT');
       sse.notifyConfigVersion(v);
-      return { ok: true, version: v };
+      return { ok: true, version: v, deleted: id };
     } catch (e) {
       await client.query('ROLLBACK');
       throw e;

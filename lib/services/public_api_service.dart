@@ -59,12 +59,18 @@ Map<String, String> get _fetchNoStoreHeaders => const {
 
 Map<String, String> get _publicGetHeaders => kIsWeb ? <String, String>{} : _fetchNoStoreHeaders;
 
-int _parseConfigVersionJson(Object? raw) {
-  if (raw is int) return raw;
-  if (raw is num) return raw.toInt();
-  if (raw is String) return int.tryParse(raw.trim()) ?? 0;
-  return 0;
+int _safeInt(Object? raw, {int fallback = 0}) {
+  if (raw is int) return raw < 0 ? fallback : raw;
+  if (raw is num) {
+    final d = raw.toDouble();
+    if (d.isNaN || !d.isFinite) return fallback;
+    return d.toInt();
+  }
+  if (raw is String) return int.tryParse(raw.trim()) ?? fallback;
+  return fallback;
 }
+
+int _parseConfigVersionJson(Object? raw) => _safeInt(raw);
 
 bool _planRowEnabled(Object? v) {
   if (v == null) return true;

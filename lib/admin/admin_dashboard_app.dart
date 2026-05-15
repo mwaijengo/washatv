@@ -198,6 +198,50 @@ class _AdminScaffoldState extends State<AdminScaffold> {
 
   Map<String, String> _adminHeaders() => widget.auth.headers(contentType: 'application/json');
 
+  /// DELETE without JSON Content-Type — fewer CORS preflight issues on Flutter web.
+  Map<String, String> _adminHeadersForDelete() => widget.auth.headers();
+
+  List<AdminSlide> _parseAdminSlidesJson(List<dynamic> raw) {
+    return raw.whereType<Map>().map((rawItem) {
+      final j = rawItem.cast<String, dynamic>();
+      return AdminSlide(
+        id: _s(j['id']),
+        title: _s(j['title']),
+        subtitle: _s(j['subtitle']),
+        imageUrl: _s(j['image_url']),
+        premium: j['premium'] as bool? ?? false,
+        active: j['active'] as bool? ?? true,
+        sortOrder: (j['sort_order'] as num?)?.toInt() ?? 0,
+      );
+    }).where((s) => s.id.isNotEmpty).toList();
+  }
+
+  Uri _adminSlideUri(String slideId) =>
+      Uri.parse('$_apiBase/api/v1/admin/slides/${Uri.encodeComponent(slideId)}');
+
+  Future<bool> _refreshSlidesFromServer() async {
+    if (!_hasAdminSession) return false;
+    try {
+      final res = await http
+          .get(Uri.parse('$_apiBase/api/v1/admin/slides'), headers: _adminHeadersForDelete())
+          .timeout(const Duration(seconds: 12));
+      if (res.statusCode < 200 || res.statusCode >= 300) return false;
+      final map = jsonDecode(res.body) as Map<String, dynamic>;
+      final raw = (map['slides'] as List?)?.cast<dynamic>() ?? const [];
+      if (!mounted) return false;
+      setState(() => _slides = _parseAdminSlidesJson(raw));
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  String _adminHttpError(http.Response res) {
+    final body = res.body.trim();
+    if (body.isNotEmpty && body.length < 120) return body;
+    return 'HTTP ${res.statusCode}';
+  }
+
   /// Same rule as [PublicApiService._publicGetHeaders]: on web, extra headers can force CORS preflight on GET.
   Map<String, String> get _publicBootstrapHeaders => kIsWeb ? <String, String>{} : const {'Cache-Control': 'no-cache', 'Pragma': 'no-cache'};
 
@@ -245,18 +289,7 @@ class _AdminScaffoldState extends State<AdminScaffold> {
           if (slidesRes.statusCode >= 200 && slidesRes.statusCode < 300) {
             final slidesMap = jsonDecode(slidesRes.body) as Map<String, dynamic>;
             final raw = (slidesMap['slides'] as List?)?.cast<dynamic>() ?? const [];
-            serverSlides = raw.whereType<Map>().map((rawItem) {
-              final j = rawItem.cast<String, dynamic>();
-              return AdminSlide(
-                id: _s(j['id']),
-                title: _s(j['title']),
-                subtitle: _s(j['subtitle']),
-                imageUrl: _s(j['image_url']),
-                premium: j['premium'] as bool? ?? false,
-                active: j['active'] as bool? ?? true,
-                sortOrder: (j['sort_order'] as num?)?.toInt() ?? 0,
-              );
-            }).toList();
+            serverSlides = _parseAdminSlidesJson(raw);
           }
           if (txRes.statusCode >= 200 && txRes.statusCode < 300) {
             final txMap = jsonDecode(txRes.body) as Map<String, dynamic>;
@@ -2364,7 +2397,7 @@ class _AdminScaffoldState extends State<AdminScaffold> {
                   ),
                   IconButton(
                     tooltip: 'Futa',
-                    onPressed: sourceIndex < 0 ? null : () => _confirmDeleteSlide(sourceIndex),
+                    onPressed: () => _confirmDeleteSlide(s.id),
                     icon: const Icon(Icons.delete_outline_rounded, size: 18, color: Color(0xFFFCA5A5)),
                     visualDensity: VisualDensity.compact,
                     padding: EdgeInsets.zero,
@@ -2393,7 +2426,7 @@ class _AdminScaffoldState extends State<AdminScaffold> {
     for (var i = 0; i < ordered.length; i++) {
       ordered[i].sortOrder = i + 1;
     }
-    setState(() {});
+    setState(() => _slides = ordered);
     unawaited(_persistSlideSortOrders(ordered));
   }
 
@@ -2404,7 +2437,7 @@ class _AdminScaffoldState extends State<AdminScaffold> {
         ordered.map(
           (s) => http
               .patch(
-                Uri.parse('$_apiBase/api/v1/admin/slides/${s.id}'),
+                _adminSlideUri(s.id),
                 headers: _adminHeaders(),
                 body: jsonEncode({'sort_order': s.sortOrder}),
               )
@@ -2486,35 +2519,46 @@ class _AdminScaffoldState extends State<AdminScaffold> {
     return 'SL-${(maxN + 1).toString().padLeft(3, '0')}';
   }
 
-  Future<void> _confirmDeleteSlide(int index) async {
+  Future<void> _confirmDeleteSlide(String slideId) async {
+    final index = _slides.indexWhere((e) => e.id == slideId);
+    if (index < 0) {
+      if (mounted) _showToast('Slide haipatikani.', _ToastType.error);
+      return;
+    }
     final s = _slides[index];
     final ok = await _showDeleteConfirmModal(
       title: 'Futa slide?',
       message: '“${s.title}” itaondolewa kwenye app moja kwa moja.',
     );
-    if (ok && mounted) {
-      final previousSlides = List<AdminSlide>.from(_slides);
-      final deletedId = s.id;
-      setState(() => _slides.removeAt(index));
-      if (_hasAdminSession) {
-        try {
-          final res = await http.delete(
-            Uri.parse('$_apiBase/api/v1/admin/slides/$deletedId'),
-            headers: _adminHeaders(),
-          ).timeout(const Duration(seconds: 12));
-          if (res.statusCode < 200 || res.statusCode >= 300) {
-            throw Exception('slide delete ${res.statusCode}');
-          }
-          await _hydrateFromBackend();
-        } catch (_) {
-          if (!mounted) return;
-          setState(() => _slides = previousSlides);
-          _showToast('Kufuta slide kumeshindikana kwa server.', _ToastType.error);
-          return;
+    if (!ok || !mounted) return;
+
+    final previousSlides = List<AdminSlide>.from(_slides);
+    final id = slideId;
+
+    if (_hasAdminSession) {
+      try {
+        final res = await http
+            .delete(_adminSlideUri(id), headers: _adminHeadersForDelete())
+            .timeout(const Duration(seconds: 12));
+        if (res.statusCode != 404 && (res.statusCode < 200 || res.statusCode >= 300)) {
+          throw Exception(_adminHttpError(res));
         }
+        if (!mounted) return;
+        setState(() => _slides.removeWhere((e) => e.id == id));
+        final refreshed = await _refreshSlidesFromServer();
+        if (!refreshed) await _hydrateFromBackend();
+        if (!mounted) return;
+        _showToast('Slide imefutwa kwenye databesi', _ToastType.success);
+      } catch (e) {
+        if (!mounted) return;
+        setState(() => _slides = previousSlides);
+        _showToast('Kufuta slide kumeshindikana: $e', _ToastType.error);
       }
-      _showToast('Slide imefutwa kwenye databesi', _ToastType.success);
+      return;
     }
+
+    setState(() => _slides.removeWhere((e) => e.id == id));
+    _showToast('Imefutwa local pekee. Ingia ili kusawazisha na server.', _ToastType.warning);
   }
 
   void _showSlideEditor({int? index}) {
@@ -2674,7 +2718,7 @@ class _AdminScaffoldState extends State<AdminScaffold> {
                     final id = _slides[editIndex].id;
                     final res = await http
                         .patch(
-                          Uri.parse('$_apiBase/api/v1/admin/slides/$id'),
+                          _adminSlideUri(id),
                           headers: _adminHeaders(),
                           body: jsonEncode(payloadBody),
                         )

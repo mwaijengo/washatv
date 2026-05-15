@@ -108,8 +108,10 @@ class _WashaAppState extends State<WashaApp> with WidgetsBindingObserver {
     for (var attempt = 0; attempt < 5 && !remoteFetched; attempt++) {
       try {
         final remote = await api.fetchBootstrap();
-        remoteConfigVersion = remote.version;
-        remoteConfigSyncedAt = remote.configSyncedAt;
+        remoteConfigVersion = _safeConfigVersion(remote.version);
+        remoteConfigSyncedAt = remote.configSyncedAt is int && remote.configSyncedAt >= 0
+            ? remote.configSyncedAt
+            : 0;
         bootstrapSyncSignature = remote.syncSignature;
         fetchedSubscriptionEnabled = remote.subscriptionEnabled;
         fetchedMaintenanceMode = remote.maintenanceMode;
@@ -207,14 +209,30 @@ class _WashaAppState extends State<WashaApp> with WidgetsBindingObserver {
     _startLiveSyncAfterBoot();
   }
 
+  int _safePollTick() {
+    final t = configPollTick;
+    if (t is! int || t < 0) return 0;
+    return t;
+  }
+
+  void _bumpConfigPollTick() {
+    configPollTick = _safePollTick() + 1;
+  }
+
+  int _safeConfigVersion(int v) {
+    if (v is! int || v < 0) return 0;
+    return v;
+  }
+
   Future<void> _pollConfigMeta() async {
     if (bootLoading || metaPollInFlight) return;
     metaPollInFlight = true;
     try {
-      configPollTick++;
+      _bumpConfigPollTick();
+      final tick = configPollTick;
       final changedSig = await api.fetchBootstrapMetaIfChanged(
         bootstrapSyncSignature,
-        localVersion: remoteConfigVersion,
+        localVersion: _safeConfigVersion(remoteConfigVersion),
       );
       if (changedSig != null) {
         if (syncInFlight) {
@@ -222,10 +240,10 @@ class _WashaAppState extends State<WashaApp> with WidgetsBindingObserver {
         } else {
           await _syncFromServer(silent: true, forceFull: true);
         }
-      } else if (configPollTick % 8 == 0 && !syncInFlight) {
+      } else if (tick % 8 == 0 && !syncInFlight) {
         await _syncFromServer(silent: true);
       }
-      if (configPollTick % 2 == 0) {
+      if (tick % 2 == 0) {
         unawaited(_syncPremiumFromServer());
       }
     } finally {
@@ -276,8 +294,10 @@ class _WashaAppState extends State<WashaApp> with WidgetsBindingObserver {
       }
       final nextPlans = remotePlans.isNotEmpty ? remotePlans : await loadUserPlans();
       setState(() {
-        remoteConfigVersion = remote.version;
-        remoteConfigSyncedAt = remote.configSyncedAt;
+        remoteConfigVersion = _safeConfigVersion(remote.version);
+        remoteConfigSyncedAt = remote.configSyncedAt is int && remote.configSyncedAt >= 0
+            ? remote.configSyncedAt
+            : 0;
         bootstrapSyncSignature = remote.syncSignature;
         subscriptionEnabled = remote.subscriptionEnabled;
         maintenanceMode = remote.maintenanceMode;
