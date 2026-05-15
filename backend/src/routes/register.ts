@@ -1,7 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import type { Env } from '../config/env.js';
 import type { DbPool } from '../db/pool.js';
-import { bumpConfigVersion, getConfigVersion } from '../lib/version.js';
+import { bumpConfigVersion, getConfigMeta, getConfigVersion } from '../lib/version.js';
 import type { SseHub } from '../lib/sseHub.js';
 import bcrypt from 'bcrypt';
 import { nanoid } from 'nanoid';
@@ -20,6 +20,46 @@ export async function registerRoutes(
     time: new Date().toISOString(),
   }));
 
+  /** Lightweight poll — same sync cursor as bootstrap without heavy catalog payload (Supasoka-style). */
+  app.get('/api/v1/public/bootstrap-meta', async (_req, reply) => {
+    const meta = await getConfigMeta(pool);
+    reply.header('Cache-Control', 'private, no-store');
+    return { ok: true, version: meta.version, configSyncedAt: meta.configSyncedAt };
+  });
+
+  /** Viewer premium sync by stable device id (admin grants + paid subscriptions). */
+  app.get<{ Params: { device_id: string } }>('/api/v1/public/user-premium/:device_id', async (req, reply) => {
+    const deviceId = (req.params.device_id ?? '').trim();
+    if (!deviceId) return reply.code(400).send({ error: 'device_id is required' });
+    const r = await pool.query(
+      `SELECT subscription, premium_until, admin_access_until FROM users WHERE device_id = $1 LIMIT 1`,
+      [deviceId],
+    );
+    if (!r.rowCount) return { ok: true, premiumUntilMs: null };
+    const row = r.rows[0] as {
+      subscription: string;
+      premium_until: Date | null;
+      admin_access_until: Date | null;
+    };
+    const now = Date.now();
+    const candidates: number[] = [];
+    if (row.premium_until) {
+      const ms = row.premium_until.getTime();
+      if (ms > now) candidates.push(ms);
+    }
+    if (row.admin_access_until) {
+      const ms = row.admin_access_until.getTime();
+      if (ms > now) candidates.push(ms);
+    }
+    if (row.subscription === 'premium' && candidates.length === 0) {
+      // Legacy rows before premium_until was tracked — treat as active for 30 days from first sync.
+      candidates.push(now + 30 * 24 * 60 * 60 * 1000);
+    }
+    const premiumUntilMs = candidates.length > 0 ? Math.max(...candidates) : null;
+    reply.header('Cache-Control', 'private, no-store');
+    return { ok: true, premiumUntilMs };
+  });
+
   /** Single round-trip for mobile cold start */
   app.get('/api/v1/public/bootstrap', async (req, reply) => {
     const since = Number((req.query as { since?: string }).since ?? 0);
@@ -35,7 +75,7 @@ export async function registerRoutes(
          FROM pricing_plans ORDER BY plan_key`,
       ),
       pool.query(
-        `SELECT id, name, category, premium, live, status, thumbnail, viewers, rating, drm, sort_order, updated_at
+        `SELECT id, name, category, premium, live, status, thumbnail, stream_url, viewers, rating, drm, sort_order, updated_at
          FROM channels WHERE status = 'active' ORDER BY sort_order, name`,
       ),
       pool.query(
@@ -43,9 +83,11 @@ export async function registerRoutes(
          FROM slides WHERE active = true ORDER BY sort_order, id`,
       ),
     ]);
+    const meta = await getConfigMeta(pool);
     reply.header('Cache-Control', 'private, no-store');
     return {
       version,
+      configSyncedAt: meta.configSyncedAt,
       settings: settings.rows[0],
       plans: plans.rows,
       channels: channels.rows,
@@ -79,7 +121,7 @@ export async function registerRoutes(
 
   app.get('/api/v1/public/channels', async () => {
     const r = await pool.query(
-      `SELECT id, name, category, premium, live, status, thumbnail, viewers, rating, drm, sort_order, updated_at
+      `SELECT id, name, category, premium, live, status, thumbnail, stream_url, viewers, rating, drm, sort_order, updated_at
        FROM channels WHERE status = 'active' ORDER BY sort_order, name`,
     );
     const v = await getConfigVersion(pool);
@@ -178,7 +220,27 @@ export async function registerRoutes(
         ],
       );
 
-      await client.query(`UPDATE users SET subscription = 'premium' WHERE id = $1`, [userId]);
+      let durationDays = 30;
+      if (planKey) {
+        const planRow = await client.query(
+          `SELECT duration_days FROM pricing_plans WHERE plan_key = $1 AND enabled = true`,
+          [planKey],
+        );
+        if (planRow.rowCount) {
+          durationDays = Number((planRow.rows[0] as { duration_days: number }).duration_days) || durationDays;
+        }
+      }
+      const premiumUntil = new Date(Date.now() + durationDays * 24 * 60 * 60 * 1000);
+      await client.query(
+        `UPDATE users SET
+           subscription = 'premium',
+           premium_until = CASE
+             WHEN premium_until IS NOT NULL AND premium_until > now() THEN premium_until + ($2 || ' days')::interval
+             ELSE $3::timestamptz
+           END
+         WHERE id = $1`,
+        [userId, String(durationDays), premiumUntil],
+      );
       await client.query('COMMIT');
       return { ok: true, transaction_ref: providerRef };
     } catch (e) {
@@ -348,8 +410,8 @@ export async function registerRoutes(
     try {
       await client.query('BEGIN');
       await client.query(
-        `INSERT INTO channels (id, name, category, premium, live, status, thumbnail, viewers, rating, drm, sort_order, updated_at)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11, now())`,
+        `INSERT INTO channels (id, name, category, premium, live, status, thumbnail, stream_url, viewers, rating, drm, sort_order, updated_at)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12, now())`,
         [
           id,
           b.name,
@@ -358,6 +420,7 @@ export async function registerRoutes(
           b.live ?? false,
           b.status ?? 'active',
           b.thumbnail ?? '',
+          String(b.stream_url ?? b.streamUrl ?? ''),
           Number(b.viewers ?? 0),
           String(b.rating ?? '5.0'),
           b.drm ?? 'none',
@@ -396,6 +459,8 @@ export async function registerRoutes(
           live: 'live',
           status: 'status',
           thumbnail: 'thumbnail',
+          stream_url: 'stream_url',
+          streamUrl: 'stream_url',
           viewers: 'viewers',
           rating: 'rating',
           drm: 'drm',

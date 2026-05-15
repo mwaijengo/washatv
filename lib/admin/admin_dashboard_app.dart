@@ -4,7 +4,7 @@ import 'dart:math';
 import 'dart:ui';
 
 import 'package:fl_chart/fl_chart.dart';
-import 'package:flutter/foundation.dart' show kReleaseMode;
+import 'package:flutter/foundation.dart' show kIsWeb, kReleaseMode;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:google_fonts/google_fonts.dart';
@@ -14,6 +14,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../constants/app_channel_categories.dart';
 import '../services/pricing_catalog.dart';
 import '../services/storage_service.dart';
+import 'admin_auth.dart';
 import 'admin_colors.dart';
 import 'admin_currency.dart';
 import 'admin_data.dart';
@@ -21,9 +22,33 @@ import 'admin_models.dart';
 
 enum _AccessUnit { hours, days, weeks, months }
 
-/// Run with: `flutter run -t lib/main_admin.dart`
+/// Holds pricing text fields for one admin session (safe across Flutter web hot reload).
+class _PricingControllersBundle {
+  final Map<String, TextEditingController> name = {};
+  final Map<String, TextEditingController> price = {};
+  final Map<String, TextEditingController> days = {};
+
+  void dispose() {
+    for (final c in name.values) {
+      c.dispose();
+    }
+    for (final c in price.values) {
+      c.dispose();
+    }
+    for (final c in days.values) {
+      c.dispose();
+    }
+    name.clear();
+    price.clear();
+    days.clear();
+  }
+}
+
+/// Run with: `flutter run -t lib/main_admin.dart` (see [AdminLaunchGate] for login gate).
 class WashaAdminApp extends StatelessWidget {
-  const WashaAdminApp({super.key});
+  const WashaAdminApp({super.key, required this.home});
+
+  final Widget home;
 
   @override
   Widget build(BuildContext context) {
@@ -41,7 +66,7 @@ class WashaAdminApp extends StatelessWidget {
           surface: AdminColors.bgSecondary,
         ),
       ),
-      home: const _AdminScaffold(),
+      home: home,
     );
   }
 }
@@ -60,23 +85,22 @@ enum AdminPageId {
   logs,
 }
 
-class _AdminScaffold extends StatefulWidget {
-  const _AdminScaffold();
+class AdminScaffold extends StatefulWidget {
+  const AdminScaffold({super.key, required this.auth});
+
+  final AdminAuth auth;
 
   @override
-  State<_AdminScaffold> createState() => _AdminScaffoldState();
+  State<AdminScaffold> createState() => _AdminScaffoldState();
 }
 
-class _AdminScaffoldState extends State<_AdminScaffold> {
+class _AdminScaffoldState extends State<AdminScaffold> {
   final _rand = Random();
   final _globalSearch = TextEditingController();
   final _userSearch = TextEditingController();
   /// Same Railway API as the viewer app unless overridden with `--dart-define=WASHA_API_BASE_URL=...`.
-  final String _apiBase = const String.fromEnvironment(
-    'WASHA_API_BASE_URL',
-    defaultValue: 'https://washatv-production.up.railway.app',
-  ).replaceAll(RegExp(r'/+$'), '');
-  final String _adminApiKey = const String.fromEnvironment('WASHA_ADMIN_API_KEY');
+  String get _apiBase => widget.auth.apiBase;
+  bool get _hasAdminSession => widget.auth.hasSession;
 
   late List<AdminUser> _users;
   late List<AdminChannel> _channels;
@@ -90,13 +114,20 @@ class _AdminScaffoldState extends State<_AdminScaffold> {
   /// Field initializers run on first read — survives hot reload when `initState` does not re-run.
   late final TextEditingController _settingsSiteName = TextEditingController(text: _settings.siteName);
   late final TextEditingController _settingsWhatsapp = TextEditingController(text: _settings.whatsappNumber);
-
   AdminPageId _page = AdminPageId.dashboard;
   String? _slideQuery = '';
   String? _slideFilter = 'all';
   /// Desktop: whether sidebar is open (main gets left margin). HTML starts with main `full-width` → sidebar closed.
   bool _sidebarOpen = false;
   final List<_Toast> _toasts = [];
+  Timer? _adminRefreshTimer;
+  static const _pricingPlanKeys = ['weekly', 'gold', 'platinum'];
+  _PricingControllersBundle? _pricingCtrls;
+
+  _PricingControllersBundle get _pricingFields {
+    _pricingCtrls ??= _PricingControllersBundle();
+    return _pricingCtrls!;
+  }
 
   bool get _isMobile => MediaQuery.sizeOf(context).width < 1024;
 
@@ -105,25 +136,47 @@ class _AdminScaffoldState extends State<_AdminScaffold> {
     super.initState();
     _users = generateUsers(_rand);
     _channels = generateChannels(_rand);
-    _slides = generateSlides();
+    /// Empty until bootstrap/admin APIs load — avoids fake carousel rows overwriting real DB state in the UI.
+    _slides = [];
     _pricing = defaultPricingPlans();
+    _ensurePricingControllers();
     _subscriptions = generateSubscriptions(_rand, _users, _pricing);
     _payments = generatePayments(_rand, _users);
     _notifications = staticNotifications();
     _logs = generateLogs(_rand);
-    _loadSavedPricing();
-    _loadSavedSettings();
-    _hydrateFromBackend();
+    unawaited(_bootstrapAdminData());
+    _adminRefreshTimer = Timer.periodic(const Duration(seconds: 15), (_) {
+      if (!mounted || !_hasAdminSession) return;
+      if (_page == AdminPageId.pricing) return;
+      unawaited(_hydrateFromBackend());
+    });
+  }
+
+  /// Load settings (API key), then server bootstrap. Local pricing prefs apply **only** if bootstrap fails (offline).
+  Future<void> _bootstrapAdminData() async {
+    await _loadSavedSettings();
+    if (!mounted) return;
+    final hydrated = await _hydrateFromBackend();
+    if (!mounted) return;
+    if (!hydrated) await _loadSavedPricing();
   }
 
   Future<void> _loadSavedSettings() async {
     final sp = await SharedPreferences.getInstance();
     final wa = sp.getString(StorageService.supportWhatsappPrefsKey);
-    if (!mounted || wa == null || wa.isEmpty) return;
+    if (!mounted) return;
     setState(() {
-      _settings.whatsappNumber = wa;
-      _settingsWhatsapp.text = wa;
+      if (wa != null && wa.isNotEmpty) {
+        _settings.whatsappNumber = wa;
+        _settingsWhatsapp.text = wa;
+      }
     });
+  }
+
+  Future<void> _adminLogout() async {
+    await widget.auth.logout();
+    if (!mounted) return;
+    _showToast('Umetoka.', _ToastType.info);
   }
 
   Future<void> _loadSavedPricing() async {
@@ -139,19 +192,22 @@ class _AdminScaffoldState extends State<_AdminScaffold> {
           }
         }
       });
+      if (mounted) _syncPricingControllersFromPlans();
     } catch (_) {}
   }
 
-  Map<String, String> _adminHeaders() {
-    final h = <String, String>{'Content-Type': 'application/json'};
-    if (_adminApiKey.isNotEmpty) h['X-Admin-Key'] = _adminApiKey;
-    return h;
-  }
+  Map<String, String> _adminHeaders() => widget.auth.headers(contentType: 'application/json');
 
-  Future<void> _hydrateFromBackend() async {
+  /// Same rule as [PublicApiService._publicGetHeaders]: on web, extra headers can force CORS preflight on GET.
+  Map<String, String> get _publicBootstrapHeaders => kIsWeb ? <String, String>{} : const {'Cache-Control': 'no-cache', 'Pragma': 'no-cache'};
+
+  Future<bool> _hydrateFromBackend() async {
     try {
-      final bootstrapRes = await http.get(Uri.parse('$_apiBase/api/v1/public/bootstrap')).timeout(const Duration(seconds: 12));
-      if (bootstrapRes.statusCode < 200 || bootstrapRes.statusCode >= 300) return;
+      final bootstrapUri = Uri.parse('$_apiBase/api/v1/public/bootstrap').replace(
+        queryParameters: const {'since': '0'},
+      );
+      final bootstrapRes = await http.get(bootstrapUri, headers: _publicBootstrapHeaders).timeout(const Duration(seconds: 12));
+      if (bootstrapRes.statusCode < 200 || bootstrapRes.statusCode >= 300) return false;
       final map = jsonDecode(bootstrapRes.body) as Map<String, dynamic>;
       final rawPlans = (map['plans'] as List?)?.cast<dynamic>() ?? const [];
       final rawChannels = (map['channels'] as List?)?.cast<dynamic>() ?? const [];
@@ -163,7 +219,7 @@ class _AdminScaffoldState extends State<_AdminScaffold> {
       List<AdminPayment>? serverPayments;
       List<AdminNotification>? serverNotifications;
 
-      if (_adminApiKey.isNotEmpty) {
+      if (_hasAdminSession) {
         try {
           final usersRes = await http.get(Uri.parse('$_apiBase/api/v1/admin/users'), headers: _adminHeaders()).timeout(const Duration(seconds: 12));
           final slidesRes = await http.get(Uri.parse('$_apiBase/api/v1/admin/slides'), headers: _adminHeaders()).timeout(const Duration(seconds: 12));
@@ -236,7 +292,7 @@ class _AdminScaffoldState extends State<_AdminScaffold> {
         } catch (_) {}
       }
 
-      if (!mounted) return;
+      if (!mounted) return false;
       setState(() {
         for (final p in rawPlans) {
           if (p is! Map) continue;
@@ -244,9 +300,18 @@ class _AdminScaffoldState extends State<_AdminScaffold> {
           final key = _s(j['plan_key']);
           final existing = _pricing[key];
           if (existing == null) continue;
-          final price = (j['price'] as num?)?.toDouble();
-          final days = (j['duration_days'] as num?)?.toInt();
-          final enabled = j['enabled'] as bool?;
+          final priceRaw = j['price'];
+          final price = priceRaw is num ? priceRaw.toDouble() : double.tryParse(priceRaw?.toString().trim() ?? '');
+          final daysRaw = j['duration_days'];
+          final days = daysRaw is num ? daysRaw.toInt() : int.tryParse(daysRaw?.toString().trim() ?? '');
+          final en = j['enabled'];
+          final bool? enabled = en is bool
+              ? en
+              : en is num
+                  ? en != 0
+                  : en is String
+                      ? (en.toLowerCase() == 'true' || en == '1')
+                      : null;
           final name = (j['name'] as String?)?.trim();
           if (name != null && name.isNotEmpty) existing.name = name;
           if (price != null) existing.price = price;
@@ -266,6 +331,7 @@ class _AdminScaffoldState extends State<_AdminScaffold> {
             live: j['live'] as bool? ?? false,
             status: _s(j['status'], fallback: 'active'),
             thumbnail: _s(j['thumbnail']),
+            streamUrl: _s(j['stream_url'] ?? j['streamUrl']),
             viewers: (j['viewers'] as num?)?.toInt() ?? 0,
             rating: _s(j['rating'], fallback: '5.0'),
             drm: _s(j['drm'], fallback: 'none'),
@@ -293,15 +359,100 @@ class _AdminScaffoldState extends State<_AdminScaffold> {
         final wa = _s(settings['whatsapp_number']);
         _settings.whatsappNumber = wa;
         _settingsWhatsapp.text = wa;
+        final site = _s(settings['site_name']);
+        if (site.isNotEmpty) {
+          _settings.siteName = site;
+          _settingsSiteName.text = site;
+        }
+        final subEn = settings['subscription_enabled'];
+        if (subEn is bool) {
+          _settings.subscriptionEnabled = subEn;
+        } else if (subEn is num) {
+          _settings.subscriptionEnabled = subEn != 0;
+        }
+        final maint = settings['maintenance_mode'];
+        if (maint is bool) {
+          _settings.maintenanceMode = maint;
+        } else if (maint is num) {
+          _settings.maintenanceMode = maint != 0;
+        }
       });
       if (mounted) {
-        WidgetsBinding.instance.addPostFrameCallback((_) {
-          if (mounted) unawaited(_persistPricingMapToPrefs());
-        });
+        _syncPricingControllersFromPlans();
+        await _persistPricingMapToPrefs();
       }
+      return true;
     } catch (_) {
-      // Local mode fallback.
+      return false;
     }
+  }
+
+  String _pricingPriceText(double value) =>
+      value == value.roundToDouble() ? value.toInt().toString() : value.toStringAsFixed(2);
+
+  void _ensurePricingControllers() {
+    final fields = _pricingFields;
+    for (final key in _pricingPlanKeys) {
+      final p = _pricing[key];
+      if (p == null) continue;
+      fields.name.putIfAbsent(key, () => TextEditingController(text: p.name));
+      fields.price.putIfAbsent(key, () => TextEditingController(text: _pricingPriceText(p.price)));
+      fields.days.putIfAbsent(key, () => TextEditingController(text: '${p.duration}'));
+    }
+  }
+
+  void _syncPricingControllersFromPlans() {
+    _ensurePricingControllers();
+    final fields = _pricingFields;
+    for (final key in _pricingPlanKeys) {
+      final p = _pricing[key];
+      if (p == null) continue;
+      fields.name[key]!.text = p.name;
+      fields.price[key]!.text = _pricingPriceText(p.price);
+      fields.days[key]!.text = '${p.duration}';
+    }
+  }
+
+  void _applyPricingControllersToPlans() {
+    final fields = _pricingFields;
+    for (final key in _pricingPlanKeys) {
+      final p = _pricing[key];
+      if (p == null) continue;
+      final name = fields.name[key]?.text.trim() ?? '';
+      if (name.isNotEmpty) p.name = name;
+      final priceRaw = fields.price[key]?.text.replaceAll(RegExp(r'[^0-9.]'), '').trim() ?? '';
+      final price = double.tryParse(priceRaw);
+      if (price != null && price >= 0) {
+        p.price = price;
+        p.originalPrice = price;
+      }
+      final days = int.tryParse(fields.days[key]?.text.trim() ?? '');
+      if (days != null && days > 0) p.duration = days;
+    }
+    _syncPricingDerivedFields();
+  }
+
+  void _applyPricingRowToPlan(String key, Map<String, dynamic> j) {
+    final p = _pricing[key];
+    if (p == null) return;
+    final name = (j['name'] as String?)?.trim();
+    if (name != null && name.isNotEmpty) p.name = name;
+    final priceRaw = j['price'];
+    final price = priceRaw is num ? priceRaw.toDouble() : double.tryParse(priceRaw?.toString().trim() ?? '');
+    if (price != null) {
+      p.price = price;
+      p.originalPrice = price;
+    }
+    final daysRaw = j['duration_days'];
+    final days = daysRaw is num ? daysRaw.toInt() : int.tryParse(daysRaw?.toString().trim() ?? '');
+    if (days != null && days > 0) p.duration = days;
+    final en = j['enabled'];
+    if (en is bool) {
+      p.enabled = en;
+    } else if (en is num) {
+      p.enabled = en != 0;
+    }
+    p.discount = 0;
   }
 
   Future<void> _persistPricingMapToPrefs() async {
@@ -347,8 +498,11 @@ class _AdminScaffoldState extends State<_AdminScaffold> {
 
   @override
   void dispose() {
+    _adminRefreshTimer?.cancel();
     _settingsSiteName.dispose();
     _settingsWhatsapp.dispose();
+    _pricingCtrls?.dispose();
+    _pricingCtrls = null;
     _globalSearch.dispose();
     _userSearch.dispose();
     super.dispose();
@@ -1562,7 +1716,7 @@ class _AdminScaffoldState extends State<_AdminScaffold> {
   }
 
   Future<void> _syncUserToBackend(AdminUser u, Map<String, dynamic> patch) async {
-    if (_adminApiKey.isEmpty) return;
+    if (!_hasAdminSession) return;
     final res = await http
         .patch(
           Uri.parse('$_apiBase/api/v1/admin/users/${u.id}'),
@@ -1869,7 +2023,10 @@ class _AdminScaffoldState extends State<_AdminScaffold> {
                                   crossAxisAlignment: CrossAxisAlignment.start,
                                   children: [
                                     Text(ch.name, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 13, color: Colors.white)),
-                                    Text(ch.category, style: const TextStyle(fontSize: 9, color: Color(0xFFD1D5DB))),
+                                    Text(
+                                      ch.streamUrl.trim().isNotEmpty ? '${ch.category} · Stream' : ch.category,
+                                      style: const TextStyle(fontSize: 9, color: Color(0xFFD1D5DB)),
+                                    ),
                                   ],
                                 ),
                               ),
@@ -1939,41 +2096,6 @@ class _AdminScaffoldState extends State<_AdminScaffold> {
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         /// Dev-only banner: release IPAs/APKs built with [--dart-define-from-file] omit this panel.
-        if (_adminApiKey.isEmpty && !kReleaseMode)
-          Padding(
-            padding: const EdgeInsets.only(bottom: 10),
-            child: Container(
-              width: double.infinity,
-              padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
-              decoration: BoxDecoration(
-                color: const Color(0x33451A03),
-                borderRadius: BorderRadius.circular(12),
-                border: Border.all(color: const Color(0x66EA580C)),
-              ),
-              child: const Row(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Icon(Icons.key_off_rounded, size: 20, color: Color(0xFFFDBA74)),
-                  SizedBox(width: 10),
-                  Expanded(
-                    child: Text(
-                      'Slides hazihifadhiwi kwa databesi bila ufunguo wa admin. '
-                      'Weka thamani ya ADMIN_API_KEY ya Railway ndani ya WASHA_ADMIN_API_KEY kwenye admin/dev_defines.json. '
-                      'MUHIMU: lazima uendeshe na --dart-define-from-file (si flutter run tu). '
-                      'Kutoka mzizi wa mradi: flutter run -t lib/main_admin.dart -d chrome '
-                      '--dart-define-from-file=admin/dev_defines.json. '
-                      'Ukikatika folda admin/: flutter run -d chrome --dart-define-from-file=dev_defines.json '
-                      'au bash admin/run_admin_chrome.sh. '
-                      'Run & Debug: \"Admin · Chrome\" au \"Admin · Chrome (cwd admin/)\". '
-                      'IPA: bash admin/build_ipa.sh. '
-                      'Server na migrations lazima ziwe tayari.',
-                      style: TextStyle(fontSize: 12, height: 1.38, color: Color(0xFFFED7AA)),
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          ),
         Container(
           width: double.infinity,
           padding: const EdgeInsets.fromLTRB(16, 14, 16, 14),
@@ -2276,7 +2398,7 @@ class _AdminScaffoldState extends State<_AdminScaffold> {
   }
 
   Future<void> _persistSlideSortOrders(List<AdminSlide> ordered) async {
-    if (_adminApiKey.isEmpty) return;
+    if (!_hasAdminSession) return;
     try {
       final results = await Future.wait(
         ordered.map(
@@ -2374,7 +2496,7 @@ class _AdminScaffoldState extends State<_AdminScaffold> {
       final previousSlides = List<AdminSlide>.from(_slides);
       final deletedId = s.id;
       setState(() => _slides.removeAt(index));
-      if (_adminApiKey.isNotEmpty) {
+      if (_hasAdminSession) {
         try {
           final res = await http.delete(
             Uri.parse('$_apiBase/api/v1/admin/slides/$deletedId'),
@@ -2532,12 +2654,8 @@ class _AdminScaffoldState extends State<_AdminScaffold> {
                   _showToast('Jaza title na URL ya picha', _ToastType.error);
                   return;
                 }
-                if (_adminApiKey.isEmpty) {
-                  _showToast(
-                    'WASHA_ADMIN_API_KEY haipo. Tumia admin/dev_defines.json '
-                    '(ona .example) au --dart-define=WASHA_ADMIN_API_KEY=YAKO (sawa na Railway ADMIN_API_KEY).',
-                    _ToastType.error,
-                  );
+                if (!_hasAdminSession) {
+                  _showToast('Ingia kwanza (skrini ya kwanza) ili kuhifadhi kwenye server.', _ToastType.error);
                   return;
                 }
 
@@ -2685,7 +2803,7 @@ class _AdminScaffoldState extends State<_AdminScaffold> {
     if (!ok || !mounted) return;
     final previous = List<AdminChannel>.from(_channels);
     final id = ch.id;
-    if (_adminApiKey.isNotEmpty) {
+    if (_hasAdminSession) {
       try {
         final res = await http
             .delete(
@@ -2717,6 +2835,7 @@ class _AdminScaffoldState extends State<_AdminScaffold> {
     final isEdit = existing != null;
     final name = TextEditingController(text: existing?.name ?? '');
     final thumb = TextEditingController(text: existing?.thumbnail ?? '');
+    final stream = TextEditingController(text: existing?.streamUrl ?? '');
     var category = existing?.category ?? kAppChannelCategories.first;
     if (!kAppChannelCategories.contains(category)) {
       category = kAppChannelCategories.first;
@@ -2765,6 +2884,18 @@ class _AdminScaffoldState extends State<_AdminScaffold> {
                       decoration: _inputDeco().copyWith(
                         labelText: 'URL ya picha (hiari)',
                         hintText: 'https://…',
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                    TextField(
+                      controller: stream,
+                      keyboardType: TextInputType.url,
+                      autocorrect: false,
+                      decoration: _inputDeco().copyWith(
+                        labelText: 'URL ya mtangazo',
+                        hintText: 'https://…/stream.m3u8',
+                        helperText: 'HLS, m3u8, au mp4 — inatumika kwenye player ya mtumiaji',
+                        prefixIcon: const Icon(Icons.play_circle_outline_rounded, color: Color(0xFF94A3B8), size: 20),
                       ),
                     ),
                     const SizedBox(height: 16),
@@ -2837,6 +2968,7 @@ class _AdminScaffoldState extends State<_AdminScaffold> {
                     return;
                   }
                   final tUrl = thumb.text.trim();
+                  final sUrl = stream.text.trim();
                   late AdminChannel syncChannel;
                   setState(() {
                     if (isEdit && index != null) {
@@ -2844,6 +2976,7 @@ class _AdminScaffoldState extends State<_AdminScaffold> {
                       u.name = n;
                       u.category = category;
                       if (tUrl.isNotEmpty) u.thumbnail = tUrl;
+                      u.streamUrl = sUrl;
                       u.premium = premium;
                       u.live = live;
                       u.status = active ? 'active' : 'inactive';
@@ -2858,6 +2991,7 @@ class _AdminScaffoldState extends State<_AdminScaffold> {
                         live: live,
                         status: active ? 'active' : 'inactive',
                         thumbnail: tUrl.isEmpty ? 'https://picsum.photos/400/225?random=${DateTime.now().millisecondsSinceEpoch}' : tUrl,
+                        streamUrl: sUrl,
                         viewers: 0,
                         rating: '5.0',
                         drm: drm,
@@ -2869,7 +3003,7 @@ class _AdminScaffoldState extends State<_AdminScaffold> {
                       syncChannel = created;
                     }
                   });
-                  if (_adminApiKey.isNotEmpty) {
+                  if (_hasAdminSession) {
                     final payload = jsonEncode({
                       'name': syncChannel.name,
                       'category': syncChannel.category,
@@ -2877,6 +3011,7 @@ class _AdminScaffoldState extends State<_AdminScaffold> {
                       'live': syncChannel.live,
                       'status': syncChannel.status,
                       'thumbnail': syncChannel.thumbnail,
+                      'stream_url': syncChannel.streamUrl,
                       'viewers': syncChannel.viewers,
                       'rating': syncChannel.rating,
                       'drm': syncChannel.effectiveDrm,
@@ -3021,7 +3156,11 @@ class _AdminScaffoldState extends State<_AdminScaffold> {
   Widget _pricingPlanEditorCard(String key) {
     final p = _pricing[key]!;
     final meta = _planSlotMeta(key);
-    final nameCtl = TextEditingController(text: p.name);
+    _ensurePricingControllers();
+    final fields = _pricingFields;
+    final nameCtl = fields.name[key]!;
+    final priceCtl = fields.price[key]!;
+    final daysCtl = fields.days[key]!;
     return Opacity(
       opacity: p.enabled ? 1 : 0.55,
       child: Container(
@@ -3066,10 +3205,6 @@ class _AdminScaffoldState extends State<_AdminScaffold> {
                         controller: nameCtl,
                         style: const TextStyle(fontWeight: FontWeight.w800, fontSize: 17, letterSpacing: 0.2),
                         decoration: _inputDeco().copyWith(labelText: 'Jina la kifurushi', hintText: 'mf. DHAHABU'),
-                        onSubmitted: (v) {
-                          final t = v.trim();
-                          if (t.isNotEmpty) setState(() => p.name = t);
-                        },
                       ),
                     ],
                   ),
@@ -3085,36 +3220,48 @@ class _AdminScaffoldState extends State<_AdminScaffold> {
             LayoutBuilder(
               builder: (context, c) {
                 final row = c.maxWidth > 400;
+                Widget priceField() => Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        const Text('Bei (TSh)', style: TextStyle(fontSize: 10, color: Color(0xFF6B7280))),
+                        const SizedBox(height: 4),
+                        TextField(
+                          controller: priceCtl,
+                          keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                          style: const TextStyle(fontSize: 12),
+                          decoration: _inputDeco(),
+                        ),
+                      ],
+                    );
+                Widget daysField() => Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        const Text('Muda (siku)', style: TextStyle(fontSize: 10, color: Color(0xFF6B7280))),
+                        const SizedBox(height: 4),
+                        TextField(
+                          controller: daysCtl,
+                          keyboardType: TextInputType.number,
+                          style: const TextStyle(fontSize: 12),
+                          decoration: _inputDeco(),
+                        ),
+                      ],
+                    );
                 if (row) {
                   return Row(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      Expanded(
-                        child: _numField('Bei (TSh)', p.price, (v) {
-                          setState(() {
-                            p.price = v;
-                            p.originalPrice = v;
-                          });
-                        }),
-                      ),
+                      Expanded(child: priceField()),
                       const SizedBox(width: 12),
-                      Expanded(
-                        child: _intField('Muda (siku)', p.duration, (v) => setState(() => p.duration = v)),
-                      ),
+                      Expanded(child: daysField()),
                     ],
                   );
                 }
                 return Column(
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
-                    _numField('Bei (TSh)', p.price, (v) {
-                      setState(() {
-                        p.price = v;
-                        p.originalPrice = v;
-                      });
-                    }),
+                    priceField(),
                     const SizedBox(height: 12),
-                    _intField('Muda (siku)', p.duration, (v) => setState(() => p.duration = v)),
+                    daysField(),
                   ],
                 );
               },
@@ -3133,51 +3280,6 @@ class _AdminScaffoldState extends State<_AdminScaffold> {
     );
   }
 
-  Widget _numField(String label, double value, ValueChanged<double> onChanged) {
-    final c = TextEditingController(
-      text: value == value.roundToDouble() ? value.toInt().toString() : value.toStringAsFixed(2),
-    );
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Text(label, style: const TextStyle(fontSize: 10, color: Color(0xFF6B7280))),
-        const SizedBox(height: 4),
-        TextField(
-          controller: c,
-          keyboardType: const TextInputType.numberWithOptions(decimal: true),
-          style: const TextStyle(fontSize: 12),
-          decoration: _inputDeco(),
-          onSubmitted: (s) {
-            final v = double.tryParse(s) ?? value;
-            onChanged(v);
-            setState(() {});
-          },
-        ),
-      ],
-    );
-  }
-
-  Widget _intField(String label, int value, ValueChanged<int> onChanged) {
-    final c = TextEditingController(text: '$value');
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Text(label, style: const TextStyle(fontSize: 10, color: Color(0xFF6B7280))),
-        const SizedBox(height: 4),
-        TextField(
-          controller: c,
-          keyboardType: TextInputType.number,
-          style: const TextStyle(fontSize: 12),
-          decoration: _inputDeco(),
-          onSubmitted: (s) {
-            onChanged(int.tryParse(s) ?? value);
-            setState(() {});
-          },
-        ),
-      ],
-    );
-  }
-
   void _syncPricingDerivedFields() {
     for (final p in _pricing.values) {
       p.originalPrice = p.price;
@@ -3186,13 +3288,17 @@ class _AdminScaffoldState extends State<_AdminScaffold> {
   }
 
   Future<void> _savePricing() async {
-    _syncPricingDerivedFields();
+    FocusManager.instance.primaryFocus?.unfocus();
+    await Future<void>.delayed(Duration.zero);
+    if (!mounted) return;
+
+    _applyPricingControllersToPlans();
     final sp = await SharedPreferences.getInstance();
     final map = {for (final e in _pricing.entries) e.key: _pricingToJson(e.value)};
     await sp.setString('washatvPricing', jsonEncode(map));
 
-    if (_adminApiKey.isEmpty) {
-      _showToast('Imehifadhiwa local pekee. Weka WASHA_ADMIN_API_KEY ili kusukuma kwenye server.', _ToastType.warning);
+    if (!_hasAdminSession) {
+      _showToast('Imehifadhiwa local pekee. Ingia tena kwenye skrini ya kwanza.', _ToastType.warning);
       return;
     }
 
@@ -3210,24 +3316,44 @@ class _AdminScaffoldState extends State<_AdminScaffold> {
                 'discount': 0,
                 'duration_days': p.duration,
                 'enabled': p.enabled,
+                'features': p.features,
+                'popular': p.popular,
+                'color_key': p.colorKey,
               }),
             )
             .timeout(const Duration(seconds: 12));
         if (res.statusCode < 200 || res.statusCode >= 300) {
-          throw Exception('pricing ${e.key}: ${res.statusCode}');
+          final detail = res.body.isNotEmpty ? res.body : 'HTTP ${res.statusCode}';
+          throw Exception('pricing ${e.key}: $detail');
+        }
+        final body = jsonDecode(res.body) as Map<String, dynamic>;
+        final row = body['plan'];
+        if (row is Map) {
+          _applyPricingRowToPlan(e.key, row.cast<String, dynamic>());
         }
       }
-      await _hydrateFromBackend();
-      _showToast('Bei zimehifadhiwa. User app inasasisha moja kwa moja (sekunde 2).', _ToastType.success);
-    } catch (_) {
-      _showToast('Imeshindikana kuhifadhi bei kwenye server.', _ToastType.error);
+      if (!mounted) return;
+      setState(() {});
+      _syncPricingControllersFromPlans();
+      await _persistPricingMapToPrefs();
+      if (!mounted) return;
+      _showToast('Bei zimehifadhiwa. App ya mtazamaji inasasisha ndani ya sekunde chache.', _ToastType.success);
+    } catch (e) {
+      if (!mounted) return;
+      _showToast('Imeshindikana kuhifadhi bei kwenye server: $e', _ToastType.error);
     }
   }
 
   void _resetPricing() {
     setState(() => _pricing = defaultPricingPlans());
+    _syncPricingControllersFromPlans();
     SharedPreferences.getInstance().then((sp) => sp.remove('washatvPricing'));
     _showToast('Imewekwa upya', _ToastType.info);
+    if (_hasAdminSession) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) unawaited(_savePricing());
+      });
+    }
   }
 
   // --- Payments ---
@@ -3385,6 +3511,46 @@ class _AdminScaffoldState extends State<_AdminScaffold> {
     );
   }
 
+  Widget _adminSessionCard() {
+    final email = widget.auth.savedEmail;
+    final viaKey = widget.auth.usesBuildTimeKey;
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
+      decoration: BoxDecoration(
+        color: const Color(0x2210B981),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: const Color(0x3310B981)),
+      ),
+      child: Row(
+        children: [
+          const Icon(Icons.verified_user_rounded, color: Color(0xFF34D399), size: 24),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  viaKey ? 'Umeunganishwa (ufunguo wa build)' : 'Umeunganishwa na seva',
+                  style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w700),
+                ),
+                if (email.isNotEmpty)
+                  Text(email, style: const TextStyle(fontSize: 11.5, color: AdminColors.textSecondary)),
+                if (viaKey)
+                  const Text(
+                    'APK iliyojengwa na dev_defines.json — hakuna kuingia tena.',
+                    style: TextStyle(fontSize: 11, height: 1.35, color: AdminColors.textSecondary),
+                  ),
+              ],
+            ),
+          ),
+          if (!viaKey)
+            TextButton(onPressed: () => unawaited(_adminLogout()), child: const Text('Toka')),
+        ],
+      ),
+    );
+  }
+
   // --- Settings ---
   Widget _pageSettings() {
     return Align(
@@ -3399,6 +3565,8 @@ class _AdminScaffoldState extends State<_AdminScaffold> {
             children: [
               const Text('Settings', style: TextStyle(fontSize: 24, fontWeight: FontWeight.w800)),
               const SizedBox(height: 16),
+              _adminSessionCard(),
+              const SizedBox(height: 20),
               const Text('Site Name', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600)),
               const SizedBox(height: 6),
               TextField(
@@ -3446,7 +3614,7 @@ class _AdminScaffoldState extends State<_AdminScaffold> {
                   _settings.whatsappNumber = wa;
                   final sp = await SharedPreferences.getInstance();
                   await sp.setString(StorageService.supportWhatsappPrefsKey, wa);
-                  if (_adminApiKey.isNotEmpty) {
+                  if (_hasAdminSession) {
                     try {
                       final res = await http
                           .patch(
@@ -3635,7 +3803,7 @@ class _AdminScaffoldState extends State<_AdminScaffold> {
               setState(() {
                 _notifications.insert(0, newNotification);
               });
-              if (_adminApiKey.isNotEmpty) {
+              if (_hasAdminSession) {
                 try {
                   final res = await http
                       .post(

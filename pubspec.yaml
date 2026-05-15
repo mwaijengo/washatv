@@ -64,6 +64,7 @@ flutter:
   uses-material-design: true
 
   assets:
+    - assets/audio/fungua_zote_guide.mp3
     - assets/audio/
     - assets/images/
 

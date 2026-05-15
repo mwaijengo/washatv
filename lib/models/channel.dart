@@ -6,6 +6,7 @@ class Channel {
     required this.imageUrl,
     required this.live,
     required this.category,
+    this.streamUrl = '',
   });
 
   final int id;
@@ -14,4 +15,7 @@ class Channel {
   final String imageUrl;
   final bool live;
   final String category;
+  final String streamUrl;
+
+  bool get hasStream => streamUrl.trim().isNotEmpty;
 }

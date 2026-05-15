@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:ui';
 
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:just_audio/just_audio.dart';
 
@@ -16,7 +17,6 @@ class SubscriptionScreen extends StatefulWidget {
     required this.selectedPlan,
     required this.onPlanChange,
     required this.onPay,
-    required this.onOpenTutorial,
   });
 
   final List<Plan> plans;
@@ -24,27 +24,6 @@ class SubscriptionScreen extends StatefulWidget {
   final Plan selectedPlan;
   final ValueChanged<Plan> onPlanChange;
   final Future<void> Function(String phone, String name) onPay;
-  final VoidCallback onOpenTutorial;
-
-  static Widget buildTutorialModal({
-    required int step,
-    required VoidCallback onClose,
-    required VoidCallback onNext,
-    required VoidCallback onBack,
-    required VoidCallback onFinish,
-    ValueChanged<int>? onHighlightedOptionChanged,
-  }) {
-    return Positioned.fill(
-      child: _TutorialPlayerModal(
-        step: step,
-        onClose: onClose,
-        onNext: onNext,
-        onBack: onBack,
-        onFinish: onFinish,
-        onHighlightedOptionChanged: onHighlightedOptionChanged,
-      ),
-    );
-  }
 
   static Widget buildPinModal({
     required VoidCallback onCancel,
@@ -171,48 +150,10 @@ class _SubscriptionScreenState extends State<SubscriptionScreen> {
 
   List<Widget> _plansSection(BuildContext context) {
     return [
-      Center(
-        child: SizedBox(
-          width: MediaQuery.sizeOf(context).width * 0.9,
-          height: 60,
-          child: DecoratedBox(
-            decoration: BoxDecoration(
-              borderRadius: BorderRadius.circular(26),
-              gradient: const LinearGradient(colors: [Color(0xFF6366F1), Color(0xFFA855F7)]),
-              boxShadow: [
-                BoxShadow(
-                  color: const Color(0xFF6366F1).withValues(alpha: 0.35),
-                  blurRadius: 16,
-                  offset: const Offset(0, 6),
-                ),
-              ],
-            ),
-            child: ElevatedButton.icon(
-              onPressed: widget.onOpenTutorial,
-              style: ElevatedButton.styleFrom(
-                backgroundColor: Colors.transparent,
-                shadowColor: Colors.transparent,
-                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(26)),
-              ),
-              icon: const Icon(Icons.help_outline_rounded, color: Colors.white, size: 18),
-              label: const Row(
-                children: [
-                  Expanded(
-                    child: Text(
-                      'JINSI YA KUFUNGUA CHANNEL ZOTE',
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: TextStyle(color: Colors.white, fontWeight: FontWeight.w800, fontSize: 12, letterSpacing: 0.4),
-                    ),
-                  ),
-                  Icon(Icons.arrow_forward_rounded, color: Colors.white),
-                ],
-              ),
-            ),
-          ),
-        ),
-      ),
-      const SizedBox(height: 10),
+      if (!widget.premium) ...[
+        const _FunguaZoteAudioGuidePanel(),
+        const SizedBox(height: 14),
+      ],
       Center(
         child: Container(
           width: MediaQuery.sizeOf(context).width * 0.9,
@@ -468,656 +409,242 @@ class _SubscriptionScreenState extends State<SubscriptionScreen> {
   }
 }
 
-class _TutorialPlayerModal extends StatefulWidget {
-  const _TutorialPlayerModal({
-    required this.step,
-    required this.onClose,
-    required this.onNext,
-    required this.onBack,
-    required this.onFinish,
-    this.onHighlightedOptionChanged,
-  });
-
-  final int step;
-  final VoidCallback onClose;
-  final VoidCallback onNext;
-  final VoidCallback onBack;
-  final VoidCallback onFinish;
-  final ValueChanged<int>? onHighlightedOptionChanged;
+/// Full spoken guide (`assets/audio/fungua_zote_guide.mp3`) on the subscription screen.
+class _FunguaZoteAudioGuidePanel extends StatefulWidget {
+  const _FunguaZoteAudioGuidePanel();
 
   @override
-  State<_TutorialPlayerModal> createState() => _TutorialPlayerModalState();
+  State<_FunguaZoteAudioGuidePanel> createState() => _FunguaZoteAudioGuidePanelState();
 }
 
-class _TutorialPlayerModalState extends State<_TutorialPlayerModal> {
-  final AudioPlayer _audioPlayer = AudioPlayer();
-  bool _isPlaying = false;
-  bool _isLoadingAudio = false;
-  int _priceSelection = 0;
-  Timer? _priceTimer;
-  Timer? _typingTimer;
-  Timer? _step5Timer;
-  StreamSubscription<PlayerState>? _playerStateSub;
-  int _phoneChars = 0;
-  int _nameChars = 0;
-  bool _payPressed = false;
-  int _pinFilled = 0;
-  bool _sendPressed = false;
-  bool _step5Success = false;
-  int? _loadedStep;
-
-  static const List<String> _titles = <String>[
-    'Karibu Washa Tv',
-    'UMEKWAMA',
-    'Hatua 3: Vifurushi',
-    'Hatua 4: Taarifa za Mtumiaji',
-    'Hatua 5: Kamilisha Malipo',
-  ];
+class _FunguaZoteAudioGuidePanelState extends State<_FunguaZoteAudioGuidePanel> {
+  static const String _kAsset = 'assets/audio/fungua_zote_guide.mp3';
+  late final AudioPlayer _player;
+  StreamSubscription<PlayerState>? _stateSub;
+  bool _ready = false;
+  String? _loadErr;
 
   @override
   void initState() {
     super.initState();
-    _playerStateSub = _audioPlayer.playerStateStream.listen((state) {
-      if (!mounted) return;
-      final done = state.processingState == ProcessingState.completed;
-      final isPlaying = state.playing && !done;
-      if (_isPlaying != isPlaying) {
-        setState(() => _isPlaying = isPlaying);
-      }
-      if (done) {
-        _audioPlayer.seek(Duration.zero);
-        setState(() => _isPlaying = false);
-      }
+    _player = AudioPlayer();
+    _stateSub = _player.playerStateStream.listen((_) {
+      if (mounted) setState(() {});
     });
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      _safePlayStepAudio(forceRestart: true);
-    });
-    _startPriceAnimation();
+    _prepare();
   }
 
-  Future<void> _safePlayStepAudio({bool forceRestart = false}) async {
+  Future<void> _prepare() async {
     try {
-      await _playStepAudio(forceRestart: forceRestart);
-    } catch (_) {
+      // On web, `setAsset` loads via the same URL as `assets/` + manifest key
+      // (e.g. …/assets/assets/audio/…). Using `setUrl` avoids reading the whole
+      // file into memory as a data URL and matches how the dev server serves assets.
+      if (kIsWeb) {
+        await _player.setUrl(Uri.base.resolve('assets/$_kAsset').toString());
+      } else {
+        await _player.setAsset(_kAsset);
+      }
       if (mounted) {
         setState(() {
-          _isPlaying = false;
-          _isLoadingAudio = false;
+          _ready = true;
+          _loadErr = null;
         });
       }
-    }
-  }
-
-  @override
-  void didUpdateWidget(covariant _TutorialPlayerModal oldWidget) {
-    super.didUpdateWidget(oldWidget);
-    if (oldWidget.step != widget.step) {
-      _safePlayStepAudio(forceRestart: true);
-      if (widget.step == 3) {
-        _startPriceAnimation();
-      } else {
-        _priceTimer?.cancel();
-      }
-      if (widget.step == 4) {
-        _startStep4TypingDemo();
-      } else {
-        _typingTimer?.cancel();
-      }
-      if (widget.step == 5) {
-        _startStep5PinDemo();
-      } else {
-        _step5Timer?.cancel();
+    } catch (_) {
+      if (mounted) {
+        setState(
+          () => _loadErr =
+              'Haikuweza kupakia faili la sauti. Fanya flutter clean, uanze upya uendeshaji wa Chrome (assets mpya hazionekani kwa hot reload).',
+        );
       }
     }
-  }
-
-  Future<void> _playStepAudio({bool forceRestart = false}) async {
-    const audioByStep = <int, String>{
-      1: 'assets/audio/1.Salamu.mp3',
-      2: 'assets/audio/2.dhumuni.mp3',
-      3: 'assets/audio/3.Vifurushi.mp3',
-      4: 'assets/audio/4.Taarifa za mtumiaji.mp3',
-      5: 'assets/audio/5.Kamilisha malipo.mp3',
-    };
-    final asset = audioByStep[widget.step];
-    if (asset == null) return;
-    if (mounted) {
-      setState(() {
-        _isLoadingAudio = true;
-        _isPlaying = false;
-      });
-    }
-    if (_loadedStep != widget.step || forceRestart) {
-      await _audioPlayer.stop();
-      await _audioPlayer.setAsset(asset);
-      _loadedStep = widget.step;
-    } else {
-      await _audioPlayer.seek(Duration.zero);
-    }
-    await _audioPlayer.play();
-    if (!mounted) return;
-    setState(() {
-      _isPlaying = true;
-      _isLoadingAudio = false;
-    });
   }
 
   @override
   void dispose() {
-    _priceTimer?.cancel();
-    _typingTimer?.cancel();
-    _step5Timer?.cancel();
-    _playerStateSub?.cancel();
-    _audioPlayer.dispose();
+    _stateSub?.cancel();
+    _player.dispose();
     super.dispose();
   }
 
-  void _startPriceAnimation() {
-    _priceTimer?.cancel();
-    if (widget.step != 3) return;
-    _priceSelection = 0;
-    _notifyHighlightedOptionChanged();
-    _priceTimer = Timer.periodic(const Duration(milliseconds: 1400), (_) {
-      if (!mounted || widget.step != 3) return;
-      setState(() => _priceSelection = (_priceSelection + 1) % 3);
-      _notifyHighlightedOptionChanged();
-    });
+  String _fmt(Duration d) {
+    final m = d.inMinutes.remainder(60).toString().padLeft(2, '0');
+    final s = d.inSeconds.remainder(60).toString().padLeft(2, '0');
+    return '$m:$s';
   }
 
-  void _notifyHighlightedOptionChanged() {
-    final cb = widget.onHighlightedOptionChanged;
-    if (cb == null) return;
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted) return;
-      cb(_priceSelection);
-    });
-  }
-
-  void _startStep4TypingDemo() {
-    _typingTimer?.cancel();
-    _phoneChars = 0;
-    _nameChars = 0;
-    _payPressed = false;
-    const phone = '07123456789';
-    const userName = 'John Joel';
-    _typingTimer = Timer.periodic(const Duration(milliseconds: 130), (t) {
-      if (!mounted || widget.step != 4) return;
-      setState(() {
-        if (_phoneChars < phone.length) {
-          _phoneChars++;
-          return;
+  Future<void> _toggle() async {
+    if (!_ready) return;
+    try {
+      if (_player.playing) {
+        await _player.pause();
+      } else {
+        if (_player.processingState == ProcessingState.completed) {
+          await _player.seek(Duration.zero);
         }
-        if (_nameChars < userName.length) {
-          _nameChars++;
-          return;
-        }
-        if (!_payPressed) {
-          _payPressed = true;
-          Future<void>.delayed(const Duration(milliseconds: 500), () {
-            if (!mounted || widget.step != 4) return;
-            setState(() => _payPressed = false);
-          });
-          t.cancel();
-        }
-      });
-    });
-  }
-
-  void _startStep5PinDemo() {
-    _step5Timer?.cancel();
-    _pinFilled = 0;
-    _sendPressed = false;
-    _step5Success = false;
-    _step5Timer = Timer.periodic(const Duration(milliseconds: 520), (t) {
-      if (!mounted || widget.step != 5) return;
-      setState(() {
-        if (_pinFilled < 4) {
-          _pinFilled++;
-          return;
-        }
-        if (!_sendPressed) {
-          _sendPressed = true;
-          return;
-        }
-        _step5Success = true;
-        t.cancel();
-      });
-    });
+        await _player.play();
+      }
+    } catch (_) {}
+    if (mounted) setState(() {});
   }
 
   @override
   Widget build(BuildContext context) {
-    final size = MediaQuery.sizeOf(context);
-    final modalWidth = (size.width * 0.94).clamp(360.0, 760.0);
-    final modalMaxHeight = size.height * 0.9;
+    final w = MediaQuery.sizeOf(context).width * 0.92;
+    final total = _player.duration ?? Duration.zero;
+    final hasDuration = _ready && total.inMilliseconds > 0;
 
-    return Container(
-      color: const Color(0xE0000000),
-      child: Center(
-        child: GlassPanel(
-          radius: 30,
-          child: ConstrainedBox(
-            constraints: BoxConstraints(
-              maxWidth: modalWidth,
-              maxHeight: modalMaxHeight,
-              minWidth: 360,
+    return Center(
+      child: SizedBox(
+        width: w,
+        child: DecoratedBox(
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(22),
+            gradient: const LinearGradient(
+              begin: Alignment.topLeft,
+              end: Alignment.bottomRight,
+              colors: [Color(0xE6111827), Color(0xE61E1B4B)],
             ),
-            child: SingleChildScrollView(
-              padding: const EdgeInsets.all(24),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Align(alignment: Alignment.topRight, child: IconButton(onPressed: widget.onClose, icon: const Icon(Icons.close))),
-                  Text(_titles[widget.step - 1], style: const TextStyle(fontWeight: FontWeight.w800, fontSize: 23)),
-                  const SizedBox(height: 14),
-                  if (widget.step == 1) _step1Brand(),
-                  if (widget.step == 2) _step2Image(),
-                  if (widget.step == 3) _step3Prices(),
-                  if (widget.step == 4) _buildStep4Demo(),
-                  if (widget.step == 5) _buildStep5Demo(),
-                  _audioControls(),
-                  const SizedBox(height: 14),
-                  _stepDots(),
-                  const SizedBox(height: 16),
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      if (widget.step > 1) TextButton(onPressed: widget.onBack, child: const Text('Nyuma')),
-                      const SizedBox(width: 8),
-                      if (widget.step < 5) FilledButton(onPressed: widget.onNext, child: const Text('Endelea')),
-                      if (widget.step == 5)
-                        FilledButton(
-                          style: FilledButton.styleFrom(backgroundColor: AppTheme.amber, foregroundColor: const Color(0xFF111827)),
-                          onPressed: widget.onFinish,
-                          child: const Text('Nimeelewa'),
-                        ),
-                    ],
-                  ),
-                ],
+            border: Border.all(color: const Color(0x55FBBF24)),
+            boxShadow: [
+              BoxShadow(
+                color: const Color(0xFF6366F1).withValues(alpha: 0.28),
+                blurRadius: 26,
+                offset: const Offset(0, 14),
               ),
-            ),
+            ],
           ),
-        ),
-      ),
-    );
-  }
-
-  Widget _step1Brand() {
-    return Container(
-      margin: const EdgeInsets.only(bottom: 12),
-      width: double.infinity,
-      padding: const EdgeInsets.all(14),
-      decoration: BoxDecoration(
-        gradient: const LinearGradient(
-          begin: Alignment.topLeft,
-          end: Alignment.bottomRight,
-          colors: [Color(0x331E293B), Color(0x22111B2C)],
-        ),
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: const Color(0x26FFFFFF)),
-      ),
-      child: Column(
-        children: [
-          Container(
-            width: 200,
-            height: 200,
-            clipBehavior: Clip.antiAlias,
-            decoration: BoxDecoration(
-              borderRadius: BorderRadius.circular(16),
-              border: Border.all(color: const Color(0x33FFFFFF)),
-            ),
-            child: Stack(
-              fit: StackFit.expand,
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(16, 16, 16, 18),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Image.asset('assets/images/tutorial_home.png', fit: BoxFit.cover),
-                Container(color: const Color(0x66000000)),
-                const Center(
-                  child: Text(
-                    'Punguzo la hadi\nasilimia 65',
-                    textAlign: TextAlign.center,
-                    style: TextStyle(
-                      fontSize: 22,
-                      height: 1.15,
-                      fontWeight: FontWeight.w900,
-                      color: Colors.white,
+                Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Container(
+                      padding: const EdgeInsets.all(10),
+                      decoration: BoxDecoration(
+                        color: const Color(0x33FBBF24),
+                        borderRadius: BorderRadius.circular(14),
+                      ),
+                      child: const Icon(Icons.graphic_eq_rounded, color: Color(0xFFFDE68A), size: 24),
                     ),
+                    const SizedBox(width: 12),
+                    const Expanded(
+                      child: Text(
+                        'JINSI YA KUFUNGUA CHANNEL ZOTE',
+                        style: TextStyle(
+                          fontSize: 16,
+                          fontWeight: FontWeight.w900,
+                          letterSpacing: 0.4,
+                          height: 1.2,
+                          color: Color(0xFFF8FAFC),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 8),
+                Text(
+                  _loadErr ??
+                      'Skiza maelezo yote hapa. Unaweza kusogeza mstari wa muda chini — kisha endelea na hatua za malipo.',
+                  style: TextStyle(
+                    fontSize: 12.5,
+                    height: 1.4,
+                    color: _loadErr != null ? const Color(0xFFF87171) : const Color(0xFF94A3B8),
                   ),
                 ),
+                const SizedBox(height: 16),
+                Row(
+                  children: [
+                    FilledButton.icon(
+                      onPressed: _loadErr != null || !_ready ? null : _toggle,
+                      style: FilledButton.styleFrom(
+                        backgroundColor: const Color(0xFFFBBF24),
+                        foregroundColor: const Color(0xFF111827),
+                        padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+                      ),
+                      icon: Icon(_player.playing ? Icons.pause_rounded : Icons.play_arrow_rounded, size: 26),
+                      label: Text(
+                        _player.playing ? 'Sitisha' : 'Cheza',
+                        style: const TextStyle(fontWeight: FontWeight.w900, fontSize: 14),
+                      ),
+                    ),
+                    const SizedBox(width: 14),
+                    if (hasDuration)
+                      Expanded(
+                        child: StreamBuilder<Duration>(
+                          stream: _player.positionStream,
+                          builder: (context, snap) {
+                            final pos = snap.data ?? Duration.zero;
+                            return Text(
+                              '${_fmt(pos)} / ${_fmt(total)}',
+                              textAlign: TextAlign.end,
+                              style: const TextStyle(
+                                fontSize: 12,
+                                fontWeight: FontWeight.w700,
+                                color: Color(0xFFE2E8F0),
+                              ),
+                            );
+                          },
+                        ),
+                      ),
+                  ],
+                ),
+                const SizedBox(height: 12),
+                if (hasDuration)
+                  StreamBuilder<Duration>(
+                    stream: _player.positionStream,
+                    builder: (context, snap) {
+                      final pos = snap.data ?? Duration.zero;
+                      final maxMs = total.inMilliseconds.toDouble();
+                      final v = (pos.inMilliseconds / maxMs).clamp(0.0, 1.0);
+                      return Column(
+                        children: [
+                          ClipRRect(
+                            borderRadius: BorderRadius.circular(99),
+                            child: LinearProgressIndicator(
+                              value: v,
+                              minHeight: 7,
+                              backgroundColor: const Color(0xFF334155),
+                              valueColor: const AlwaysStoppedAnimation<Color>(Color(0xFF818CF8)),
+                            ),
+                          ),
+                          SliderTheme(
+                            data: SliderTheme.of(context).copyWith(
+                              trackHeight: 3,
+                              thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 7),
+                              overlayShape: const RoundSliderOverlayShape(overlayRadius: 16),
+                              activeTrackColor: const Color(0xFFA5B4FC),
+                              inactiveTrackColor: const Color(0xFF334155),
+                              thumbColor: const Color(0xFFF8FAFC),
+                            ),
+                            child: Slider(
+                              value: pos.inMilliseconds.toDouble().clamp(0, maxMs),
+                              max: maxMs,
+                              onChanged: (x) => _player.seek(Duration(milliseconds: x.round())),
+                            ),
+                          ),
+                        ],
+                      );
+                    },
+                  )
+                else
+                  const ClipRRect(
+                    borderRadius: BorderRadius.all(Radius.circular(99)),
+                    child: LinearProgressIndicator(
+                      minHeight: 5,
+                      backgroundColor: Color(0xFF334155),
+                      valueColor: AlwaysStoppedAnimation<Color>(Color(0xFF64748B)),
+                    ),
+                  ),
               ],
             ),
           ),
-          const SizedBox(height: 10),
-          const Row(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              Icon(Icons.workspace_premium, color: AppTheme.amber, size: 20),
-              SizedBox(width: 8),
-              Text('WASHA TV', style: TextStyle(fontSize: 15, fontWeight: FontWeight.w900, letterSpacing: 0.4)),
-            ],
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _step2Image() {
-    return Container(
-      margin: const EdgeInsets.only(bottom: 12),
-      width: double.infinity,
-      clipBehavior: Clip.antiAlias,
-      decoration: BoxDecoration(
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: const Color(0x26FFFFFF)),
-      ),
-      child: AspectRatio(
-        aspectRatio: 9 / 16,
-        child: Image.asset('assets/images/tutorial_home.png', fit: BoxFit.cover),
-      ),
-    );
-  }
-
-  Widget _step3Prices() {
-    return Container(
-      margin: const EdgeInsets.only(bottom: 12),
-      width: double.infinity,
-      padding: const EdgeInsets.all(12),
-      decoration: BoxDecoration(
-        color: const Color(0x331E293B),
-        borderRadius: BorderRadius.circular(14),
-        border: Border.all(color: const Color(0x26FFFFFF)),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          const Text('Chagua bei unayoweza kumudu', style: TextStyle(fontWeight: FontWeight.w700, fontSize: 13, color: Color(0xFFE2E8F0))),
-          const SizedBox(height: 10),
-          ...List.generate(3, (i) {
-            final active = _priceSelection == i;
-            const labels = ['WEEK', 'MONTH', '3 MONTHS'];
-            const prices = ['TSh 2,000', 'TSh 5,000', 'TSh 12,000'];
-            return Padding(
-              padding: const EdgeInsets.only(bottom: 8),
-              child: GestureDetector(
-                onTap: () {
-                  setState(() => _priceSelection = i);
-                  _notifyHighlightedOptionChanged();
-                },
-                child: AnimatedContainer(
-                  duration: const Duration(milliseconds: 420),
-                  curve: Curves.easeOutCubic,
-                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 11),
-                  decoration: BoxDecoration(
-                    borderRadius: BorderRadius.circular(12),
-                    border: Border.all(width: active ? 1.8 : 1, color: active ? const Color(0xFF60A5FA) : const Color(0x26FFFFFF)),
-                    gradient: active
-                        ? const LinearGradient(colors: [Color(0x2A3B82F6), Color(0x1A6366F1)])
-                        : const LinearGradient(colors: [Color(0x1A0F172A), Color(0x1A1E293B)]),
-                  ),
-                  child: Row(
-                    children: [
-                      Expanded(
-                        child: Text(labels[i], style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: active ? const Color(0xFFBFDBFE) : const Color(0xFFCBD5E1))),
-                      ),
-                      Text(prices[i], style: TextStyle(fontSize: active ? 15 : 14, fontWeight: FontWeight.w900, color: active ? const Color(0xFF93C5FD) : const Color(0xFFE2E8F0))),
-                    ],
-                  ),
-                ),
-              ),
-            );
-          }),
-        ],
-      ),
-    );
-  }
-
-  Widget _audioControls() {
-    return Container(
-      width: double.infinity,
-      padding: const EdgeInsets.all(14),
-      decoration: BoxDecoration(
-        color: const Color(0x66111B2C),
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: const Color(0x26FFFFFF)),
-      ),
-      child: Row(
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          FilledButton.tonalIcon(
-            onPressed: _isLoadingAudio
-                ? null
-                : () async {
-                    if (_isPlaying) {
-                      await _audioPlayer.pause();
-                      if (!mounted) return;
-                      setState(() => _isPlaying = false);
-                      return;
-                    }
-                    if (_loadedStep == widget.step) {
-                      await _audioPlayer.play();
-                      if (!mounted) return;
-                      setState(() => _isPlaying = true);
-                      return;
-                    }
-                    await _safePlayStepAudio(forceRestart: true);
-                  },
-            style: FilledButton.styleFrom(
-              backgroundColor: const Color(0x406366F1),
-              foregroundColor: const Color(0xFFA5B4FC),
-              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
-            ),
-            icon: Icon(
-              _isLoadingAudio
-                  ? Icons.hourglass_top_rounded
-                  : _isPlaying
-                      ? Icons.pause_circle_outline_rounded
-                      : Icons.play_circle_outline_rounded,
-            ),
-            label: Text(_isPlaying ? 'Sitisha' : 'Cheza'),
-          ),
-          const SizedBox(width: 12),
-          FilledButton.tonalIcon(
-            onPressed: _isLoadingAudio ? null : () => _safePlayStepAudio(forceRestart: true),
-            style: FilledButton.styleFrom(
-              backgroundColor: const Color(0x4038BDF8),
-              foregroundColor: const Color(0xFFBAE6FD),
-              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
-            ),
-            icon: const Icon(Icons.replay_rounded),
-            label: const Text('Sikiliza tena'),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _stepDots() {
-    return Row(
-      mainAxisAlignment: MainAxisAlignment.center,
-      children: List.generate(5, (i) {
-        final active = i + 1 == widget.step;
-        return Container(
-          width: 34,
-          height: 34,
-          margin: const EdgeInsets.symmetric(horizontal: 6),
-          decoration: BoxDecoration(
-            color: active ? AppTheme.indigo : const Color(0xFF374151),
-            shape: BoxShape.circle,
-          ),
-          child: Center(child: Text('${i + 1}')),
-        );
-      }),
-    );
-  }
-
-  Widget _buildStep4Demo() {
-    const phone = '07123456789';
-    const userName = 'John Joel';
-    final typedPhone = phone.substring(0, _phoneChars.clamp(0, phone.length));
-    final typedName = userName.substring(0, _nameChars.clamp(0, userName.length));
-    return Container(
-      margin: const EdgeInsets.only(bottom: 12),
-      width: double.infinity,
-      padding: const EdgeInsets.all(12),
-      decoration: BoxDecoration(
-        color: const Color(0x331E293B),
-        borderRadius: BorderRadius.circular(14),
-        border: Border.all(color: const Color(0x26FFFFFF)),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          const Text('Ingiza taarifa zako', style: TextStyle(fontWeight: FontWeight.w800, fontSize: 13, color: Color(0xFFE2E8F0))),
-          const SizedBox(height: 10),
-          _demoInputBox(label: 'NAMBA YA SIMU', value: typedPhone, showCursor: _phoneChars < phone.length),
-          const SizedBox(height: 8),
-          _demoInputBox(label: 'JINA KAMILI', value: typedName, showCursor: _phoneChars >= phone.length && _nameChars < userName.length),
-          const SizedBox(height: 10),
-          AnimatedContainer(
-            duration: const Duration(milliseconds: 260),
-            transform: Matrix4.identity()..scale(_payPressed ? 0.97 : 1.0),
-            width: double.infinity,
-            padding: const EdgeInsets.symmetric(vertical: 11),
-            decoration: BoxDecoration(
-              borderRadius: BorderRadius.circular(12),
-              gradient: const LinearGradient(colors: [Color(0xFF2563EB), Color(0xFF3B82F6)]),
-            ),
-            child: const Center(
-              child: Text('LIPIA SASA', style: TextStyle(fontWeight: FontWeight.w900, letterSpacing: 0.8, color: Colors.white)),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _demoInputBox({
-    required String label,
-    required String value,
-    required bool showCursor,
-  }) {
-    return Container(
-      width: double.infinity,
-      padding: const EdgeInsets.fromLTRB(10, 9, 10, 8),
-      decoration: BoxDecoration(
-        color: const Color(0x66111B2C),
-        borderRadius: BorderRadius.circular(10),
-        border: Border.all(color: const Color(0x26FFFFFF)),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(label, style: const TextStyle(fontSize: 9, color: Color(0xFF94A3B8), fontWeight: FontWeight.w700)),
-          const SizedBox(height: 4),
-          Row(
-            children: [
-              Expanded(
-                child: Text(value.isEmpty ? '...' : value, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w700)),
-              ),
-              AnimatedOpacity(
-                duration: const Duration(milliseconds: 250),
-                opacity: showCursor ? 1 : 0,
-                child: const Text('|', style: TextStyle(color: Color(0xFF93C5FD), fontWeight: FontWeight.w900)),
-              ),
-            ],
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildStep5Demo() {
-    return Container(
-      margin: const EdgeInsets.only(bottom: 12),
-      width: double.infinity,
-      padding: const EdgeInsets.all(12),
-      decoration: BoxDecoration(
-        color: const Color(0x331E293B),
-        borderRadius: BorderRadius.circular(14),
-        border: Border.all(color: const Color(0x26FFFFFF)),
-      ),
-      child: AnimatedSwitcher(
-        duration: const Duration(milliseconds: 350),
-        switchInCurve: Curves.easeOutBack,
-        switchOutCurve: Curves.easeIn,
-        child: _step5Success ? _step5DoneView() : _step5PinView(),
-      ),
-    );
-  }
-
-  Widget _step5PinView() {
-    return Column(
-      key: const ValueKey('pin-state'),
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        const Text('Weka PIN kufanya malipo', style: TextStyle(fontWeight: FontWeight.w800, fontSize: 14, color: Color(0xFFE2E8F0))),
-        const SizedBox(height: 10),
-        Row(
-          mainAxisAlignment: MainAxisAlignment.spaceBetween,
-          children: List.generate(4, (i) {
-            final active = i < _pinFilled;
-            return AnimatedContainer(
-              duration: const Duration(milliseconds: 280),
-              width: 56,
-              height: 50,
-              decoration: BoxDecoration(
-                borderRadius: BorderRadius.circular(12),
-                color: active ? const Color(0x1A3B82F6) : const Color(0x66111B2C),
-                border: Border.all(color: active ? const Color(0xFF60A5FA) : const Color(0x26FFFFFF)),
-              ),
-              child: Center(
-                child: Text(active ? '•' : '', style: const TextStyle(fontSize: 26, fontWeight: FontWeight.w900, color: Color(0xFF93C5FD))),
-              ),
-            );
-          }),
         ),
-        const SizedBox(height: 12),
-        AnimatedContainer(
-          duration: const Duration(milliseconds: 240),
-          transform: Matrix4.identity()..scale(_sendPressed ? 0.96 : 1),
-          width: double.infinity,
-          padding: const EdgeInsets.symmetric(vertical: 11),
-          decoration: BoxDecoration(
-            borderRadius: BorderRadius.circular(12),
-            gradient: const LinearGradient(colors: [Color(0xFF22C55E), Color(0xFF16A34A)]),
-          ),
-          child: const Center(
-            child: Text('Send', style: TextStyle(color: Colors.white, fontWeight: FontWeight.w900, letterSpacing: 0.6)),
-          ),
-        ),
-      ],
-    );
-  }
-
-  Widget _step5DoneView() {
-    return Column(
-      key: const ValueKey('done-state'),
-      children: [
-        Container(
-          width: 74,
-          height: 74,
-          decoration: BoxDecoration(
-            shape: BoxShape.circle,
-            color: const Color(0xFF22C55E),
-            boxShadow: [
-              BoxShadow(
-                color: const Color(0xFF22C55E).withValues(alpha: 0.35),
-                blurRadius: 22,
-                spreadRadius: 1,
-              ),
-            ],
-          ),
-          child: const Icon(Icons.bolt_rounded, color: Colors.white, size: 34),
-        ),
-        const SizedBox(height: 10),
-        const SizedBox(height: 8),
-        const Text(
-          'Malipo yamepokelewa sasa channel zote zimefunguliwa',
-          textAlign: TextAlign.center,
-          style: TextStyle(fontSize: 14, fontWeight: FontWeight.w700, color: Color(0xFFE2E8F0)),
-        ),
-      ],
+      ),
     );
   }
 }

@@ -44,11 +44,18 @@ class _WashaAppState extends State<WashaApp> with WidgetsBindingObserver {
   String supportWhatsapp = '';
   bool bootLoading = true;
   Channel? selectedChannel;
-  bool tutorialOpen = false;
-  int tutorialStep = 1;
   bool pinOpen = false;
   int remoteConfigVersion = 0;
+  int remoteConfigSyncedAt = 0;
+  String? bootstrapSyncSignature;
+  bool subscriptionEnabled = true;
+  bool maintenanceMode = false;
+  String siteName = 'WASHA TV';
   bool syncInFlight = false;
+  bool metaPollInFlight = false;
+  bool syncRefreshing = false;
+  bool pendingConfigSync = false;
+  int configPollTick = 0;
   String? bootstrapError;
   /// Last exception from bootstrap (debug/profile only — shown in banner to diagnose emulator/network).
   String? bootstrapFailureDetail;
@@ -70,13 +77,19 @@ class _WashaAppState extends State<WashaApp> with WidgetsBindingObserver {
       if (slides.isEmpty) return;
       setState(() => carousel = (carousel + 1) % slides.length);
     });
-    // Tight cadence keeps carousel / pricing / channels close to Railway after admin publishes.
-    configPoller = Timer.periodic(const Duration(milliseconds: 1500), (_) => _syncFromServer(silent: true));
+    // Live sync: meta poll every 2s → full catalog when admin saves (Supasoka pattern).
+    configPoller = Timer.periodic(const Duration(seconds: 2), (_) => _pollConfigMeta());
+  }
+
+  void _startLiveSyncAfterBoot() {
+    if (!mounted || bootLoading) return;
+    unawaited(_pollConfigMeta());
+    unawaited(_syncPremiumFromServer());
   }
 
   Future<void> _init() async {
     final name = await storage.getName();
-    final end = await storage.getSubscriptionEnd();
+    var subEndLocal = await storage.getSubscriptionEnd();
     final dev = await storage.getOrCreateDeviceId();
     final localPlans = await loadUserPlans();
     final localWa = await storage.getSupportWhatsapp();
@@ -84,15 +97,32 @@ class _WashaAppState extends State<WashaApp> with WidgetsBindingObserver {
     var fetchedChannels = <Channel>[];
     var fetchedSlides = const <HeroSlide>[];
     var fetchedWa = localWa;
+    var fetchedSubscriptionEnabled = true;
+    var fetchedMaintenanceMode = false;
+    var fetchedSiteName = 'WASHA TV';
     String? fetchErr;
     String? lastFailure;
 
+    bootstrapSyncSignature = await api.loadBootstrapSyncSignature();
     var remoteFetched = false;
     for (var attempt = 0; attempt < 5 && !remoteFetched; attempt++) {
       try {
         final remote = await api.fetchBootstrap();
         remoteConfigVersion = remote.version;
-        fetchedPlans = remote.plans.isNotEmpty ? remote.plans : defaultUserPlans();
+        remoteConfigSyncedAt = remote.configSyncedAt;
+        bootstrapSyncSignature = remote.syncSignature;
+        fetchedSubscriptionEnabled = remote.subscriptionEnabled;
+        fetchedMaintenanceMode = remote.maintenanceMode;
+        fetchedSiteName = remote.siteName;
+        var remotePlans = remote.plans;
+        if (remotePlans.isEmpty) {
+          try {
+            remotePlans = await api.fetchPublicPlans();
+          } catch (e, st) {
+            debugPrint('WASHA fetchPublicPlans fallback: $e\n$st');
+          }
+        }
+        fetchedPlans = remotePlans.isNotEmpty ? remotePlans : localPlans;
         fetchedChannels = remote.channels;
         fetchedSlides = remote.slides;
         fetchedWa = remote.whatsappNumber;
@@ -103,8 +133,8 @@ class _WashaAppState extends State<WashaApp> with WidgetsBindingObserver {
         try {
           await storage.setSupportWhatsapp(fetchedWa);
         } catch (_) {}
-        if (remote.plans.isNotEmpty) {
-          await persistPricingSnapshotFromPlans(remote.plans);
+        if (fetchedPlans.isNotEmpty) {
+          await persistPricingSnapshotFromPlans(fetchedPlans);
         }
         try {
           await api.syncViewer(
@@ -113,6 +143,11 @@ class _WashaAppState extends State<WashaApp> with WidgetsBindingObserver {
           );
         } catch (_) {
           // Non-blocking: app can continue even if user sync endpoint is not ready.
+        }
+        final serverPremium = await api.fetchPremiumUntil(dev);
+        if (serverPremium != null) {
+          subEndLocal = subService.mergeEndDates(subEndLocal, serverPremium);
+          await storage.setSubscriptionEnd(subEndLocal);
         }
       } catch (e, st) {
         final msg = e.toString();
@@ -124,56 +159,148 @@ class _WashaAppState extends State<WashaApp> with WidgetsBindingObserver {
       }
     }
     if (!remoteFetched) {
-      fetchErr = kIsWeb
-          ? 'Chrome haipatikani data kutoka seva (CORS, URL isiyo sahihi, au seva imezima). '
-              'Angalia URL hapa chini; jaribu kubofya Jaribu tena.'
-          : 'Hatukuunganisha na seva ya WASHA. Angalia mtandao, URL ya API, au seva iko wazi.';
+      final cached = await api.loadBootstrapCache();
+      if (cached != null) {
+        remoteFetched = true;
+        remoteConfigVersion = cached.version;
+        remoteConfigSyncedAt = cached.configSyncedAt;
+        bootstrapSyncSignature = cached.syncSignature;
+        fetchedPlans = cached.plans.isNotEmpty ? cached.plans : localPlans;
+        fetchedChannels = cached.channels;
+        fetchedSlides = cached.slides;
+        fetchedWa = cached.whatsappNumber.isNotEmpty ? cached.whatsappNumber : localWa;
+        fetchedSubscriptionEnabled = cached.subscriptionEnabled;
+        fetchedMaintenanceMode = cached.maintenanceMode;
+        fetchedSiteName = cached.siteName;
+        fetchErr = null;
+        lastFailure = null;
+      } else {
+        fetchErr = kIsWeb
+            ? 'Chrome haipatikani data kutoka seva (CORS, URL isiyo sahihi, au seva imezima). '
+                'Angalia URL hapa chini; jaribu kubofya Jaribu tena.'
+            : 'Hatukuunganisha na seva ya WASHA. Angalia mtandao, URL ya API, au seva iko wazi.';
+      }
     }
 
     if (!mounted) return;
     setState(() {
       userName = name;
-      subEnd = end;
+      subEnd = subEndLocal;
       deviceId = dev;
       userPlans = fetchedPlans;
       channels = fetchedChannels;
       slides = fetchedSlides;
       supportWhatsapp = fetchedWa;
+      subscriptionEnabled = fetchedSubscriptionEnabled;
+      maintenanceMode = fetchedMaintenanceMode;
+      siteName = fetchedSiteName;
       bootstrapError = fetchErr;
       bootstrapFailureDetail = fetchErr != null ? lastFailure : null;
-      selectedPlan = fetchedPlans.firstWhere((p) => p.id == selectedPlan.id, orElse: () => fetchedPlans.firstWhere((p) => p.id == 'gold', orElse: () => fetchedPlans.first));
+      selectedPlan = fetchedPlans.isNotEmpty
+          ? fetchedPlans.firstWhere(
+              (p) => p.id == selectedPlan.id,
+              orElse: () => fetchedPlans.firstWhere((p) => p.id == 'gold', orElse: () => fetchedPlans.first),
+            )
+          : selectedPlan;
       bootLoading = false;
     });
+    _startLiveSyncAfterBoot();
   }
 
-  Future<void> _syncFromServer({bool silent = false}) async {
-    if (syncInFlight) return;
-    syncInFlight = true;
+  Future<void> _pollConfigMeta() async {
+    if (bootLoading || metaPollInFlight) return;
+    metaPollInFlight = true;
     try {
-      final latest = await api.fetchConfigVersion();
-      if (latest <= remoteConfigVersion) return;
-      final remote = await api.fetchBootstrap();
+      configPollTick++;
+      final changedSig = await api.fetchBootstrapMetaIfChanged(
+        bootstrapSyncSignature,
+        localVersion: remoteConfigVersion,
+      );
+      if (changedSig != null) {
+        if (syncInFlight) {
+          pendingConfigSync = true;
+        } else {
+          await _syncFromServer(silent: true, forceFull: true);
+        }
+      } else if (configPollTick % 8 == 0 && !syncInFlight) {
+        await _syncFromServer(silent: true);
+      }
+      if (configPollTick % 2 == 0) {
+        unawaited(_syncPremiumFromServer());
+      }
+    } finally {
+      metaPollInFlight = false;
+      if (pendingConfigSync && !syncInFlight && !bootLoading) {
+        pendingConfigSync = false;
+        unawaited(_syncFromServer(silent: true, forceFull: true));
+      }
+    }
+  }
+
+  Future<void> _syncPremiumFromServer() async {
+    if (deviceId.isEmpty) return;
+    try {
+      final serverPremium = await api.fetchPremiumUntil(deviceId);
       if (!mounted) return;
+      if (serverPremium == null) return;
+      final merged = subService.mergeEndDates(subEnd, serverPremium);
+      if (merged == subEnd) return;
+      await storage.setSubscriptionEnd(merged);
+      if (!mounted) return;
+      setState(() => subEnd = merged);
+    } catch (_) {}
+  }
+
+  Future<void> _syncFromServer({bool silent = false, bool forceFull = false}) async {
+    if (bootLoading) return;
+    if (syncInFlight) {
+      if (forceFull) pendingConfigSync = true;
+      return;
+    }
+    syncInFlight = true;
+    if (silent && mounted) setState(() => syncRefreshing = true);
+    try {
+      final PublicBootstrapData? remote = forceFull
+          ? await api.fetchBootstrap()
+          : await api.fetchBootstrapSince(remoteConfigVersion);
+      if (remote == null) {
+        await _syncPremiumFromServer();
+        return;
+      }
+      if (!mounted) return;
+      var remotePlans = remote.plans;
+      if (remotePlans.isEmpty) {
+        try {
+          remotePlans = await api.fetchPublicPlans();
+        } catch (_) {}
+      }
+      final nextPlans = remotePlans.isNotEmpty ? remotePlans : await loadUserPlans();
       setState(() {
         remoteConfigVersion = remote.version;
-        userPlans = remote.plans.isNotEmpty ? remote.plans : defaultUserPlans();
+        remoteConfigSyncedAt = remote.configSyncedAt;
+        bootstrapSyncSignature = remote.syncSignature;
+        subscriptionEnabled = remote.subscriptionEnabled;
+        maintenanceMode = remote.maintenanceMode;
+        siteName = remote.siteName;
+        userPlans = nextPlans;
         channels = remote.channels;
         slides = remote.slides;
         if (carousel >= slides.length) carousel = 0;
         supportWhatsapp = remote.whatsappNumber;
         bootstrapError = null;
         bootstrapFailureDetail = null;
-        if (userPlans.isNotEmpty) {
-          selectedPlan = userPlans.firstWhere(
-            (p) => p.id == selectedPlan.id,
-            orElse: () => userPlans.first,
-          );
-        }
+        selectedPlan = userPlans.isNotEmpty
+            ? userPlans.firstWhere(
+                (p) => p.id == selectedPlan.id,
+                orElse: () => userPlans.firstWhere((p) => p.id == 'gold', orElse: () => userPlans.first),
+              )
+            : selectedPlan;
       });
       await storage.setSupportWhatsapp(remote.whatsappNumber);
-      if (remote.plans.isNotEmpty) {
-        await persistPricingSnapshotFromPlans(remote.plans);
+      if (nextPlans.isNotEmpty) {
+        await persistPricingSnapshotFromPlans(nextPlans);
       }
+      await _syncPremiumFromServer();
     } catch (_) {
       if (!silent && mounted) {
         setState(() {
@@ -182,13 +309,17 @@ class _WashaAppState extends State<WashaApp> with WidgetsBindingObserver {
       }
     } finally {
       syncInFlight = false;
+      if (mounted && syncRefreshing) {
+        setState(() => syncRefreshing = false);
+      }
     }
   }
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
-      _syncFromServer(silent: true);
+      unawaited(_syncFromServer(silent: true, forceFull: true));
+      unawaited(_syncPremiumFromServer());
     }
   }
 
@@ -203,17 +334,9 @@ class _WashaAppState extends State<WashaApp> with WidgetsBindingObserver {
 
   void switchScreen(AppScreen s) {
     setState(() => current = s);
+    unawaited(_pollConfigMeta());
     if (s == AppScreen.subscription) {
-      unawaited(_syncFromServer(silent: true));
-    }
-    if (s == AppScreen.subscription && !premium) {
-      Future<void>.delayed(const Duration(milliseconds: 350), () {
-        if (!mounted) return;
-        setState(() {
-          tutorialOpen = true;
-          tutorialStep = 1;
-        });
-      });
+      unawaited(_syncFromServer(silent: true, forceFull: true));
     }
   }
 
@@ -242,6 +365,7 @@ class _WashaAppState extends State<WashaApp> with WidgetsBindingObserver {
         phone: pendingPhone,
       );
       await _syncFromServer(silent: true);
+      await _syncPremiumFromServer();
     } catch (_) {
       // Keep local access even if network blips; server sync will retry on poll.
     }
@@ -264,12 +388,20 @@ class _WashaAppState extends State<WashaApp> with WidgetsBindingObserver {
       home: Scaffold(
         body: bootLoading
             ? const Center(child: CircularProgressIndicator())
-            : Stack(
+            : maintenanceMode
+                ? _maintenanceScreen()
+                : Stack(
                 children: [
                   const _OrbBackground(),
                   SafeArea(
                     child: Column(
                       children: [
+                        if (syncRefreshing)
+                          const LinearProgressIndicator(
+                            minHeight: 2,
+                            backgroundColor: Color(0x33FFFFFF),
+                            color: Color(0xFF6366F1),
+                          ),
                         if (bootstrapError != null) _bootstrapErrorBanner(),
                         Expanded(child: _buildScreen()),
                         if (current != AppScreen.player)
@@ -280,23 +412,6 @@ class _WashaAppState extends State<WashaApp> with WidgetsBindingObserver {
                       ],
                     ),
                   ),
-                  if (tutorialOpen)
-                    SubscriptionScreen.buildTutorialModal(
-                      step: tutorialStep,
-                      onClose: () => setState(() => tutorialOpen = false),
-                      onNext: () => setState(() => tutorialStep = (tutorialStep + 1).clamp(1, 5)),
-                      onBack: () => setState(() => tutorialStep = (tutorialStep - 1).clamp(1, 5)),
-                      onFinish: () => setState(() => tutorialOpen = false),
-                      onHighlightedOptionChanged: (index) {
-                        setState(() {
-                          selectedPlan = switch (index) {
-                            0 => userPlans.firstWhere((p) => p.id == 'weekly', orElse: () => userPlans.first),
-                            1 => userPlans.firstWhere((p) => p.id == 'gold', orElse: () => userPlans.first),
-                            _ => userPlans.firstWhere((p) => p.id == 'platinum', orElse: () => userPlans.first),
-                          };
-                        });
-                      },
-                    ),
                   if (pinOpen)
                     SubscriptionScreen.buildPinModal(
                       onCancel: () => setState(() => pinOpen = false),
@@ -465,23 +580,60 @@ class _WashaAppState extends State<WashaApp> with WidgetsBindingObserver {
           onOpenSubscription: () => switchScreen(AppScreen.subscription),
         );
       case AppScreen.subscription:
+        if (!subscriptionEnabled) {
+          return Center(
+            child: Padding(
+              padding: const EdgeInsets.all(24),
+              child: Text(
+                'Usajili wa premium umezimwa kwa sasa.',
+                textAlign: TextAlign.center,
+                style: TextStyle(color: Colors.white.withValues(alpha: 0.85), fontSize: 15),
+              ),
+            ),
+          );
+        }
         return SubscriptionScreen(
           plans: userPlans,
           premium: premium,
           selectedPlan: selectedPlan,
           onPlanChange: (p) => setState(() => selectedPlan = p),
           onPay: activateSubscription,
-          onOpenTutorial: () => setState(() {
-            tutorialStep = 1;
-            tutorialOpen = true;
-          }),
         );
     }
   }
 
+  Widget _maintenanceScreen() {
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(28),
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            const Icon(Icons.build_circle_outlined, size: 56, color: Color(0xFFFBBF24)),
+            const SizedBox(height: 16),
+            Text(siteName, style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w800)),
+            const SizedBox(height: 10),
+            const Text(
+              'Programu iko katika matengenezo. Tafadhali rudi baadaye.',
+              textAlign: TextAlign.center,
+              style: TextStyle(fontSize: 14, height: 1.4, color: Color(0xFFCBD5E1)),
+            ),
+            const SizedBox(height: 20),
+            FilledButton.tonal(
+              onPressed: () => unawaited(_syncFromServer(silent: false)),
+              child: const Text('Jaribu tena'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   void _openPlayer(Channel c) {
     if (c.premium && !premium) {
-      switchScreen(AppScreen.subscription);
+      if (subscriptionEnabled) {
+        switchScreen(AppScreen.subscription);
+      }
       return;
     }
     setState(() {

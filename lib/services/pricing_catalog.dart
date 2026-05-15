@@ -7,7 +7,7 @@ import '../models/plan.dart';
 
 const String kPricingStorageKey = 'washatvPricing';
 
-/// Order matches subscription tutorial (wiki → mwezi → miezi 3).
+/// Display order for subscription cards (weekly → monthly → quarterly).
 const List<String> kPlanIdsOrdered = ['weekly', 'gold', 'platinum'];
 
 /// Swahili line shown under the plan name (same rhythm as the subscription UI).
@@ -67,9 +67,12 @@ int? _digitsFromFmtTzsDisplay(String formatted) => int.tryParse(formatted.replac
 /// After a successful bootstrap/sync, mirrors server plans into [kPricingStorageKey] so the next cold
 /// start matches the Railway catalog until bootstrap runs again.
 Future<void> persistPricingSnapshotFromPlans(List<Plan> plans) async {
-  if (plans.isEmpty) return;
   try {
     final sp = await SharedPreferences.getInstance();
+    if (plans.isEmpty) {
+      await sp.remove(kPricingStorageKey);
+      return;
+    }
     final map = <String, dynamic>{};
     for (final p in plans) {
       final n = _digitsFromFmtTzsDisplay(p.price);

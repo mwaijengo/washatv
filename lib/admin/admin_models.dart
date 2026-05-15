@@ -46,6 +46,7 @@ class AdminChannel {
     required this.live,
     required this.status,
     required this.thumbnail,
+    this.streamUrl = '',
     required this.viewers,
     required this.rating,
     this.drm,
@@ -58,6 +59,8 @@ class AdminChannel {
   /// `active` or `inactive` — inactive channels can be hidden from the viewer app when wired to API.
   String status;
   String thumbnail;
+  /// HLS / m3u8 / mp4 playback URL for the viewer player.
+  String streamUrl;
   int viewers;
   String rating;
   /// `none` | `clearkey` | `widevine` — nullable so web hot reload does not leave stale null under non-null `String`.
