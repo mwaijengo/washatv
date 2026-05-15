@@ -6,6 +6,8 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import '../firebase_options.dart';
+
 /// Must match Supasoka backend [pushNotifications.ts] `channelId` and FCM topics.
 const String kSupasokaFcmAndroidChannelId = 'supasoka_high_importance';
 const String kSupasokaTopicAllUsers = 'all_users';
@@ -21,7 +23,7 @@ const _prefsDirectTopic = 'washa_direct_user_topic_v1';
 
 @pragma('vm:entry-point')
 Future<void> firebaseMessagingBackgroundHandler(RemoteMessage message) async {
-  await Firebase.initializeApp();
+  await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
 }
 
 /// Shared Firebase project + topics with Supasoka — pushes from Supasoka admin reach Washa too.
@@ -31,7 +33,7 @@ class PushNotificationService {
   static Future<void> initialize() async {
     if (kIsWeb) return;
 
-    await Firebase.initializeApp();
+    await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
 
     FirebaseMessaging.onBackgroundMessage(firebaseMessagingBackgroundHandler);
 
@@ -48,6 +50,10 @@ class PushNotificationService {
     final androidPlugin = _localNotifications
         .resolvePlatformSpecificImplementation<AndroidFlutterLocalNotificationsPlugin>();
     await androidPlugin?.createNotificationChannel(androidChannel);
+
+    if (!kIsWeb && defaultTargetPlatform == TargetPlatform.android) {
+      await androidPlugin?.requestNotificationsPermission();
+    }
 
     final messaging = FirebaseMessaging.instance;
     await messaging.setForegroundNotificationPresentationOptions(
@@ -83,6 +89,11 @@ class PushNotificationService {
     if (kIsWeb) return false;
     final prefs = await SharedPreferences.getInstance();
     await prefs.setBool(_prefsNotifPrompted, true);
+    if (defaultTargetPlatform == TargetPlatform.android) {
+      final androidPlugin = _localNotifications
+          .resolvePlatformSpecificImplementation<AndroidFlutterLocalNotificationsPlugin>();
+      await androidPlugin?.requestNotificationsPermission();
+    }
     final settings = await FirebaseMessaging.instance.requestPermission(
       alert: true,
       badge: true,
