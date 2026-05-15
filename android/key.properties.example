@@ -1,0 +1,6 @@
+# Copy to android/key.properties (never commit key.properties).
+# Generate keystore: ./scripts/generate_upload_keystore.sh
+storePassword=YOUR_STORE_PASSWORD
+keyPassword=YOUR_KEY_PASSWORD
+keyAlias=upload
+storeFile=upload-keystore.jks

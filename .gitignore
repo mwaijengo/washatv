@@ -46,3 +46,9 @@ app.*.map.json
 
 # Local Flutter --dart-define-from-file (copy from admin/dev_defines.json.example)
 admin/dev_defines.json
+
+# Android Play Store signing (never commit)
+android/key.properties
+android/keystore-credentials.local.txt
+android/app/upload-keystore.jks
+**/*.jks
