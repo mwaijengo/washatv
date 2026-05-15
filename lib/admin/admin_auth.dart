@@ -1,8 +1,11 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
+
+const _defaultApiBase = 'https://washatv-production.up.railway.app';
 
 /// Admin session handling (Supasoka-style): JWT persisted on device after login.
 ///
@@ -10,12 +13,28 @@ import 'package:shared_preferences/shared_preferences.dart';
 /// builds via `--dart-define-from-file=admin/dev_defines.json` — no typing each run.
 class AdminAuth extends ChangeNotifier {
   AdminAuth({String? apiBase})
-      : apiBase = (apiBase ??
-                const String.fromEnvironment(
-                  'WASHA_API_BASE_URL',
-                  defaultValue: 'https://washatv-production.up.railway.app',
-                ))
-            .replaceAll(RegExp(r'/+$'), '');
+      : apiBase = normalizeApiBase(
+          apiBase ??
+              const String.fromEnvironment(
+                'WASHA_API_BASE_URL',
+                defaultValue: _defaultApiBase,
+              ),
+        );
+
+  /// Ensures HTTPS for Railway/production hosts and strips trailing slashes.
+  static String normalizeApiBase(String raw) {
+    var base = raw.trim().replaceAll(RegExp(r'/+$'), '');
+    if (base.isEmpty) return _defaultApiBase;
+
+    final uri = Uri.tryParse(base);
+    if (uri == null || !uri.hasScheme || uri.host.isEmpty) return _defaultApiBase;
+
+    final host = uri.host.toLowerCase();
+    if ((host.contains('railway.app') || host.contains('washatv')) && uri.scheme == 'http') {
+      base = uri.replace(scheme: 'https').toString().replaceAll(RegExp(r'/+$'), '');
+    }
+    return base;
+  }
 
   static const _prefsJwt = 'washa_admin_jwt_v1';
   static const _prefsEmail = 'washa_admin_email_v1';
@@ -71,7 +90,10 @@ class AdminAuth extends ChangeNotifier {
       final res = await http
           .post(
             Uri.parse('$apiBase/api/v1/admin/auth/login'),
-            headers: const {'Content-Type': 'application/json'},
+            headers: const {
+              'Content-Type': 'application/json',
+              'Accept': 'application/json',
+            },
             body: jsonEncode({'email': e, 'password': p}),
           )
           .timeout(const Duration(seconds: 25));
@@ -81,7 +103,8 @@ class AdminAuth extends ChangeNotifier {
         if (res.statusCode == 503) {
           return 'Seva haijasanidi admin login (ADMIN_EMAIL / ADMIN_PASSWORD_HASH).';
         }
-        return 'Kuingia kumeshindikana (${res.statusCode}).';
+        final serverMsg = _readServerError(res.body);
+        return serverMsg ?? 'Kuingia kumeshindikana (${res.statusCode}).';
       }
 
       final map = jsonDecode(res.body) as Map<String, dynamic>;
@@ -95,10 +118,34 @@ class AdminAuth extends ChangeNotifier {
       _savedEmail = e;
       notifyListeners();
       return null;
+    } on TimeoutException {
+      return 'Muda wa kuunganisha umeisha. Jaribu tena.';
+    } on FormatException {
+      return 'Majibu ya seva si sahihi.';
     } catch (err) {
       if (kDebugMode) debugPrint('AdminAuth.login: $err');
-      return 'Hitilafu ya mtandao. Angalia URL ya API na muunganisho.';
+      final msg = err.toString().toLowerCase();
+      if (msg.contains('failed host lookup') ||
+          msg.contains('socketexception') ||
+          msg.contains('clientexception') ||
+          msg.contains('connection refused') ||
+          msg.contains('network is unreachable')) {
+        return 'Hitilafu ya mtandao. Hakikisha intaneti imewashwa na jaribu tena.';
+      }
+      if (msg.contains('handshake') || msg.contains('certificate')) {
+        return 'Hitilafu ya usalama wa mtandao (SSL). Tumia https:// kwenye API.';
+      }
+      return 'Hitilafu ya mtandao. Jaribu tena baadaye.';
     }
+  }
+
+  static String? _readServerError(String body) {
+    try {
+      final map = jsonDecode(body) as Map<String, dynamic>;
+      final err = map['error'];
+      if (err is String && err.trim().isNotEmpty) return err.trim();
+    } catch (_) {}
+    return null;
   }
 
   Future<void> logout() async {

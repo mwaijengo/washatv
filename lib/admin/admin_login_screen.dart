@@ -78,13 +78,6 @@ class _AdminLoginScreenState extends State<AdminLoginScreen> {
                     color: AdminColors.textPrimary,
                   ),
                 ),
-                const SizedBox(height: 8),
-                Text(
-                  'Ingia mara moja — token huhifadhiwa kwenye kifaa (siku 12). '
-                  'Hakuna haja ya kuweka ADMIN_API_KEY kila wakati.',
-                  textAlign: TextAlign.center,
-                  style: TextStyle(fontSize: 13, height: 1.4, color: AdminColors.textSecondary),
-                ),
                 const SizedBox(height: 28),
                 TextField(
                   controller: _email,
@@ -132,12 +125,6 @@ class _AdminLoginScreenState extends State<AdminLoginScreen> {
                         ? const SizedBox(width: 22, height: 22, child: CircularProgressIndicator(strokeWidth: 2))
                         : const Text('Ingia'),
                   ),
-                ),
-                const SizedBox(height: 16),
-                Text(
-                  'API: ${widget.auth.apiBase}',
-                  style: TextStyle(fontSize: 10, color: AdminColors.textSecondary.withValues(alpha: 0.7)),
-                  textAlign: TextAlign.center,
                 ),
               ],
             ),
