@@ -512,8 +512,8 @@ class _WashaAppState extends State<WashaApp> with WidgetsBindingObserver {
   }
 
   Future<void> activateSubscription(String phone, String name) async {
-    final trimmedPhone = phone.trim();
     final trimmedName = name.trim();
+    final trimmedPhone = PaymentConfig.normalizeTzLocalPhone(phone) ?? phone.trim();
 
     if (!PaymentConfig.isValidFullName(trimmedName)) {
       _scaffoldMessengerKey.currentState?.showSnackBar(
@@ -523,7 +523,11 @@ class _WashaAppState extends State<WashaApp> with WidgetsBindingObserver {
     }
     if (!PaymentConfig.isValidTzLocalPhone(trimmedPhone)) {
       _scaffoldMessengerKey.currentState?.showSnackBar(
-        const SnackBar(content: Text('Namba ya simu lazima iwe tarakimu 10 zianze na 0 (mfano 0712345678).')),
+        const SnackBar(
+          content: Text(
+            'Namba ya simu si sahihi. Tumia 07…, 06… (Halotel 061/062/063/069), au 255…',
+          ),
+        ),
       );
       return;
     }

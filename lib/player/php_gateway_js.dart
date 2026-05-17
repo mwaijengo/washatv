@@ -44,7 +44,9 @@ const String kPhpGatewayRecoveryJs = '''
   function startMonitor() {
     if (monitorStarted) return;
     monitorStarted = true;
+    var ticks = 0;
     setInterval(function () {
+      ticks++;
       var video = getVideo();
       if (!video) return;
       bindVideo(video);
@@ -55,11 +57,16 @@ const String kPhpGatewayRecoveryJs = '''
         tryPlay(video);
       }
 
+      if (ticks <= 8 && (video.readyState < 2 || video.paused)) {
+        tryPlay(video);
+      }
+
       if ((video.readyState < 3 || video.seeking) && waitingSince === 0) {
         waitingSince = now;
       }
 
-      if (waitingSince > 0 && noProgressMs > 8000) {
+      var stallLimit = ticks <= 12 ? 3500 : 8000;
+      if (waitingSince > 0 && noProgressMs > stallLimit) {
         try {
           if (isFinite(video.currentTime) && video.currentTime > 0.15) {
             video.currentTime = Math.max(0, video.currentTime - 0.1);
@@ -68,7 +75,7 @@ const String kPhpGatewayRecoveryJs = '''
         tryPlay(video);
         waitingSince = now;
       }
-    }, 2500);
+    }, 600);
   }
 
   try {

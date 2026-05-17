@@ -55,6 +55,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
   bool _webFallbackTried = false;
 
   int _loadToken = 0;
+  Timer? _loadWatchdog;
   ChannelPlaybackSession? _session;
 
   Channel get _current => widget.channel ?? widget.channels.first;
@@ -84,12 +85,31 @@ class _PlayerScreenState extends State<PlayerScreen> {
   @override
   void dispose() {
     widget.onBackHandlerChanged?.call(null);
+    _loadWatchdog?.cancel();
     _detachVideoListener();
     unawaited(_exitFullscreen(silent: true));
     unawaited(_session?.dispose());
     _session = null;
     _video = null;
     super.dispose();
+  }
+
+  void _cancelLoadWatchdog() {
+    _loadWatchdog?.cancel();
+    _loadWatchdog = null;
+  }
+
+  void _armLoadWatchdog(int token, Channel ch, {required bool forceWebView}) {
+    _cancelLoadWatchdog();
+    _loadWatchdog = Timer(const Duration(seconds: 12), () {
+      if (!mounted || token != _loadToken || !_streamLoading) return;
+      if (!kIsWeb && !forceWebView && !_webFallbackTried) {
+        _webFallbackTried = true;
+        unawaited(_startPlayback(ch, forceWebView: true));
+        return;
+      }
+      _markUnavailable();
+    });
   }
 
   /// `true` = back consumed (e.g. left fullscreen).
@@ -106,6 +126,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
   }
 
   void _markUnavailable() {
+    _cancelLoadWatchdog();
     if (!mounted) return;
     setState(() {
       _streamUnavailable = true;
@@ -164,10 +185,12 @@ class _PlayerScreenState extends State<PlayerScreen> {
     final token = ++_loadToken;
     final url = ch.streamUrl.trim();
 
+    _cancelLoadWatchdog();
     _detachVideoListener();
-    await _session?.dispose();
+    final retiring = _session;
     _session = null;
     _video = null;
+    if (retiring != null) unawaited(retiring.dispose());
 
     if (!mounted || token != _loadToken) return;
 
@@ -187,6 +210,8 @@ class _PlayerScreenState extends State<PlayerScreen> {
       return;
     }
 
+    _armLoadWatchdog(token, ch, forceWebView: forceWebView);
+
     try {
       final session = await ChannelPlaybackSession.open(
         streamUrl: url,
@@ -202,6 +227,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
       _useWebView = session.useWebView;
 
       if (session.useWebView) {
+        _cancelLoadWatchdog();
         setState(() {
           _streamLoading = false;
           _streamUnavailable = false;
@@ -213,25 +239,27 @@ class _PlayerScreenState extends State<PlayerScreen> {
 
       final video = session.video!;
       video.addListener(_onVideoTick);
-      await video.play();
 
       if (!mounted || token != _loadToken) {
         await session.dispose();
         return;
       }
 
+      _cancelLoadWatchdog();
       setState(() {
         _video = video;
         _streamLoading = false;
         _streamUnavailable = false;
         playing = true;
       });
+      unawaited(video.play());
     } catch (e) {
       if (kDebugMode) debugPrint('Washa playback: $e');
       if (!mounted || token != _loadToken) return;
+      _cancelLoadWatchdog();
       if (!kIsWeb && !forceWebView && !_webFallbackTried) {
         _webFallbackTried = true;
-        await _startPlayback(ch, forceWebView: true);
+        unawaited(_startPlayback(ch, forceWebView: true));
         return;
       }
       _markUnavailable();

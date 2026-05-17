@@ -190,8 +190,6 @@ class _SubscriptionScreenState extends State<SubscriptionScreen> {
   @override
   void initState() {
     super.initState();
-    final saved = widget.userName.trim();
-    if (saved.isNotEmpty) name.text = saved;
   }
 
   @override
@@ -273,7 +271,7 @@ class _SubscriptionScreenState extends State<SubscriptionScreen> {
         title: 'Andika majina yako kamili',
         child: _input(
           title: 'JINA KAMILI',
-          hint: 'Majina yako',
+          hint: 'Majina ya mtumiaji',
           controller: name,
           keyboardType: TextInputType.name,
           textCapitalization: TextCapitalization.words,
@@ -284,26 +282,35 @@ class _SubscriptionScreenState extends State<SubscriptionScreen> {
         const SizedBox(height: 10),
         _checkoutCard(
           step: 2,
-          title: 'Namba ya simu (tarakimu 10, anza na 0)',
+          title: 'Namba ya simu (M-Pesa, Mixx, Airtel, Halotel)',
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               _input(
                 title: 'NAMBA YA SIMU',
-                hint: '0XXXXXXXXX',
+                hint: '0712345678 au 0612345678',
                 controller: phone,
-                keyboardType: TextInputType.number,
+                keyboardType: TextInputType.phone,
                 inputFormatters: [
-                  FilteringTextInputFormatter.digitsOnly,
-                  LengthLimitingTextInputFormatter(10),
+                  FilteringTextInputFormatter.allow(RegExp(r'[\d+\s-]')),
+                  LengthLimitingTextInputFormatter(16),
                 ],
-                onChanged: (_) => setState(() {}),
+                onChanged: (v) {
+                  final normalized = PaymentConfig.normalizeTzLocalPhone(v);
+                  if (normalized != null && normalized != v) {
+                    phone.value = TextEditingValue(
+                      text: normalized,
+                      selection: TextSelection.collapsed(offset: normalized.length),
+                    );
+                  }
+                  setState(() {});
+                },
               ),
               if (phone.text.isNotEmpty && !_phoneOk)
                 const Padding(
                   padding: EdgeInsets.only(top: 6, left: 4),
                   child: Text(
-                    'Lazima iwe tarakimu 10 zianze na 0 (mfano 0XXXXXXXXX)',
+                    'Weka namba sahihi: 07…, 06… (Halotel 061/062/063/069), au tarakimu 9 bila 0',
                     style: TextStyle(fontSize: 11, color: Color(0xFFF87171)),
                   ),
                 ),
@@ -416,7 +423,10 @@ class _SubscriptionScreenState extends State<SubscriptionScreen> {
           color: Colors.transparent,
           child: InkWell(
             borderRadius: BorderRadius.circular(18),
-            onTap: () => unawaited(widget.onPay(phone.text.trim(), name.text.trim())),
+            onTap: () {
+              final normalizedPhone = PaymentConfig.normalizeTzLocalPhone(phone.text) ?? phone.text.trim();
+              unawaited(widget.onPay(normalizedPhone, name.text.trim()));
+            },
             child: const Padding(
               padding: EdgeInsets.symmetric(horizontal: 16),
               child: Row(
@@ -551,7 +561,12 @@ class _SubscriptionScreenState extends State<SubscriptionScreen> {
               inputFormatters: inputFormatters,
               textCapitalization: textCapitalization,
               style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 16),
-              decoration: InputDecoration(hintText: hint, border: InputBorder.none, isDense: true),
+              decoration: InputDecoration(
+                hintText: hint,
+                hintStyle: const TextStyle(color: Color(0xFF6B7280), fontWeight: FontWeight.w500),
+                border: InputBorder.none,
+                isDense: true,
+              ),
             ),
         ],
       ),

@@ -2,6 +2,8 @@ import 'dart:convert';
 
 import 'package:http/http.dart' as http;
 
+import 'payment_config.dart';
+
 /// SonicPesa payment flow via Washa API (keys stay on server).
 class SonicpesaPaymentService {
   SonicpesaPaymentService({String? apiBase})
@@ -20,6 +22,7 @@ class SonicpesaPaymentService {
     required String phone,
     required String planKey,
   }) async {
+    final localPhone = PaymentConfig.normalizeTzLocalPhone(phone) ?? phone.trim();
     final res = await http
         .post(
           Uri.parse('$baseUrl/api/v1/public/payments/sonicpesa/initiate'),
@@ -27,7 +30,7 @@ class SonicpesaPaymentService {
           body: jsonEncode({
             'device_id': deviceId,
             'user_name': userName,
-            'phone': phone,
+            'phone': localPhone,
             'plan_key': planKey,
           }),
         )
@@ -85,6 +88,9 @@ class SonicpesaPaymentService {
     String? userName,
     String? phone,
   }) async {
+    final localPhone = phone != null && phone.isNotEmpty
+        ? (PaymentConfig.normalizeTzLocalPhone(phone) ?? phone.trim())
+        : null;
     final res = await http
         .post(
           Uri.parse('$baseUrl/api/v1/public/payments/sonicpesa/status'),
@@ -93,7 +99,7 @@ class SonicpesaPaymentService {
             'device_id': deviceId,
             'order_id': orderId,
             if (userName != null && userName.isNotEmpty) 'user_name': userName,
-            if (phone != null && phone.isNotEmpty) 'phone': phone,
+            if (localPhone != null && localPhone.isNotEmpty) 'phone': localPhone,
           }),
         )
         .timeout(const Duration(seconds: 25));
@@ -154,7 +160,7 @@ class SonicpesaPaymentService {
       return 'Taarifa za malipo hazikamilika. Funga na fungua programu, kisha jaribu tena.';
     }
     if (lower.contains('phone') || lower.contains('tanzanian') || lower.contains('10 digits')) {
-      return 'Weka namba ya simu sahihi: tarakimu 10 zianze na 0 (mfano 0712345678).';
+      return 'Weka namba ya simu sahihi: 07…, 06… (Halotel 061/062/063/069), au 255…';
     }
     if (lower.contains('subscription') && lower.contains('disabled')) {
       return 'Usajili wa premium umezimwa kwa sasa.';

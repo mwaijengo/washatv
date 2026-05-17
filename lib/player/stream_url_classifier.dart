@@ -22,6 +22,13 @@ class StreamUrlClassifier {
     final u = url.toLowerCase();
     return u.contains('.ts?') || u.endsWith('.ts') || u.contains('.mp4?') || u.endsWith('.mp4');
   }
+
+  /// Direct media endpoints — safe for native ExoPlayer / AVPlayer (no PHP gateway).
+  static bool isDirectStreamUrl(String url) {
+    if (url.trim().isEmpty) return false;
+    if (isPhpLikeUrl(url)) return false;
+    return hasObviousM3u8(url) || hasObviousMpd(url) || hasObviousTs(url);
+  }
 }
 
 const String kBrowserPlaybackUserAgent =

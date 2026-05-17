@@ -39,14 +39,30 @@ export function sonicpesaConfigured(env: Env): boolean {
   return Boolean(env.SONICPESA_API_KEY?.trim());
 }
 
-/** `07XXXXXXXX` → `2557XXXXXXXX` */
+/** Local `07…` / `06…` (Halotel 061–069) or `255…` → `2557XXXXXXXX` / `2556XXXXXXXX`. */
 export function normalizeTzPhone(raw: string): string | null {
-  const digits = raw.replace(/\D/g, '');
+  let digits = raw.replace(/\D/g, '');
   if (!digits) return null;
-  if (digits.startsWith('255') && digits.length >= 12) return digits;
-  if (digits.startsWith('0') && digits.length >= 10) return `255${digits.slice(1)}`;
-  if (digits.length >= 9 && digits.length <= 10) return `255${digits}`;
-  return null;
+
+  if (digits.startsWith('255') && digits.length >= 12) {
+    digits = digits.slice(3, 12);
+  } else if (digits.startsWith('0') && digits.length >= 10) {
+    digits = digits.slice(0, 10).slice(1);
+  } else if (digits.length === 9 && /^[67]/.test(digits)) {
+    // 612345678 → 255612345678
+  } else {
+    return null;
+  }
+
+  if (!/^[67]\d{8}$/.test(digits)) return null;
+  return `255${digits}`;
+}
+
+/** National `0XXXXXXXXX` for DB / display. */
+export function toLocalTzPhone(raw: string): string | null {
+  const intl = normalizeTzPhone(raw);
+  if (!intl || !intl.startsWith('255') || intl.length !== 12) return null;
+  return `0${intl.slice(3)}`;
 }
 
 export function normalizePaymentStatus(raw: unknown): string {

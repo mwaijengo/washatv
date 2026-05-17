@@ -9,6 +9,7 @@ import {
   isSonicpesaSuccess,
   normalizePaymentStatus,
   normalizeTzPhone,
+  toLocalTzPhone,
   sonicpesaConfigured,
   sonicpesaCreateOrder,
   sonicpesaOrderStatus,
@@ -346,24 +347,17 @@ export async function registerRoutes(
       const userName = (b.user_name ?? '').trim() || 'Viewer';
       const phoneRaw = (b.phone ?? '').trim();
       const buyerPhone = normalizeTzPhone(phoneRaw);
+      const localPhone = toLocalTzPhone(phoneRaw);
 
       if (!deviceId || !planKey) {
         return reply.code(400).send({ error: 'device_id and plan_key are required' });
       }
-    if (!buyerPhone) {
-      return reply.code(400).send({ error: 'phone must be 10 digits starting with 0 (e.g. 07XXXXXXXX)' });
-    }
-    const digitsOnly = phoneRaw.replace(/\D/g, '');
-    const localTen = digitsOnly.startsWith('255') && digitsOnly.length >= 12
-      ? `0${digitsOnly.slice(3, 12)}`
-      : digitsOnly.startsWith('0')
-        ? digitsOnly.slice(0, 10)
-        : digitsOnly.length === 9
-          ? `0${digitsOnly}`
-          : digitsOnly;
-    if (!/^0\d{9}$/.test(localTen)) {
-      return reply.code(400).send({ error: 'phone must be 10 digits starting with 0 (e.g. 07XXXXXXXX)' });
-    }
+      if (!buyerPhone || !localPhone) {
+        return reply.code(400).send({
+          error:
+            'Namba ya simu si sahihi. Tumia 07…, 06… (Halotel 061/062/063/069), tarakimu 9 bila 0, au 255…',
+        });
+      }
 
       const settings = await pool.query(`SELECT subscription_enabled FROM app_settings WHERE id = 1`);
       const subEnabled = settings.rows[0]?.subscription_enabled;
@@ -406,7 +400,7 @@ export async function registerRoutes(
         await upsertPendingSonicpesaTransaction(pool, {
           deviceId,
           userName,
-          phone: phoneRaw,
+          phone: localPhone,
           amount,
           planKey,
           orderId: order.order_id,

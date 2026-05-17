@@ -1,4 +1,5 @@
 import '../models/plan.dart';
+import 'payment_config.dart';
 
 class SubscriptionService {
   DateTime calculateEndDate(Plan plan) {
@@ -17,18 +18,9 @@ class SubscriptionService {
     return local.isAfter(remote) ? local : remote;
   }
 
-  /// `07XXXXXXXX` (10 digits) or `2557XXXXXXXX` → local `07XXXXXXXX` for forms + API.
+  /// Normalized local `0XXXXXXXXX` for forms + API (Halotel `061`–`069`, `07…`, `255…`).
   String normalizeTzPhone(String raw) {
-    final digits = raw.replaceAll(RegExp(r'\D'), '');
-    if (digits.isEmpty) return raw.trim();
-    if (digits.startsWith('255') && digits.length >= 12) {
-      return '0${digits.substring(3, 12)}';
-    }
-    if (digits.startsWith('0') && digits.length >= 10) {
-      return digits.substring(0, 10);
-    }
-    if (digits.length == 9) return '0$digits';
-    return raw.trim();
+    return PaymentConfig.normalizeTzLocalPhone(raw) ?? raw.trim();
   }
 
   /// ISO-8601 string or epoch ms from payment / user-premium APIs.

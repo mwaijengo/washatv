@@ -2,10 +2,32 @@
 class PaymentConfig {
   PaymentConfig._();
 
-  /// `07XXXXXXXX` — 10 digits, must start with 0 (no +255 in the form).
-  static final RegExp tzLocalPhone = RegExp(r'^0\d{9}$');
+  /// Local `0XXXXXXXXX` after [normalizeTzLocalPhone] (M-Pesa, Mixx, Airtel, Halotel).
+  static final RegExp tzLocalPhone = RegExp(r'^0[67]\d{8}$');
 
-  static bool isValidTzLocalPhone(String raw) => tzLocalPhone.hasMatch(raw.trim());
+  /// Halotel + other TZ mobile prefixes (national format, with leading 0).
+  static const halotelPrefixes = <String>['061', '062', '063', '069'];
+
+  /// `07…` / `06…` (10 digits), or `7…` / `6…` (9 digits), or `255…` / `+255…`.
+  static String? normalizeTzLocalPhone(String raw) {
+    var digits = raw.replaceAll(RegExp(r'\D'), '');
+    if (digits.isEmpty) return null;
+
+    if (digits.startsWith('255') && digits.length >= 12) {
+      digits = digits.substring(3, 12);
+    }
+
+    if (digits.startsWith('0') && digits.length >= 10) {
+      digits = digits.substring(0, 10);
+    } else if (digits.length == 9 && RegExp(r'^[67]').hasMatch(digits)) {
+      digits = '0$digits';
+    }
+
+    if (!tzLocalPhone.hasMatch(digits)) return null;
+    return digits;
+  }
+
+  static bool isValidTzLocalPhone(String raw) => normalizeTzLocalPhone(raw) != null;
 
   /// At least two name parts (jina kamili).
   static bool isValidFullName(String raw) {
