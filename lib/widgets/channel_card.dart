@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import '../constants/app_channel_categories.dart';
 import '../models/channel.dart';
 import '../theme/app_theme.dart';
 import '../utils/cache_bust_image_url.dart';
@@ -117,10 +118,16 @@ class _ChannelCardState extends State<ChannelCard> {
                         ),
                         const SizedBox(width: 6),
                         Text(
-                          widget.channel.premium ? '⭐ Premium' : 'Bure',
+                          channelAccessLabel(
+                            channelPremium: widget.channel.premium,
+                            locked: widget.locked,
+                          ),
                           style: TextStyle(
-                            color: widget.channel.premium ? AppTheme.amber : AppTheme.emerald,
+                            color: widget.channel.premium
+                                ? (widget.locked ? const Color(0xFFF87171) : AppTheme.emerald)
+                                : AppTheme.emerald,
                             fontSize: 11,
+                            fontWeight: FontWeight.w700,
                           ),
                         ),
                       ],

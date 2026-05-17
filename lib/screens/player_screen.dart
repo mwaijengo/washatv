@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:video_player/video_player.dart';
 import 'package:webview_flutter/webview_flutter.dart';
 
@@ -9,7 +10,10 @@ import '../models/channel.dart';
 import '../player/channel_playback_engine.dart';
 import '../utils/cache_bust_image_url.dart';
 import '../widgets/channel_card.dart';
+import '../widgets/playback_unavailable_overlay.dart';
 import '../widgets/player_controls.dart';
+
+typedef PlayerBackHandler = bool Function();
 
 class PlayerScreen extends StatefulWidget {
   const PlayerScreen({
@@ -21,6 +25,7 @@ class PlayerScreen extends StatefulWidget {
     required this.onOpenSubscription,
     required this.channels,
     this.channelImageCacheEpoch = 0,
+    this.onBackHandlerChanged,
   });
 
   final Channel? channel;
@@ -30,6 +35,7 @@ class PlayerScreen extends StatefulWidget {
   final VoidCallback onOpenSubscription;
   final List<Channel> channels;
   final int channelImageCacheEpoch;
+  final ValueChanged<PlayerBackHandler?>? onBackHandlerChanged;
 
   @override
   State<PlayerScreen> createState() => _PlayerScreenState();
@@ -39,12 +45,13 @@ class _PlayerScreenState extends State<PlayerScreen> {
   bool playing = true;
   bool fullscreen = false;
   double progress = 0.0;
+  String _positionLabel = '0:00';
+  String _durationLabel = 'LIVE';
 
   VideoPlayerController? _video;
   bool _useWebView = false;
   bool _streamLoading = true;
-  bool _streamError = false;
-  bool _noStreamUrl = false;
+  bool _streamUnavailable = false;
   bool _webFallbackTried = false;
 
   int _loadToken = 0;
@@ -55,6 +62,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
   @override
   void initState() {
     super.initState();
+    widget.onBackHandlerChanged?.call(_handlePlayerBack);
     unawaited(_startPlayback(_current));
   }
 
@@ -63,22 +71,47 @@ class _PlayerScreenState extends State<PlayerScreen> {
     super.didUpdateWidget(oldWidget);
     final next = _current;
     final prev = oldWidget.channel ?? oldWidget.channels.first;
-    if (next.id != prev.id || next.streamUrl.trim() != prev.streamUrl.trim()) {
+    if (next.id != prev.id ||
+        next.streamUrl.trim() != prev.streamUrl.trim() ||
+        next.drm != prev.drm) {
       unawaited(_startPlayback(next));
+    }
+    if (oldWidget.onBackHandlerChanged != widget.onBackHandlerChanged) {
+      widget.onBackHandlerChanged?.call(_handlePlayerBack);
     }
   }
 
   @override
   void dispose() {
+    widget.onBackHandlerChanged?.call(null);
     _detachVideoListener();
+    unawaited(_exitFullscreen(silent: true));
     unawaited(_session?.dispose());
     _session = null;
     _video = null;
     super.dispose();
   }
 
+  /// `true` = back consumed (e.g. left fullscreen).
+  bool _handlePlayerBack() {
+    if (fullscreen) {
+      unawaited(_exitFullscreen());
+      return true;
+    }
+    return false;
+  }
+
   void _detachVideoListener() {
     _video?.removeListener(_onVideoTick);
+  }
+
+  void _markUnavailable() {
+    if (!mounted) return;
+    setState(() {
+      _streamUnavailable = true;
+      _streamLoading = false;
+      playing = false;
+    });
   }
 
   void _onVideoTick() {
@@ -86,19 +119,14 @@ class _PlayerScreenState extends State<PlayerScreen> {
     if (v == null || !mounted) return;
 
     if (v.value.hasError && !_useWebView) {
+      if (kDebugMode) debugPrint('Washa playback error (hidden from user)');
       final url = _current.streamUrl.trim();
-      if (kIsWeb && url.isNotEmpty && !_webFallbackTried) {
+      if (!kIsWeb && url.isNotEmpty && !_webFallbackTried) {
         _webFallbackTried = true;
         unawaited(_startPlayback(_current, forceWebView: true));
         return;
       }
-      if (mounted) {
-        setState(() {
-          _streamError = true;
-          _streamLoading = false;
-          playing = false;
-        });
-      }
+      _markUnavailable();
       return;
     }
 
@@ -108,12 +136,28 @@ class _PlayerScreenState extends State<PlayerScreen> {
     final nextProgress = durMs > 0 ? (p.inMilliseconds / durMs).clamp(0.0, 1.0) : progress;
     final isPlaying = v.value.isPlaying;
 
-    if (isPlaying != playing || (durMs > 0 && (nextProgress - progress).abs() > 0.002)) {
+    final posLabel = _formatDuration(p);
+    final durLabel = durMs > 0 ? _formatDuration(d) : 'LIVE';
+
+    if (isPlaying != playing ||
+        (durMs > 0 && (nextProgress - progress).abs() > 0.002) ||
+        posLabel != _positionLabel ||
+        durLabel != _durationLabel) {
       setState(() {
         playing = isPlaying;
         if (durMs > 0) progress = nextProgress;
+        _positionLabel = posLabel;
+        _durationLabel = durLabel;
       });
     }
+  }
+
+  String _formatDuration(Duration d) {
+    final h = d.inHours;
+    final m = d.inMinutes.remainder(60).toString().padLeft(2, '0');
+    final s = d.inSeconds.remainder(60).toString().padLeft(2, '0');
+    if (h > 0) return '$h:$m:$s';
+    return '$m:$s';
   }
 
   Future<void> _startPlayback(Channel ch, {bool forceWebView = false}) async {
@@ -129,27 +173,24 @@ class _PlayerScreenState extends State<PlayerScreen> {
 
     setState(() {
       _streamLoading = true;
-      _streamError = false;
-      _noStreamUrl = url.isEmpty;
+      _streamUnavailable = false;
       _useWebView = false;
       if (!forceWebView) _webFallbackTried = false;
       playing = true;
       progress = 0;
+      _positionLabel = '0:00';
+      _durationLabel = 'LIVE';
     });
 
     if (url.isEmpty) {
-      if (mounted && token == _loadToken) {
-        setState(() {
-          _streamLoading = false;
-          playing = false;
-        });
-      }
+      _markUnavailable();
       return;
     }
 
     try {
       final session = await ChannelPlaybackSession.open(
         streamUrl: url,
+        drm: ch.drm,
         forceWebView: forceWebView,
       );
       if (!mounted || token != _loadToken) {
@@ -163,8 +204,9 @@ class _PlayerScreenState extends State<PlayerScreen> {
       if (session.useWebView) {
         setState(() {
           _streamLoading = false;
-          _streamError = false;
+          _streamUnavailable = false;
           playing = true;
+          _durationLabel = 'LIVE';
         });
         return;
       }
@@ -181,22 +223,18 @@ class _PlayerScreenState extends State<PlayerScreen> {
       setState(() {
         _video = video;
         _streamLoading = false;
-        _streamError = false;
+        _streamUnavailable = false;
         playing = true;
       });
     } catch (e) {
       if (kDebugMode) debugPrint('Washa playback: $e');
       if (!mounted || token != _loadToken) return;
-      if (kIsWeb && !forceWebView && !_webFallbackTried) {
+      if (!forceWebView && !_webFallbackTried) {
         _webFallbackTried = true;
         await _startPlayback(ch, forceWebView: true);
         return;
       }
-      setState(() {
-        _streamLoading = false;
-        _streamError = true;
-        playing = false;
-      });
+      _markUnavailable();
     }
   }
 
@@ -238,8 +276,33 @@ class _PlayerScreenState extends State<PlayerScreen> {
     if (mounted) setState(() => progress = value.clamp(0.0, 1.0));
   }
 
-  bool get _showPosterOnly =>
-      _noStreamUrl || _streamError || (!_useWebView && (_video == null || !_video!.value.isInitialized));
+  Future<void> _enterFullscreen() async {
+    await SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
+    await SystemChrome.setPreferredOrientations([
+      DeviceOrientation.landscapeLeft,
+      DeviceOrientation.landscapeRight,
+    ]);
+    if (mounted) setState(() => fullscreen = true);
+  }
+
+  Future<void> _exitFullscreen({bool silent = false}) async {
+    await SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
+    await SystemChrome.setPreferredOrientations([
+      DeviceOrientation.portraitUp,
+      DeviceOrientation.portraitDown,
+    ]);
+    if (mounted && (fullscreen || silent)) {
+      setState(() => fullscreen = false);
+    }
+  }
+
+  Future<void> _toggleFullscreen() async {
+    if (fullscreen) {
+      await _exitFullscreen();
+    } else {
+      await _enterFullscreen();
+    }
+  }
 
   Widget _buildVideoLayer(Channel c, String heroUrl) {
     if (_useWebView && _session?.web != null) {
@@ -253,11 +316,9 @@ class _PlayerScreenState extends State<PlayerScreen> {
     if (v != null && v.value.isInitialized) {
       return ColoredBox(
         color: Colors.black,
-        child: FittedBox(
-          fit: BoxFit.cover,
-          child: SizedBox(
-            width: v.value.size.width,
-            height: v.value.size.height,
+        child: Center(
+          child: AspectRatio(
+            aspectRatio: v.value.aspectRatio > 0 ? v.value.aspectRatio : 16 / 9,
             child: VideoPlayer(v),
           ),
         ),
@@ -271,8 +332,52 @@ class _PlayerScreenState extends State<PlayerScreen> {
       errorBuilder: (_, __, ___) => Container(
         color: const Color(0xFF0B1220),
         alignment: Alignment.center,
-        child: const Icon(Icons.broken_image_outlined, color: Color(0xFF6B7280), size: 34),
+        child: const Icon(Icons.live_tv_rounded, color: Color(0xFF6B7280), size: 34),
       ),
+    );
+  }
+
+  Widget _buildPlayerStack(Channel c, String heroUrl, {required bool immersive}) {
+    return Stack(
+      fit: StackFit.expand,
+      children: [
+        _buildVideoLayer(c, heroUrl),
+        if (!_streamUnavailable && !_streamLoading && _video == null && !_useWebView)
+          Image.network(
+            heroUrl,
+            fit: BoxFit.cover,
+            key: ValueKey('player-poster|${c.id}|$heroUrl'),
+            errorBuilder: (_, __, ___) => const SizedBox.shrink(),
+          ),
+        if (_streamLoading) const _PlaybackLoadingShade(),
+        if (_streamUnavailable) PlaybackUnavailableOverlay(onClose: immersive ? widget.onBack : null),
+        if (!_streamUnavailable && !_streamLoading && !playing)
+          Container(
+            color: const Color(0x66000000),
+            child: Center(
+              child: GestureDetector(
+                onTap: () => unawaited(_togglePlayPause()),
+                child: Container(
+                  width: 56,
+                  height: 56,
+                  decoration: const BoxDecoration(color: Color(0xF2FFFFFF), shape: BoxShape.circle),
+                  child: const Icon(Icons.play_arrow, color: Color(0xFF111827), size: 34),
+                ),
+              ),
+            ),
+          ),
+        if (!_streamUnavailable)
+          PlayerControls(
+            playing: playing,
+            progress: progress,
+            positionLabel: _positionLabel,
+            durationLabel: _durationLabel,
+            isFullscreen: fullscreen,
+            onPlay: () => unawaited(_togglePlayPause()),
+            onToggleFullscreen: () => unawaited(_toggleFullscreen()),
+            onSeek: (v) => unawaited(_seekTo(v)),
+          ),
+      ],
     );
   }
 
@@ -281,66 +386,37 @@ class _PlayerScreenState extends State<PlayerScreen> {
     if (widget.channels.isEmpty) {
       return const Center(child: Text('Hakuna channel kwa sasa'));
     }
+
     final c = _current;
     final heroUrl = imageUrlWithCacheEpoch(c.imageUrl, widget.channelImageCacheEpoch);
-    final channels = widget.premium
+    final related = widget.premium
         ? widget.channels.where((e) => e.id != c.id).take(12).toList()
         : widget.channels.where((e) => e.premium && e.id != c.id).take(12).toList();
+
+    if (fullscreen) {
+      return PopScope(
+        canPop: false,
+        onPopInvokedWithResult: (didPop, _) {
+          if (!didPop) unawaited(_exitFullscreen());
+        },
+        child: Scaffold(
+          backgroundColor: Colors.black,
+          body: SafeArea(
+            top: false,
+            bottom: false,
+            child: _buildPlayerStack(c, heroUrl, immersive: true),
+          ),
+        ),
+      );
+    }
 
     return Column(
       children: [
         Column(
           children: [
             AspectRatio(
-              aspectRatio: fullscreen ? 1 : (16 / 9),
-              child: Stack(
-                fit: StackFit.expand,
-                children: [
-                  _buildVideoLayer(c, heroUrl),
-                  if (_showPosterOnly && !_streamLoading)
-                    Image.network(
-                      heroUrl,
-                      fit: BoxFit.cover,
-                      key: ValueKey('player-poster|${c.id}|$heroUrl'),
-                      errorBuilder: (_, __, ___) => const SizedBox.shrink(),
-                    ),
-                  if (_streamLoading)
-                    Container(
-                      color: const Color(0x88000000),
-                      alignment: Alignment.center,
-                      child: const SizedBox(
-                        width: 28,
-                        height: 28,
-                        child: CircularProgressIndicator(strokeWidth: 2.5, color: Color(0xFFEF4444)),
-                      ),
-                    ),
-                  if (!playing)
-                    Container(
-                      color: const Color(0x66000000),
-                      child: Center(
-                        child: GestureDetector(
-                          onTap: _togglePlayPause,
-                          child: Container(
-                            width: 56,
-                            height: 56,
-                            decoration: const BoxDecoration(
-                              color: Color(0xF2FFFFFF),
-                              shape: BoxShape.circle,
-                            ),
-                            child: const Icon(Icons.play_arrow, color: Color(0xFF111827), size: 34),
-                          ),
-                        ),
-                      ),
-                    ),
-                  PlayerControls(
-                    playing: playing,
-                    progress: progress,
-                    onPlay: () => unawaited(_togglePlayPause()),
-                    onToggleFullscreen: () => setState(() => fullscreen = !fullscreen),
-                    onSeek: (v) => unawaited(_seekTo(v)),
-                  ),
-                ],
-              ),
+              aspectRatio: 16 / 9,
+              child: _buildPlayerStack(c, heroUrl, immersive: false),
             ),
             Container(
               color: const Color(0xE6000000),
@@ -387,7 +463,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
         Expanded(
           child: GridView.builder(
             padding: const EdgeInsets.fromLTRB(16, 14, 16, 110),
-            itemCount: channels.length,
+            itemCount: related.length,
             gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
               crossAxisCount: 2,
               crossAxisSpacing: 10,
@@ -395,7 +471,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
               childAspectRatio: 0.88,
             ),
             itemBuilder: (_, i) {
-              final cc = channels[i];
+              final cc = related[i];
               return ChannelCard(
                 channel: cc,
                 imageCacheEpoch: widget.channelImageCacheEpoch,
@@ -406,6 +482,23 @@ class _PlayerScreenState extends State<PlayerScreen> {
           ),
         ),
       ],
+    );
+  }
+}
+
+class _PlaybackLoadingShade extends StatelessWidget {
+  const _PlaybackLoadingShade();
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      color: const Color(0x88000000),
+      alignment: Alignment.center,
+      child: const SizedBox(
+        width: 28,
+        height: 28,
+        child: CircularProgressIndicator(strokeWidth: 2.5, color: Color(0xFFEF4444)),
+      ),
     );
   }
 }

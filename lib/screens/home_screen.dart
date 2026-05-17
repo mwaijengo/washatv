@@ -155,7 +155,7 @@ class _HomeScreenState extends State<HomeScreen> {
           ],
           _searchAndFilter(),
           const SizedBox(height: 18),
-          const Text('Free Channels', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w700)),
+          const Text(kSectionFreeChannelsTitle, style: TextStyle(fontSize: 18, fontWeight: FontWeight.w700)),
           const SizedBox(height: 10),
           _grid(free),
           const SizedBox(height: 16),
@@ -195,7 +195,7 @@ class _HomeScreenState extends State<HomeScreen> {
             ),
           ),
           const SizedBox(height: 20),
-          const Text('Premium Channels', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w700)),
+          const Text(kSectionPremiumChannelsTitle, style: TextStyle(fontSize: 18, fontWeight: FontWeight.w700)),
           const SizedBox(height: 10),
           _grid(premiumChannels),
         ],
@@ -340,7 +340,7 @@ class _HomeScreenState extends State<HomeScreen> {
                     (c) => DropdownMenuItem<String>(
                       value: c,
                       child: Text(
-                        c,
+                        categoryDisplayName(c),
                         overflow: TextOverflow.ellipsis,
                         style: const TextStyle(fontSize: 13, color: Colors.white),
                       ),

@@ -8,6 +8,9 @@ class PlayerControls extends StatelessWidget {
     required this.onPlay,
     required this.onToggleFullscreen,
     required this.onSeek,
+    this.positionLabel = '0:00',
+    this.durationLabel = 'LIVE',
+    this.isFullscreen = false,
   });
 
   final bool playing;
@@ -15,6 +18,9 @@ class PlayerControls extends StatelessWidget {
   final VoidCallback onPlay;
   final VoidCallback onToggleFullscreen;
   final ValueChanged<double> onSeek;
+  final String positionLabel;
+  final String durationLabel;
+  final bool isFullscreen;
 
   @override
   Widget build(BuildContext context) {
@@ -57,15 +63,16 @@ class PlayerControls extends StatelessWidget {
                   onPressed: onPlay,
                   icon: Icon(playing ? Icons.pause : Icons.play_arrow),
                 ),
-                const Text('12:34', style: TextStyle(fontSize: 12)),
+                Text(positionLabel, style: const TextStyle(fontSize: 12)),
                 const SizedBox(width: 8),
                 const Text('/', style: TextStyle(color: Color(0xFF6B7280))),
                 const SizedBox(width: 8),
-                const Text('45:20', style: TextStyle(color: Color(0xFF6B7280), fontSize: 12)),
+                Text(durationLabel, style: const TextStyle(color: Color(0xFF6B7280), fontSize: 12)),
                 const Spacer(),
-                IconButton(onPressed: () {}, icon: const Icon(Icons.closed_caption, size: 20)),
-                IconButton(onPressed: () {}, icon: const Icon(Icons.settings, size: 20)),
-                IconButton(onPressed: onToggleFullscreen, icon: const Icon(Icons.fullscreen, size: 20)),
+                IconButton(
+                  onPressed: onToggleFullscreen,
+                  icon: Icon(isFullscreen ? Icons.fullscreen_exit : Icons.fullscreen, size: 22),
+                ),
               ],
             ),
           ],

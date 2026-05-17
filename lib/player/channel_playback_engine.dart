@@ -3,6 +3,7 @@ import 'package:flutter/material.dart' show Colors;
 import 'package:video_player/video_player.dart';
 import 'package:webview_flutter/webview_flutter.dart';
 
+import '../models/channel.dart';
 import 'playback_http_headers.dart';
 import 'php_gateway_js.dart';
 import 'stream_url_classifier.dart';
@@ -23,6 +24,7 @@ class ChannelPlaybackSession {
 
   static Future<ChannelPlaybackSession> open({
     required String streamUrl,
+    ChannelDrm drm = ChannelDrm.none,
     bool forceWebView = false,
   }) async {
     final url = streamUrl.trim();
@@ -30,7 +32,7 @@ class ChannelPlaybackSession {
       throw StateError('empty_stream');
     }
 
-    final preferWeb = forceWebView || _shouldUseWebView(url);
+    final preferWeb = forceWebView || _shouldUseWebView(url, drm);
     if (preferWeb) {
       final web = await _openWebView(url);
       return ChannelPlaybackSession._(web: web, useWebView: true);
@@ -40,7 +42,7 @@ class ChannelPlaybackSession {
       final video = await _openNativeVideo(url);
       return ChannelPlaybackSession._(video: video, useWebView: false);
     } catch (e) {
-      if (kIsWeb && !forceWebView) {
+      if (!forceWebView) {
         final web = await _openWebView(url);
         return ChannelPlaybackSession._(web: web, useWebView: true);
       }
@@ -48,10 +50,11 @@ class ChannelPlaybackSession {
     }
   }
 
-  static bool _shouldUseWebView(String url) {
+  static bool _shouldUseWebView(String url, ChannelDrm drm) {
+    if (drm == ChannelDrm.clearkey || drm == ChannelDrm.widevine) return true;
+    if (StreamUrlClassifier.hasObviousMpd(url)) return true;
     if (!StreamUrlClassifier.isPhpLikeUrl(url)) return false;
     return !StreamUrlClassifier.hasObviousM3u8(url) &&
-        !StreamUrlClassifier.hasObviousMpd(url) &&
         !StreamUrlClassifier.hasObviousTs(url);
   }
 

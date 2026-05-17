@@ -291,7 +291,21 @@ class _AdminScaffoldState extends State<AdminScaffold> {
       final bootstrapUri = Uri.parse('$_apiBase/api/v1/public/bootstrap').replace(
         queryParameters: const {'since': '0'},
       );
-      final bootstrapRes = await http.get(bootstrapUri, headers: _publicBootstrapHeaders).timeout(const Duration(seconds: 12));
+      final bootstrapFuture = http.get(bootstrapUri, headers: _publicBootstrapHeaders).timeout(const Duration(seconds: 15));
+      final adminFuture = _hasAdminSession
+          ? http.get(Uri.parse('$_apiBase/api/v1/admin/sync'), headers: _adminHeaders()).timeout(const Duration(seconds: 20))
+          : null;
+
+      late final http.Response bootstrapRes;
+      http.Response? adminRes;
+      if (adminFuture != null) {
+        final pair = await Future.wait([bootstrapFuture, adminFuture]);
+        bootstrapRes = pair[0] as http.Response;
+        adminRes = pair[1] as http.Response;
+      } else {
+        bootstrapRes = await bootstrapFuture;
+      }
+
       if (bootstrapRes.statusCode < 200 || bootstrapRes.statusCode >= 300) return false;
       final map = jsonDecode(bootstrapRes.body) as Map<String, dynamic>;
       final rawPlans = (map['plans'] as List?)?.cast<dynamic>() ?? const [];
@@ -299,143 +313,11 @@ class _AdminScaffoldState extends State<AdminScaffold> {
       final rawSlidesFromBootstrap = (map['slides'] as List?)?.cast<dynamic>() ?? const [];
       final settings = (map['settings'] as Map?)?.cast<String, dynamic>() ?? const <String, dynamic>{};
 
-      List<AdminUser>? serverUsers;
-      List<AdminChannel>? serverChannels;
-      List<AdminSlide>? serverSlides;
-      List<AdminPayment>? serverPayments;
-      List<AdminNotification>? serverNotifications;
-      AdminDashboardStats? serverStats;
-      List<AdminSubscription>? serverSubscriptions;
-      List<AdminLog>? serverLogs;
-
-      if (_hasAdminSession) {
-        try {
-          final usersRes = await http.get(Uri.parse('$_apiBase/api/v1/admin/users'), headers: _adminHeaders()).timeout(const Duration(seconds: 12));
-          final channelsRes = await http.get(Uri.parse('$_apiBase/api/v1/admin/channels'), headers: _adminHeaders()).timeout(const Duration(seconds: 12));
-          final slidesRes = await http.get(Uri.parse('$_apiBase/api/v1/admin/slides'), headers: _adminHeaders()).timeout(const Duration(seconds: 12));
-          final txRes = await http.get(Uri.parse('$_apiBase/api/v1/admin/transactions'), headers: _adminHeaders()).timeout(const Duration(seconds: 12));
-          final notiRes = await http.get(Uri.parse('$_apiBase/api/v1/admin/notifications'), headers: _adminHeaders()).timeout(const Duration(seconds: 12));
-          final statsRes = await http.get(Uri.parse('$_apiBase/api/v1/admin/stats/overview'), headers: _adminHeaders()).timeout(const Duration(seconds: 12));
-          final subsRes = await http.get(Uri.parse('$_apiBase/api/v1/admin/subscriptions'), headers: _adminHeaders()).timeout(const Duration(seconds: 12));
-          final logsRes = await http.get(Uri.parse('$_apiBase/api/v1/admin/logs'), headers: _adminHeaders()).timeout(const Duration(seconds: 12));
-          if (usersRes.statusCode >= 200 && usersRes.statusCode < 300) {
-            final usersMap = jsonDecode(usersRes.body) as Map<String, dynamic>;
-            final rawUsers = (usersMap['users'] as List?)?.cast<dynamic>() ?? const [];
-            serverUsers = rawUsers.whereType<Map>().map((raw) {
-              final j = raw.cast<String, dynamic>();
-              return AdminUser(
-                id: _s(j['id']),
-                name: _s(j['name'], fallback: 'Viewer'),
-                phone: _s(j['phone'], fallback: 'N/A'),
-                deviceId: _s(j['device_id']),
-                status: _s(j['status'], fallback: 'active'),
-                subscription: _s(j['subscription'], fallback: 'free'),
-                createdAt: _dt(j['created_at']) ?? DateTime.now(),
-                premiumUntil: _dt(j['premium_until']),
-                adminAccessUntil: _dt(j['admin_access_until']),
-              );
-            }).toList();
-          }
-          if (channelsRes.statusCode >= 200 && channelsRes.statusCode < 300) {
-            final channelsMap = jsonDecode(channelsRes.body) as Map<String, dynamic>;
-            final raw = (channelsMap['channels'] as List?)?.cast<dynamic>() ?? const [];
-            serverChannels = _parseAdminChannelsJson(raw);
-          }
-          if (slidesRes.statusCode >= 200 && slidesRes.statusCode < 300) {
-            final slidesMap = jsonDecode(slidesRes.body) as Map<String, dynamic>;
-            final raw = (slidesMap['slides'] as List?)?.cast<dynamic>() ?? const [];
-            serverSlides = _parseAdminSlidesJson(raw);
-          }
-          if (txRes.statusCode >= 200 && txRes.statusCode < 300) {
-            final txMap = jsonDecode(txRes.body) as Map<String, dynamic>;
-            final raw = (txMap['transactions'] as List?)?.cast<dynamic>() ?? const [];
-            serverPayments = raw.whereType<Map>().map((rawItem) {
-              final j = rawItem.cast<String, dynamic>();
-              return AdminPayment(
-                id: _s(j['id']),
-                userName: _s(j['user_name'], fallback: 'Viewer'),
-                amount: (j['amount'] as num?)?.toDouble() ?? 0,
-                method: _s(j['method'], fallback: 'N/A'),
-                status: _s(j['status'], fallback: 'completed'),
-                transactionId: _s(j['provider_ref'], fallback: _s(j['id'])),
-                createdAt: _dt(j['created_at']) ?? DateTime.now(),
-                planKey: _s(j['plan_key']).isEmpty ? null : _s(j['plan_key']),
-              );
-            }).toList();
-          }
-          if (notiRes.statusCode >= 200 && notiRes.statusCode < 300) {
-            final nMap = jsonDecode(notiRes.body) as Map<String, dynamic>;
-            final raw = (nMap['notifications'] as List?)?.cast<dynamic>() ?? const [];
-            serverNotifications = raw.whereType<Map>().map((rawItem) {
-              final j = rawItem.cast<String, dynamic>();
-              return AdminNotification(
-                id: _s(j['id']),
-                title: _s(j['title']),
-                message: _s(j['message']),
-                type: _s(j['type'], fallback: 'info'),
-                read: j['read'] as bool? ?? false,
-                createdAt: _dt(j['created_at']) ?? DateTime.now(),
-              );
-            }).toList();
-          }
-          if (statsRes.statusCode >= 200 && statsRes.statusCode < 300) {
-            final statsMap = jsonDecode(statsRes.body) as Map<String, dynamic>;
-            final s = (statsMap['stats'] as Map?)?.cast<String, dynamic>();
-            if (s != null) {
-              final totals = (s['totals'] as Map?)?.cast<String, dynamic>() ?? const {};
-              final growth = (s['user_growth'] as Map?)?.cast<String, dynamic>() ?? const {};
-              final revenue = (s['revenue_overview'] as Map?)?.cast<String, dynamic>() ?? const {};
-              final daily = (s['daily_registrations'] as Map?)?.cast<String, dynamic>() ?? const {};
-              final mix = (s['plan_mix'] as Map?)?.cast<String, dynamic>() ?? const {};
-              serverStats = AdminDashboardStats(
-                totalUsers: (totals['users'] as num?)?.toInt() ?? 0,
-                premiumUsers: (totals['premium_users'] as num?)?.toInt() ?? 0,
-                freeUsers: (totals['free_users'] as num?)?.toInt() ?? 0,
-                activeChannels: (totals['active_channels'] as num?)?.toInt() ?? 0,
-                revenue: (totals['revenue'] as num?)?.toDouble() ?? 0,
-                monthLabels: ((growth['labels'] as List?) ?? const []).map((e) => e.toString()).toList(),
-                newUsersPerMonth: _numList(growth['new_users']),
-                premiumPurchasesPerMonth: _numList(growth['premium_purchases']),
-                revenuePerMonth: _numList(revenue['amounts']),
-                dailyLabels: ((daily['labels'] as List?) ?? const []).map((e) => e.toString()).toList(),
-                dailyRegistrations: _numList(daily['counts']),
-                planWeekly: (mix['weekly'] as num?)?.toInt() ?? 0,
-                planGold: (mix['gold'] as num?)?.toInt() ?? 0,
-                planPlatinum: (mix['platinum'] as num?)?.toInt() ?? 0,
-                planOther: (mix['other'] as num?)?.toInt() ?? 0,
-              );
-            }
-          }
-          if (subsRes.statusCode >= 200 && subsRes.statusCode < 300) {
-            final subsMap = jsonDecode(subsRes.body) as Map<String, dynamic>;
-            final raw = (subsMap['subscriptions'] as List?)?.cast<dynamic>() ?? const [];
-            serverSubscriptions = raw.whereType<Map>().map((rawItem) {
-              final j = rawItem.cast<String, dynamic>();
-              return AdminSubscription(
-                id: _s(j['id']),
-                userName: _s(j['user_name'], fallback: 'Viewer'),
-                plan: _s(j['plan'], fallback: 'gold'),
-                price: (j['price'] as num?)?.toDouble() ?? 0,
-                endDate: _dt(j['end_date']) ?? DateTime.now(),
-                status: _s(j['status'], fallback: 'active'),
-              );
-            }).toList();
-          }
-          if (logsRes.statusCode >= 200 && logsRes.statusCode < 300) {
-            final logsMap = jsonDecode(logsRes.body) as Map<String, dynamic>;
-            final raw = (logsMap['logs'] as List?)?.cast<dynamic>() ?? const [];
-            serverLogs = raw.whereType<Map>().map((rawItem) {
-              final j = rawItem.cast<String, dynamic>();
-              return AdminLog(
-                id: _s(j['id']),
-                adminName: _s(j['admin_name'], fallback: 'Admin'),
-                action: _s(j['action']),
-                details: _s(j['details']),
-                createdAt: _dt(j['created_at']) ?? DateTime.now(),
-              );
-            }).toList();
-          }
-        } catch (_) {}
+      Map<String, dynamic>? adminSyncMap;
+      if (adminRes != null && adminRes.statusCode >= 200 && adminRes.statusCode < 300) {
+        adminSyncMap = jsonDecode(adminRes.body) as Map<String, dynamic>;
+      } else if (_hasAdminSession) {
+        adminSyncMap = await _fetchLegacyAdminBundle();
       }
 
       if (!mounted) return false;
@@ -466,15 +348,10 @@ class _AdminScaffoldState extends State<AdminScaffold> {
           if (days != null) existing.duration = days;
           if (enabled != null) existing.enabled = enabled;
         }
-        if (serverChannels != null) {
-          _channels = serverChannels!;
+        if (adminSyncMap != null) {
+          _applyAdminSyncPayload(adminSyncMap);
         } else {
           _channels = _parseAdminChannelsJson(rawChannels);
-        }
-        if (serverUsers != null) _users = serverUsers!;
-        if (serverSlides != null) {
-          _slides = serverSlides!;
-        } else {
           _slides = rawSlidesFromBootstrap.whereType<Map>().map((rawItem) {
             final j = rawItem.cast<String, dynamic>();
             return AdminSlide(
@@ -488,11 +365,6 @@ class _AdminScaffoldState extends State<AdminScaffold> {
             );
           }).where((s) => s.id.isNotEmpty && s.title.isNotEmpty && s.imageUrl.isNotEmpty).toList();
         }
-        if (serverPayments != null) _payments = serverPayments!;
-        if (serverNotifications != null) _notifications = serverNotifications!;
-        if (serverStats != null) _dashboardStats = serverStats!;
-        if (serverSubscriptions != null) _subscriptions = serverSubscriptions!;
-        if (serverLogs != null) _logs = serverLogs!;
         final wa = _s(settings['whatsapp_number']);
         _settings.whatsappNumber = wa;
         _settingsWhatsapp.text = wa;
@@ -610,6 +482,185 @@ class _AdminScaffoldState extends State<AdminScaffold> {
   List<double> _numList(Object? raw) {
     if (raw is! List) return const [];
     return raw.map((e) => (e as num?)?.toDouble() ?? 0).toList();
+  }
+
+  void _sortAdminLists() {
+    _users.sort((a, b) {
+      final c = b.createdAt.compareTo(a.createdAt);
+      if (c != 0) return c;
+      return b.id.compareTo(a.id);
+    });
+    _payments.sort((a, b) => b.createdAt.compareTo(a.createdAt));
+    _notifications.sort((a, b) => b.createdAt.compareTo(a.createdAt));
+    _logs.sort((a, b) => b.createdAt.compareTo(a.createdAt));
+    _subscriptions.sort((a, b) => b.endDate.compareTo(a.endDate));
+  }
+
+  List<AdminUser> _parseUsersJson(List<dynamic> raw) {
+    return raw.whereType<Map>().map((rawItem) {
+      final j = rawItem.cast<String, dynamic>();
+      return AdminUser(
+        id: _s(j['id']),
+        name: _s(j['name'], fallback: 'Viewer'),
+        phone: _s(j['phone'], fallback: 'N/A'),
+        deviceId: _s(j['device_id']),
+        status: _s(j['status'], fallback: 'active'),
+        subscription: _s(j['subscription'], fallback: 'free'),
+        createdAt: _dt(j['created_at']) ?? DateTime.fromMillisecondsSinceEpoch(0),
+        premiumUntil: _dt(j['premium_until']),
+        adminAccessUntil: _dt(j['admin_access_until']),
+      );
+    }).toList();
+  }
+
+  AdminDashboardStats? _parseStatsJson(Map<String, dynamic>? s) {
+    if (s == null) return null;
+    final totals = (s['totals'] as Map?)?.cast<String, dynamic>() ?? const {};
+    final growth = (s['user_growth'] as Map?)?.cast<String, dynamic>() ?? const {};
+    final revenue = (s['revenue_overview'] as Map?)?.cast<String, dynamic>() ?? const {};
+    final daily = (s['daily_registrations'] as Map?)?.cast<String, dynamic>() ?? const {};
+    final mix = (s['plan_mix'] as Map?)?.cast<String, dynamic>() ?? const {};
+    return AdminDashboardStats(
+      totalUsers: (totals['users'] as num?)?.toInt() ?? 0,
+      premiumUsers: (totals['premium_users'] as num?)?.toInt() ?? 0,
+      freeUsers: (totals['free_users'] as num?)?.toInt() ?? 0,
+      activeChannels: (totals['active_channels'] as num?)?.toInt() ?? 0,
+      revenue: (totals['revenue'] as num?)?.toDouble() ?? 0,
+      monthLabels: ((growth['labels'] as List?) ?? const []).map((e) => e.toString()).toList(),
+      newUsersPerMonth: _numList(growth['new_users']),
+      premiumPurchasesPerMonth: _numList(growth['premium_purchases']),
+      revenuePerMonth: _numList(revenue['amounts']),
+      dailyLabels: ((daily['labels'] as List?) ?? const []).map((e) => e.toString()).toList(),
+      dailyRegistrations: _numList(daily['counts']),
+      planWeekly: (mix['weekly'] as num?)?.toInt() ?? 0,
+      planGold: (mix['gold'] as num?)?.toInt() ?? 0,
+      planPlatinum: (mix['platinum'] as num?)?.toInt() ?? 0,
+      planOther: (mix['other'] as num?)?.toInt() ?? 0,
+    );
+  }
+
+  Future<Map<String, dynamic>?> _fetchLegacyAdminBundle() async {
+    try {
+      final results = await Future.wait([
+        http.get(Uri.parse('$_apiBase/api/v1/admin/users'), headers: _adminHeaders()).timeout(const Duration(seconds: 15)),
+        http.get(Uri.parse('$_apiBase/api/v1/admin/channels'), headers: _adminHeaders()).timeout(const Duration(seconds: 15)),
+        http.get(Uri.parse('$_apiBase/api/v1/admin/slides'), headers: _adminHeaders()).timeout(const Duration(seconds: 15)),
+        http.get(Uri.parse('$_apiBase/api/v1/admin/transactions'), headers: _adminHeaders()).timeout(const Duration(seconds: 15)),
+        http.get(Uri.parse('$_apiBase/api/v1/admin/notifications'), headers: _adminHeaders()).timeout(const Duration(seconds: 15)),
+        http.get(Uri.parse('$_apiBase/api/v1/admin/stats/overview'), headers: _adminHeaders()).timeout(const Duration(seconds: 15)),
+        http.get(Uri.parse('$_apiBase/api/v1/admin/subscriptions'), headers: _adminHeaders()).timeout(const Duration(seconds: 15)),
+        http.get(Uri.parse('$_apiBase/api/v1/admin/logs'), headers: _adminHeaders()).timeout(const Duration(seconds: 15)),
+      ]);
+      final bundle = <String, dynamic>{};
+      if (results[0].statusCode >= 200 && results[0].statusCode < 300) {
+        bundle['users'] = (jsonDecode(results[0].body) as Map)['users'];
+      }
+      if (results[1].statusCode >= 200 && results[1].statusCode < 300) {
+        bundle['channels'] = (jsonDecode(results[1].body) as Map)['channels'];
+      }
+      if (results[2].statusCode >= 200 && results[2].statusCode < 300) {
+        bundle['slides'] = (jsonDecode(results[2].body) as Map)['slides'];
+      }
+      if (results[3].statusCode >= 200 && results[3].statusCode < 300) {
+        bundle['transactions'] = (jsonDecode(results[3].body) as Map)['transactions'];
+      }
+      if (results[4].statusCode >= 200 && results[4].statusCode < 300) {
+        bundle['notifications'] = (jsonDecode(results[4].body) as Map)['notifications'];
+      }
+      if (results[5].statusCode >= 200 && results[5].statusCode < 300) {
+        bundle['stats'] = (jsonDecode(results[5].body) as Map)['stats'];
+      }
+      if (results[6].statusCode >= 200 && results[6].statusCode < 300) {
+        bundle['subscriptions'] = (jsonDecode(results[6].body) as Map)['subscriptions'];
+      }
+      if (results[7].statusCode >= 200 && results[7].statusCode < 300) {
+        bundle['logs'] = (jsonDecode(results[7].body) as Map)['logs'];
+      }
+      return bundle.isEmpty ? null : bundle;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  void _applyAdminSyncPayload(Map<String, dynamic> adminMap) {
+    final rawUsers = adminMap['users'];
+    if (rawUsers is List) _users = _parseUsersJson(rawUsers);
+
+    final rawChannels = adminMap['channels'];
+    if (rawChannels is List) _channels = _parseAdminChannelsJson(rawChannels);
+
+    final rawSlides = adminMap['slides'];
+    if (rawSlides is List) _slides = _parseAdminSlidesJson(rawSlides);
+
+    final rawTx = adminMap['transactions'];
+    if (rawTx is List) {
+      _payments = rawTx.whereType<Map>().map((rawItem) {
+        final j = rawItem.cast<String, dynamic>();
+        return AdminPayment(
+          id: _s(j['id']),
+          userName: _s(j['user_name'], fallback: 'Viewer'),
+          amount: (j['amount'] as num?)?.toDouble() ?? 0,
+          method: _s(j['method'], fallback: 'N/A'),
+          status: _s(j['status'], fallback: 'completed'),
+          transactionId: _s(j['provider_ref'], fallback: _s(j['id'])),
+          createdAt: _dt(j['created_at']) ?? DateTime.now(),
+          planKey: _s(j['plan_key']).isEmpty ? null : _s(j['plan_key']),
+        );
+      }).toList();
+    }
+
+    final rawNoti = adminMap['notifications'];
+    if (rawNoti is List) {
+      _notifications = rawNoti.whereType<Map>().map((rawItem) {
+        final j = rawItem.cast<String, dynamic>();
+        return AdminNotification(
+          id: _s(j['id']),
+          title: _s(j['title']),
+          message: _s(j['message']),
+          type: _s(j['type'], fallback: 'info'),
+          read: j['read'] as bool? ?? false,
+          createdAt: _dt(j['created_at']) ?? DateTime.now(),
+        );
+      }).toList();
+    }
+
+    final stats = _parseStatsJson((adminMap['stats'] as Map?)?.cast<String, dynamic>());
+    if (stats != null) _dashboardStats = stats;
+
+    final rawSubs = adminMap['subscriptions'];
+    if (rawSubs is List) {
+      _subscriptions = rawSubs.whereType<Map>().map((rawItem) {
+        final j = rawItem.cast<String, dynamic>();
+        return AdminSubscription(
+          id: _s(j['id']),
+          userName: _s(j['user_name'], fallback: 'Viewer'),
+          plan: _s(j['plan'], fallback: 'gold'),
+          price: (j['price'] as num?)?.toDouble() ?? 0,
+          endDate: _dt(j['end_date']) ?? DateTime.now(),
+          status: _s(j['status'], fallback: 'active'),
+        );
+      }).toList();
+    }
+
+    final rawLogs = adminMap['logs'];
+    if (rawLogs is List) {
+      _logs = rawLogs.whereType<Map>().map((rawItem) {
+        final j = rawItem.cast<String, dynamic>();
+        return AdminLog(
+          id: _s(j['id']),
+          adminName: _s(j['admin_name'], fallback: 'Admin'),
+          action: _s(j['action']),
+          details: _s(j['details']),
+          createdAt: _dt(j['created_at']) ?? DateTime.now(),
+        );
+      }).toList();
+    }
+
+    _sortAdminLists();
+  }
+
+  Future<void> _onPullRefresh() async {
+    await _hydrateFromBackend();
   }
 
   /// Last 7 calendar months ending this month (labels + bucket starts).
@@ -787,9 +838,15 @@ class _AdminScaffoldState extends State<AdminScaffold> {
                   children: [
                     _buildHeader(mobile, w),
                     Expanded(
-                      child: SingleChildScrollView(
-                        padding: EdgeInsets.fromLTRB(16, 16, 16, mobile ? 88 : 16),
-                        child: _buildPage(),
+                      child: RefreshIndicator(
+                        color: const Color(0xFF818CF8),
+                        backgroundColor: AdminColors.bgSecondary,
+                        onRefresh: _onPullRefresh,
+                        child: SingleChildScrollView(
+                          physics: const AlwaysScrollableScrollPhysics(),
+                          padding: EdgeInsets.fromLTRB(16, 16, 16, mobile ? 88 : 16),
+                          child: _buildPage(),
+                        ),
                       ),
                     ),
                   ],
@@ -1130,7 +1187,7 @@ class _AdminScaffoldState extends State<AdminScaffold> {
         _pageTitleRow(
           title: 'Admin Dashboard',
           subtitle: _hasAdminSession
-              ? (_dashboardStats != null ? 'Live data from database · auto-refresh 15s' : 'Connected · loading stats…')
+              ? (_dashboardStats != null ? 'Live data · pull down to refresh · auto 15s' : 'Connected · loading stats…')
               : 'Sign in to load live data',
           action: _btnPrimary(label: 'Add Channel', icon: Icons.add, onTap: () => _showChannelEditor()),
         ),
@@ -1616,7 +1673,12 @@ class _AdminScaffoldState extends State<AdminScaffold> {
       if (q.isEmpty) return true;
       final blob = '${u.name} ${u.phone} ${u.displayDeviceId} ${u.status} ${u.subscription} ${u.id}'.toLowerCase();
       return blob.contains(q);
-    }).toList();
+    }).toList()
+      ..sort((a, b) {
+        final c = b.createdAt.compareTo(a.createdAt);
+        if (c != 0) return c;
+        return b.id.compareTo(a.id);
+      });
     return LayoutBuilder(
       builder: (context, constraints) {
         final wideHeader = constraints.maxWidth >= 560;
@@ -1822,14 +1884,28 @@ class _AdminScaffoldState extends State<AdminScaffold> {
                   label: u.subscription == 'premium' ? 'Malipo: ON' : 'Malipo: OFF',
                   color: u.subscription == 'premium' ? const Color(0xFFFBBF24) : const Color(0xFF6B7280),
                   onTap: () async {
-                    final next = u.subscription == 'premium' ? 'free' : 'premium';
-                    setState(() => u.subscription = next);
+                    final turningOff = u.subscription == 'premium';
+                    final next = turningOff ? 'free' : 'premium';
                     try {
-                      await _syncUserToBackend(u, {'subscription': next});
-                    } catch (_) {}
-                    _showToast('Mfumo: ${u.subscription}', _ToastType.success);
+                      if (turningOff) {
+                        await _revokeAllPremiumAccess(u, confirm: false);
+                      } else {
+                        setState(() => u.subscription = next);
+                        await _syncUserToBackend(u, {'subscription': next});
+                        _showToast('Mfumo: premium', _ToastType.success);
+                      }
+                    } catch (e) {
+                      _showToast('Imeshindwa: $e', _ToastType.error);
+                    }
                   },
                 ),
+                if (u.effectivePremium)
+                  _userActionChip(
+                    icon: Icons.remove_circle_outline,
+                    label: 'Ondoa premium',
+                    color: const Color(0xFFEF4444),
+                    onTap: () => _revokeAllPremiumAccess(u),
+                  ),
               ],
             ),
           ],
@@ -1964,6 +2040,17 @@ class _AdminScaffoldState extends State<AdminScaffold> {
     return '${t(d.day)}/${t(d.month)}/${d.year} ${t(d.hour)}:${t(d.minute)}';
   }
 
+  void _applyServerUserFields(AdminUser u, Map<String, dynamic> j) {
+    final name = _s(j['name']);
+    if (name.isNotEmpty) u.name = name;
+    final status = _s(j['status']);
+    if (status.isNotEmpty) u.status = status;
+    final sub = _s(j['subscription']);
+    if (sub.isNotEmpty) u.subscription = sub;
+    u.premiumUntil = _dt(j['premium_until']);
+    u.adminAccessUntil = _dt(j['admin_access_until']);
+  }
+
   Future<void> _syncUserToBackend(AdminUser u, Map<String, dynamic> patch) async {
     if (!_hasAdminSession) return;
     final res = await http
@@ -1976,26 +2063,89 @@ class _AdminScaffoldState extends State<AdminScaffold> {
     if (res.statusCode < 200 || res.statusCode >= 300) {
       throw Exception('user sync failed ${res.statusCode}');
     }
+    final map = jsonDecode(res.body) as Map<String, dynamic>;
+    final userJson = map['user'];
+    if (userJson is Map) {
+      _applyServerUserFields(u, userJson.cast<String, dynamic>());
+    }
+  }
+
+  Future<void> _revokeAllPremiumAccess(AdminUser u, {bool confirm = true}) async {
+    if (!_hasAdminSession) return;
+    if (confirm) {
+      final ok = await _showDeleteConfirmModal(
+        title: 'Ondoa ufikiaji wa premium?',
+        message:
+            'Mtumiaji "${u.name}" atapoteza ufikiaji wote wa premium (muda wa msimamizi na malipo). Hatua hii haiwezi kutenduliwa kwa urahisi.',
+        confirmLabel: 'Ondoa premium',
+      );
+      if (!ok || !mounted) return;
+    }
+    final res = await http
+        .post(
+          Uri.parse('$_apiBase/api/v1/admin/users/${u.id}/revoke-premium'),
+          headers: _adminHeaders(),
+        )
+        .timeout(const Duration(seconds: 12));
+    if (res.statusCode < 200 || res.statusCode >= 300) {
+      throw Exception('revoke failed ${res.statusCode}');
+    }
+    final map = jsonDecode(res.body) as Map<String, dynamic>;
+    final userJson = map['user'];
+    setState(() {
+      u.subscription = 'free';
+      u.premiumUntil = null;
+      u.adminAccessUntil = null;
+      if (userJson is Map) {
+        _applyServerUserFields(u, userJson.cast<String, dynamic>());
+      }
+    });
+    _showToast('Premium imeondolewa', _ToastType.success);
   }
 
   Future<void> _applyAdminDuration(AdminUser u, Duration add) async {
-    final now = DateTime.now();
-    final prev = u.adminAccessUntil;
-    final base = (prev != null && prev.isAfter(now)) ? prev : now;
-    final next = base.add(add);
-    setState(() => u.adminAccessUntil = next);
+    if (!_hasAdminSession) return;
+    if (add.inMilliseconds < 1000) return;
     try {
-      await _syncUserToBackend(u, {'admin_access_until': next.toIso8601String()});
-    } catch (_) {}
-    _showToast('Umeongeza muda wa premium (msimamizi)', _ToastType.success);
+      final res = await http
+          .post(
+            Uri.parse('$_apiBase/api/v1/admin/users/${u.id}/grant-access'),
+            headers: _adminHeaders(),
+            body: jsonEncode({'duration_ms': add.inMilliseconds}),
+          )
+          .timeout(const Duration(seconds: 12));
+      if (res.statusCode < 200 || res.statusCode >= 300) {
+        throw Exception('grant failed ${res.statusCode}');
+      }
+      final map = jsonDecode(res.body) as Map<String, dynamic>;
+      final userJson = map['user'];
+      if (!mounted) return;
+      setState(() {
+        if (userJson is Map) {
+          _applyServerUserFields(u, userJson.cast<String, dynamic>());
+        }
+      });
+      final end = u.adminAccessUntil;
+      _showToast(
+        end != null ? 'Premium hadi ${_fmtAccessDate(end)}' : 'Muda wa premium umeongezwa',
+        _ToastType.success,
+      );
+    } catch (e) {
+      if (!mounted) return;
+      _showToast('Imeshindwa: $e', _ToastType.error);
+    }
   }
 
   Future<void> _clearAdminAccess(AdminUser u) async {
-    setState(() => u.adminAccessUntil = null);
     try {
       await _syncUserToBackend(u, {'admin_access_until': null});
-    } catch (_) {}
-    _showToast('Muda wa msimamizi umeondolewa', _ToastType.info);
+      if (!mounted) return;
+      setState(() {});
+      _showToast('Muda wa msimamizi umeondolewa', _ToastType.info);
+    } catch (e) {
+      if (!mounted) return;
+      _showToast('Imeshindwa: $e', _ToastType.error);
+    }
   }
 
   Future<bool> _showDeleteConfirmModal({
@@ -2111,15 +2261,36 @@ class _AdminScaffoldState extends State<AdminScaffold> {
                   ? () async {
                       final ok = await _showDeleteConfirmModal(
                         title: 'Futa muda wa msimamizi?',
-                        message: 'Muda wa premium wa “${u.name}” utaondolewa mara moja.',
+                        message:
+                            'Muda wa premium uliopewa na msimamizi kwa “${u.name}” utaondolewa. Malipo ya mfumo yatabaki ikiwa yapo.',
                       );
                       if (!mounted || !ok) return;
                       await _clearAdminAccess(u);
-                      Navigator.pop(ctx);
+                      if (ctx.mounted) Navigator.pop(ctx);
                     }
                   : null,
               child: const Text('Futa muda wa msimamizi'),
             ),
+            if (u.effectivePremium)
+              TextButton(
+                onPressed: () async {
+                  final ok = await _showDeleteConfirmModal(
+                    title: 'Ondoa premium kabisa?',
+                    message:
+                        '“${u.name}” atapoteza ufikiaji wote wa premium (msimamizi na malipo).',
+                    confirmLabel: 'Ondoa premium',
+                  );
+                  if (!mounted || !ok) return;
+                  try {
+                    await _revokeAllPremiumAccess(u, confirm: false);
+                    if (ctx.mounted) Navigator.pop(ctx);
+                  } catch (e) {
+                    if (!mounted) return;
+                    _showToast('Imeshindwa: $e', _ToastType.error);
+                  }
+                },
+                child: const Text('Ondoa premium kabisa', style: TextStyle(color: Color(0xFFEF4444))),
+              ),
             TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Funga')),
             FilledButton(
               onPressed: () async {

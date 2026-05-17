@@ -72,6 +72,90 @@ export async function registerRoutes(
     return { ok: true, premiumUntilMs };
   });
 
+  /** Full viewer profile — name, premium window, plan (for Mtumiaji / Fungua zote UI). */
+  app.get<{ Params: { device_id: string } }>('/api/v1/public/user-profile/:device_id', async (req, reply) => {
+    const deviceId = (req.params.device_id ?? '').trim();
+    if (!deviceId) return reply.code(400).send({ error: 'device_id is required' });
+
+    const r = await pool.query(
+      `SELECT
+         u.id,
+         u.name,
+         u.phone,
+         u.subscription,
+         u.premium_until,
+         u.admin_access_until,
+         latest.plan_key,
+         pp.name AS plan_name
+       FROM users u
+       LEFT JOIN LATERAL (
+         SELECT plan_key
+         FROM transactions
+         WHERE user_id = u.id AND status = 'completed'
+         ORDER BY COALESCE(completed_at, created_at) DESC
+         LIMIT 1
+       ) latest ON true
+       LEFT JOIN pricing_plans pp ON pp.plan_key = latest.plan_key
+       WHERE u.device_id = $1
+       LIMIT 1`,
+      [deviceId],
+    );
+
+    if (!r.rowCount) {
+      reply.header('Cache-Control', 'private, no-store');
+      return { ok: true, premiumActive: false, premiumUntilMs: null, name: null, accessSource: 'none' };
+    }
+
+    const row = r.rows[0] as {
+      name: string;
+      phone: string;
+      subscription: string;
+      premium_until: Date | null;
+      admin_access_until: Date | null;
+      plan_key: string | null;
+      plan_name: string | null;
+    };
+
+    const now = Date.now();
+    const candidates: number[] = [];
+    let accessSource: 'admin' | 'payment' | 'legacy' | 'none' = 'none';
+
+    const adminMs = row.admin_access_until?.getTime() ?? 0;
+    const premMs = row.premium_until?.getTime() ?? 0;
+    if (adminMs > now) {
+      candidates.push(adminMs);
+      accessSource = 'admin';
+    }
+    if (premMs > now) {
+      candidates.push(premMs);
+      if (accessSource !== 'admin') accessSource = 'payment';
+    }
+    if (row.subscription === 'premium' && candidates.length === 0) {
+      candidates.push(now + 30 * 24 * 60 * 60 * 1000);
+      accessSource = 'legacy';
+    }
+
+    const premiumUntilMs = candidates.length > 0 ? Math.max(...candidates) : null;
+    const premiumActive = premiumUntilMs != null && premiumUntilMs > now;
+    const adminAccessUntilMs = adminMs > now ? adminMs : null;
+
+    reply.header('Cache-Control', 'private, no-store');
+    return {
+      ok: true,
+      name: row.name,
+      phone: row.phone,
+      subscription: row.subscription,
+      premiumActive,
+      premiumUntilMs,
+      adminAccessUntilMs,
+      premium_until: row.premium_until ? new Date(row.premium_until).toISOString() : null,
+      admin_access_until: row.admin_access_until ? new Date(row.admin_access_until).toISOString() : null,
+      plan_key: row.plan_key,
+      plan_name: row.plan_name,
+      accessSource: premiumActive ? accessSource : 'none',
+    };
+  });
+
   /** Single round-trip for mobile cold start */
   app.get('/api/v1/public/bootstrap', async (req, reply) => {
     const since = Number((req.query as { since?: string }).since ?? 0);
@@ -150,14 +234,21 @@ export async function registerRoutes(
       if (!deviceId) return reply.code(400).send({ error: 'device_id is required' });
 
       const userId = `USR-${nanoid(10)}`;
+      const generic = new Set(['', 'viewer', 'free user', 'freeuser']);
+      const incomingName = name.trim();
+      const safeName = generic.has(incomingName.toLowerCase()) ? '' : incomingName;
       const row = await pool.query(
         `INSERT INTO users (id, name, phone, device_id, status, subscription, created_at)
          VALUES ($1, $2, $3, $4, 'active', 'free', now())
          ON CONFLICT (device_id) DO UPDATE SET
-           name = CASE WHEN EXCLUDED.name <> '' THEN EXCLUDED.name ELSE users.name END,
-           phone = CASE WHEN EXCLUDED.phone <> '' THEN EXCLUDED.phone ELSE users.phone END
-         RETURNING id, name, phone, device_id, status, subscription, admin_access_until, created_at`,
-        [userId, name || 'Viewer', phone || 'N/A', deviceId],
+           name = CASE
+             WHEN EXCLUDED.name <> '' AND LOWER(TRIM(EXCLUDED.name)) NOT IN ('viewer', 'free user', 'freeuser')
+             THEN EXCLUDED.name
+             ELSE users.name
+           END,
+           phone = CASE WHEN EXCLUDED.phone <> '' AND EXCLUDED.phone <> 'N/A' THEN EXCLUDED.phone ELSE users.phone END
+         RETURNING id, name, phone, device_id, status, subscription, premium_until, admin_access_until, created_at`,
+        [userId, safeName || 'Viewer', phone || 'N/A', deviceId],
       );
       return { ok: true, user: row.rows[0] };
     },
@@ -768,9 +859,59 @@ export async function registerRoutes(
   app.get('/api/v1/admin/users', { preHandler: adminPre }, async () => {
     const r = await pool.query(
       `SELECT id, name, phone, device_id, status, subscription, premium_until, admin_access_until, created_at
-       FROM users ORDER BY created_at DESC LIMIT 500`,
+       FROM users ORDER BY created_at DESC NULLS LAST, id DESC LIMIT 500`,
     );
     return { users: r.rows };
+  });
+
+  /** One round-trip for admin dashboard — parallel DB reads (faster than 7 separate HTTP calls). */
+  app.get('/api/v1/admin/sync', { preHandler: adminPre }, async () => {
+    const [
+      usersRes,
+      channelsRes,
+      slidesRes,
+      txRes,
+      notiRes,
+      logsRes,
+      subscriptions,
+      stats,
+    ] = await Promise.all([
+      pool.query(
+        `SELECT id, name, phone, device_id, status, subscription, premium_until, admin_access_until, created_at
+         FROM users ORDER BY created_at DESC NULLS LAST, id DESC LIMIT 500`,
+      ),
+      pool.query(
+        `SELECT id, name, category, premium, live, status, thumbnail, stream_url, viewers, rating, drm, sort_order, updated_at
+         FROM channels ORDER BY sort_order, name, id`,
+      ),
+      pool.query(
+        `SELECT id, title, subtitle, image_url, premium, active, sort_order, updated_at
+         FROM slides ORDER BY sort_order, id`,
+      ),
+      pool.query(
+        `SELECT t.*, COALESCE(u.name, 'Viewer') AS user_name
+         FROM transactions t
+         LEFT JOIN users u ON u.id = t.user_id
+         ORDER BY t.created_at DESC NULLS LAST
+         LIMIT 500`,
+      ),
+      pool.query(`SELECT * FROM notifications ORDER BY created_at DESC NULLS LAST LIMIT 100`),
+      pool.query(
+        `SELECT id, admin_name, action, details, created_at FROM admin_logs ORDER BY created_at DESC NULLS LAST LIMIT 200`,
+      ),
+      fetchAdminSubscriptions(pool),
+      fetchAdminStatsOverview(pool),
+    ]);
+    return {
+      users: usersRes.rows,
+      channels: channelsRes.rows,
+      slides: slidesRes.rows,
+      transactions: txRes.rows,
+      notifications: notiRes.rows,
+      logs: logsRes.rows,
+      subscriptions,
+      stats,
+    };
   });
 
   app.get('/api/v1/admin/stats/overview', { preHandler: adminPre }, async () => {
@@ -815,6 +956,10 @@ export async function registerRoutes(
         sets.push(`admin_access_until = $${i++}`);
         vals.push(b.admin_access_until === null ? null : new Date(String(b.admin_access_until)));
       }
+      if (b.premium_until !== undefined) {
+        sets.push(`premium_until = $${i++}`);
+        vals.push(b.premium_until === null ? null : new Date(String(b.premium_until)));
+      }
       if (!sets.length) {
         const row = await pool.query(`SELECT * FROM users WHERE id = $1`, [id]);
         return { user: row.rows[0] };
@@ -825,6 +970,71 @@ export async function registerRoutes(
       const v = await bumpConfigVersion(pool);
       sse.notifyConfigVersion(v);
       return { ok: true, version: v, user: row.rows[0] };
+    },
+  );
+
+  /** Stack admin premium time using server clock (exact expiry in DB). */
+  app.post<{ Params: { id: string }; Body: Record<string, unknown> }>(
+    '/api/v1/admin/users/:id/grant-access',
+    { preHandler: adminPre },
+    async (req, reply) => {
+      const id = req.params.id;
+      const b = req.body ?? {};
+      let durationMs = Number(b.duration_ms);
+      if (!Number.isFinite(durationMs) || durationMs < 1000) {
+        const hours = Number(b.hours ?? 0);
+        const days = Number(b.days ?? 0);
+        const weeks = Number(b.weeks ?? 0);
+        const months = Number(b.months ?? 0);
+        durationMs =
+          hours * 3_600_000 +
+          days * 86_400_000 +
+          weeks * 7 * 86_400_000 +
+          months * 30 * 86_400_000;
+      }
+      if (!Number.isFinite(durationMs) || durationMs < 1000) {
+        return reply.code(400).send({ error: 'duration_ms or hours/days/weeks/months required' });
+      }
+      const secs = durationMs / 1000;
+      const r = await pool.query(
+        `UPDATE users SET admin_access_until =
+           GREATEST(COALESCE(admin_access_until, now()), now()) + ($2::double precision * interval '1 second')
+         WHERE id = $1
+         RETURNING id, name, phone, device_id, status, subscription, premium_until, admin_access_until, created_at`,
+        [id, secs],
+      );
+      if (!r.rowCount) return reply.code(404).send({ error: 'user not found' });
+      const v = await bumpConfigVersion(pool);
+      sse.notifyConfigVersion(v);
+      const user = r.rows[0] as { admin_access_until: Date | null };
+      return {
+        ok: true,
+        version: v,
+        user: r.rows[0],
+        admin_access_until: user.admin_access_until
+          ? new Date(user.admin_access_until).toISOString()
+          : null,
+      };
+    },
+  );
+
+  /** Remove all premium access (paid window, admin grant, legacy subscription flag). */
+  app.post<{ Params: { id: string } }>(
+    '/api/v1/admin/users/:id/revoke-premium',
+    { preHandler: adminPre },
+    async (req, reply) => {
+      const id = req.params.id;
+      const r = await pool.query(
+        `UPDATE users
+         SET subscription = 'free', premium_until = NULL, admin_access_until = NULL
+         WHERE id = $1
+         RETURNING id, name, phone, device_id, status, subscription, premium_until, admin_access_until, created_at`,
+        [id],
+      );
+      if (!r.rowCount) return reply.code(404).send({ error: 'user not found' });
+      const v = await bumpConfigVersion(pool);
+      sse.notifyConfigVersion(v);
+      return { ok: true, version: v, user: r.rows[0] };
     },
   );
 

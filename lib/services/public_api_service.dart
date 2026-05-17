@@ -8,6 +8,7 @@ import '../admin/admin_currency.dart';
 import '../models/channel.dart';
 import '../models/hero_slide.dart';
 import '../models/plan.dart';
+import '../models/viewer_profile.dart';
 import 'pricing_catalog.dart';
 
 const _prefsBootstrapCache = 'washatv_bootstrap_cache_v1';
@@ -202,6 +203,41 @@ class PublicApiService {
     return null;
   }
 
+  /// Name, premium window, plan — used after admin grants or payments.
+  Future<ViewerProfile?> fetchViewerProfile(String deviceId) async {
+    final id = deviceId.trim();
+    if (id.isEmpty) return null;
+    final uri = Uri.parse('$baseUrl/api/v1/public/user-profile/${Uri.encodeComponent(id)}');
+    try {
+      final res = await http.get(uri, headers: _publicGetHeaders).timeout(const Duration(seconds: 12));
+      if (res.statusCode != 200) return null;
+      final map = jsonDecode(res.body) as Map<String, dynamic>;
+      if (map['ok'] != true) return null;
+
+      DateTime? parseMs(Object? raw) {
+        if (raw == null) return null;
+        final ms = raw is int ? raw : raw is num ? raw.toInt() : int.tryParse(raw.toString());
+        if (ms == null || ms <= 0) return null;
+        return DateTime.fromMillisecondsSinceEpoch(ms);
+      }
+
+      final name = (map['name'] as String?)?.trim() ?? '';
+      return ViewerProfile(
+        name: name,
+        phone: (map['phone'] as String?)?.trim() ?? '',
+        premiumActive: map['premiumActive'] == true,
+        premiumUntil: parseMs(map['premiumUntilMs']),
+        adminAccessUntil: parseMs(map['adminAccessUntilMs']),
+        planKey: (map['plan_key'] as String?)?.trim(),
+        planName: (map['plan_name'] as String?)?.trim(),
+        accessSource: (map['accessSource'] as String?)?.trim() ?? 'none',
+      );
+    } catch (e) {
+      if (kDebugMode) debugPrint('WASHA user-profile: $e');
+      return null;
+    }
+  }
+
   /// Server premium expiry for this device (admin grants + completed payments).
   Future<DateTime?> fetchPremiumUntil(String deviceId) async {
     final id = deviceId.trim();
@@ -313,6 +349,12 @@ class PublicApiService {
       final category = (j['category'] as String?)?.trim();
       if (name == null || name.isEmpty || thumb == null || thumb.isEmpty || category == null || category.isEmpty) continue;
       final stream = (j['stream_url'] as String?)?.trim() ?? (j['streamUrl'] as String?)?.trim() ?? '';
+      final drmRaw = (j['drm'] as String?)?.trim().toLowerCase() ?? 'none';
+      final drm = switch (drmRaw) {
+        'clearkey' => ChannelDrm.clearkey,
+        'widevine' => ChannelDrm.widevine,
+        _ => ChannelDrm.none,
+      };
       channels.add(
         Channel(
           id: _channelNumericId(j['id']),
@@ -322,6 +364,7 @@ class PublicApiService {
           live: j['live'] as bool? ?? false,
           category: category,
           streamUrl: stream,
+          drm: drm,
         ),
       );
     }
@@ -414,21 +457,24 @@ class PublicApiService {
             .toList(),
       };
 
+  /// Registers device on server. Omits generic placeholder names so admin renames are kept.
   Future<void> syncViewer({
     required String deviceId,
-    required String name,
+    String? name,
     String? phone,
   }) async {
     final uri = Uri.parse('$baseUrl/api/v1/public/users/sync');
+    final body = <String, dynamic>{'device_id': deviceId};
+    final n = name?.trim() ?? '';
+    if (n.isNotEmpty && !isGenericViewerName(n)) body['name'] = n;
+    final p = phone?.trim() ?? '';
+    if (p.isNotEmpty) body['phone'] = p;
+
     final res = await http
         .post(
           uri,
           headers: const {'Content-Type': 'application/json'},
-          body: jsonEncode({
-            'device_id': deviceId,
-            'name': name,
-            'phone': phone ?? '',
-          }),
+          body: jsonEncode(body),
         )
         .timeout(const Duration(seconds: 20));
     if (res.statusCode < 200 || res.statusCode >= 300) {

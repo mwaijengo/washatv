@@ -1,3 +1,6 @@
+/// DRM mode from admin catalog: `none`, `clearkey`, or `widevine`.
+enum ChannelDrm { none, clearkey, widevine }
+
 class Channel {
   const Channel({
     required this.id,
@@ -7,6 +10,7 @@ class Channel {
     required this.live,
     required this.category,
     this.streamUrl = '',
+    this.drm = ChannelDrm.none,
   });
 
   final int id;
@@ -16,6 +20,10 @@ class Channel {
   final bool live;
   final String category;
   final String streamUrl;
+  final ChannelDrm drm;
 
   bool get hasStream => streamUrl.trim().isNotEmpty;
+
+  bool get needsProtectedPlayback =>
+      drm == ChannelDrm.clearkey || drm == ChannelDrm.widevine;
 }

@@ -17,6 +17,10 @@ class SubscriptionScreen extends StatefulWidget {
     required this.plans,
     required this.premium,
     required this.selectedPlan,
+    required this.endDate,
+    required this.planLabel,
+    required this.accessSource,
+    required this.userName,
     required this.onPlanChange,
     required this.onPay,
     this.paymentSucceeded = false,
@@ -25,6 +29,10 @@ class SubscriptionScreen extends StatefulWidget {
   final List<Plan> plans;
   final bool premium;
   final Plan selectedPlan;
+  final DateTime? endDate;
+  final String planLabel;
+  final String accessSource;
+  final String userName;
   final ValueChanged<Plan> onPlanChange;
   final Future<void> Function(String phone, String name) onPay;
   /// Set by parent after SonicPesa confirms payment.
@@ -210,6 +218,21 @@ class _SubscriptionScreenState extends State<SubscriptionScreen> {
             const SizedBox(height: 6),
             const Text('Hongera, sasa unaweza ku-stream channels zote', style: TextStyle(color: Color(0xFF9CA3AF))),
           ],
+        ),
+      );
+    }
+
+    if (widget.premium) {
+      return SingleChildScrollView(
+        padding: const EdgeInsets.fromLTRB(18, 18, 18, 120),
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 520),
+          child: _PremiumAccountStatusPanel(
+            userName: widget.userName,
+            endDate: widget.endDate,
+            planLabel: widget.planLabel,
+            accessSource: widget.accessSource,
+          ),
         ),
       );
     }
@@ -724,6 +747,188 @@ class _FunguaZoteAudioGuidePanelState extends State<_FunguaZoteAudioGuidePanel> 
             ),
           ),
         ),
+      ),
+    );
+  }
+}
+
+/// Shown on Fungua zote when the user already has active premium.
+class _PremiumAccountStatusPanel extends StatelessWidget {
+  const _PremiumAccountStatusPanel({
+    required this.userName,
+    required this.endDate,
+    required this.planLabel,
+    required this.accessSource,
+  });
+
+  final String userName;
+  final DateTime? endDate;
+  final String planLabel;
+  final String accessSource;
+
+  @override
+  Widget build(BuildContext context) {
+    final now = DateTime.now();
+    final diff = endDate?.difference(now) ?? Duration.zero;
+    final plan = planLabel.isNotEmpty ? planLabel : 'Premium';
+    final sourceLabel = switch (accessSource) {
+      'admin' => 'Ufikiaji kutoka msimamizi',
+      'payment' => 'Malipo yaliyothibitishwa',
+      _ => 'Usajili wa premium',
+    };
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Container(
+          padding: const EdgeInsets.fromLTRB(18, 20, 18, 18),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(24),
+            gradient: const LinearGradient(
+              begin: Alignment.topLeft,
+              end: Alignment.bottomRight,
+              colors: [Color(0xFF312E81), Color(0xFF1E1B4B), Color(0xFF0F172A)],
+            ),
+            border: Border.all(color: const Color(0x44FBBF24)),
+            boxShadow: [
+              BoxShadow(
+                color: const Color(0xFFF59E0B).withValues(alpha: 0.18),
+                blurRadius: 24,
+                offset: const Offset(0, 10),
+              ),
+            ],
+          ),
+          child: Column(
+            children: [
+              Container(
+                width: 72,
+                height: 72,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  gradient: const LinearGradient(colors: [Color(0xFFFBBF24), Color(0xFFF97316)]),
+                  boxShadow: [
+                    BoxShadow(
+                      color: const Color(0xFFF59E0B).withValues(alpha: 0.4),
+                      blurRadius: 20,
+                    ),
+                  ],
+                ),
+                child: const Icon(Icons.workspace_premium_rounded, color: Colors.white, size: 38),
+              ),
+              const SizedBox(height: 14),
+              Text(
+                userName,
+                textAlign: TextAlign.center,
+                style: const TextStyle(fontSize: 22, fontWeight: FontWeight.w800, letterSpacing: -0.3),
+              ),
+              const SizedBox(height: 6),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 5),
+                decoration: BoxDecoration(
+                  color: const Color(0x33FBBF24),
+                  borderRadius: BorderRadius.circular(20),
+                  border: Border.all(color: const Color(0x55FBBF24)),
+                ),
+                child: const Text(
+                  'AKAUNTI YA PREMIUM',
+                  style: TextStyle(fontSize: 11, fontWeight: FontWeight.w800, letterSpacing: 0.8, color: Color(0xFFFDE68A)),
+                ),
+              ),
+            ],
+          ),
+        ),
+        const SizedBox(height: 16),
+        _statusTile(
+          icon: Icons.card_membership_rounded,
+          label: 'Mpango',
+          value: plan,
+          accent: const Color(0xFF60A5FA),
+        ),
+        const SizedBox(height: 10),
+        _statusTile(
+          icon: Icons.info_outline_rounded,
+          label: 'Chanzo',
+          value: sourceLabel,
+          accent: const Color(0xFFA78BFA),
+        ),
+        const SizedBox(height: 10),
+        _statusTile(
+          icon: Icons.hourglass_bottom_rounded,
+          label: 'Muda uliosalia',
+          value: '${diff.inDays} siku · ${diff.inHours % 24} masaa · ${diff.inMinutes % 60} dak',
+          accent: const Color(0xFF34D399),
+        ),
+        if (endDate != null) ...[
+          const SizedBox(height: 10),
+          _statusTile(
+            icon: Icons.event_rounded,
+            label: 'Inaisha',
+            value: '${endDate!.day}/${endDate!.month}/${endDate!.year} '
+                '${endDate!.hour.toString().padLeft(2, '0')}:${endDate!.minute.toString().padLeft(2, '0')}',
+            accent: const Color(0xFFFBBF24),
+          ),
+        ],
+        const SizedBox(height: 18),
+        Container(
+          padding: const EdgeInsets.all(14),
+          decoration: BoxDecoration(
+            color: const Color(0x2210B981),
+            borderRadius: BorderRadius.circular(16),
+            border: Border.all(color: const Color(0x3310B981)),
+          ),
+          child: const Row(
+            children: [
+              Icon(Icons.check_circle_rounded, color: Color(0xFF34D399), size: 22),
+              SizedBox(width: 10),
+              Expanded(
+                child: Text(
+                  'Unaweza ku-stream channels zote za premium hadi muda uishe.',
+                  style: TextStyle(fontSize: 13, height: 1.4, color: Color(0xFFCBD5E1)),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _statusTile({
+    required IconData icon,
+    required String label,
+    required String value,
+    required Color accent,
+  }) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+      decoration: BoxDecoration(
+        color: const Color(0x66111B2C),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: const Color(0x14FFFFFF)),
+      ),
+      child: Row(
+        children: [
+          Container(
+            width: 40,
+            height: 40,
+            decoration: BoxDecoration(
+              color: accent.withValues(alpha: 0.18),
+              borderRadius: BorderRadius.circular(12),
+            ),
+            child: Icon(icon, color: accent, size: 22),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(label, style: const TextStyle(fontSize: 11, color: Color(0xFF94A3B8), fontWeight: FontWeight.w600)),
+                const SizedBox(height: 2),
+                Text(value, style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w700)),
+              ],
+            ),
+          ),
+        ],
       ),
     );
   }

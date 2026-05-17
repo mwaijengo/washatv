@@ -2,7 +2,6 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:url_launcher/url_launcher.dart';
 
-import '../models/plan.dart';
 import '../theme/app_theme.dart';
 import '../widgets/glass_panel.dart';
 
@@ -13,9 +12,9 @@ class ProfileScreen extends StatelessWidget {
     required this.userName,
     required this.deviceId,
     required this.endDate,
-    required this.selectedPlan,
+    required this.planLabel,
+    required this.accessSource,
     required this.supportWhatsapp,
-    required this.onCancel,
     required this.onOpenSubscription,
   });
 
@@ -23,10 +22,10 @@ class ProfileScreen extends StatelessWidget {
   final String userName;
   final String deviceId;
   final DateTime? endDate;
-  final Plan selectedPlan;
+  final String planLabel;
+  final String accessSource;
   /// From Admin Settings (SharedPreferences). Empty until admin saves a number.
   final String supportWhatsapp;
-  final VoidCallback onCancel;
   final VoidCallback onOpenSubscription;
 
   @override
@@ -336,7 +335,7 @@ class ProfileScreen extends StatelessWidget {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  const Text('Subscription', style: TextStyle(fontWeight: FontWeight.w700, fontSize: 34 / 2)),
+                  const Text('Usajili', style: TextStyle(fontWeight: FontWeight.w700, fontSize: 34 / 2)),
                   const SizedBox(height: 10),
                   if (premium) ...[
                     Container(
@@ -347,10 +346,34 @@ class ProfileScreen extends StatelessWidget {
                         borderRadius: BorderRadius.circular(14),
                         border: Border.all(color: const Color(0x55FBBF24)),
                       ),
-                      child: Text('Mpango: ${selectedPlan.name}', style: const TextStyle(fontWeight: FontWeight.w700)),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Row(
+                            children: [
+                              const Icon(Icons.verified_rounded, color: Color(0xFFFBBF24), size: 20),
+                              const SizedBox(width: 8),
+                              const Text('PREMIUM IMETHIBITISHWA', style: TextStyle(fontWeight: FontWeight.w800, fontSize: 12, letterSpacing: 0.4)),
+                            ],
+                          ),
+                          const SizedBox(height: 10),
+                          Text(
+                            planLabel.isNotEmpty ? 'Mpango: $planLabel' : 'Mpango: Premium',
+                            style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 15),
+                          ),
+                          const SizedBox(height: 4),
+                          Text(
+                            _accessSourceLabel(accessSource),
+                            style: const TextStyle(fontSize: 12, color: Color(0xFF9CA3AF)),
+                          ),
+                          const SizedBox(height: 6),
+                          Text(
+                            _expiryText(endDate),
+                            style: const TextStyle(fontSize: 12, color: Color(0xFFCBD5E1)),
+                          ),
+                        ],
+                      ),
                     ),
-                    const SizedBox(height: 8),
-                    TextButton(onPressed: onCancel, child: const Text('Ghairi', style: TextStyle(color: Colors.redAccent, fontSize: 13))),
                   ] else
                     Container(
                       width: double.infinity,
@@ -444,8 +467,17 @@ class ProfileScreen extends StatelessWidget {
   }
 
   String _expiryText(DateTime? e) {
-    if (e == null) return 'Huna usajili';
-    return 'Inaisha: ${e.day}/${e.month}/${e.year}';
+    if (e == null) return 'Muda uliosalia unaonyeshwa hapo juu';
+    return 'Inaisha: ${e.day}/${e.month}/${e.year} ${e.hour.toString().padLeft(2, '0')}:${e.minute.toString().padLeft(2, '0')}';
+  }
+
+  String _accessSourceLabel(String source) {
+    return switch (source) {
+      'admin' => 'Ufikiaji uliotolewa na msimamizi',
+      'payment' => 'Malipo yaliyothibitishwa',
+      'legacy' => 'Usajili wa premium',
+      _ => 'Akaunti ya premium',
+    };
   }
 
   String _initials(String n) {

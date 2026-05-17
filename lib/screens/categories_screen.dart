@@ -79,9 +79,9 @@ class _CategoriesScreenState extends State<CategoriesScreen> {
                         children: [
                           Icon(icons[c], size: 34),
                           const SizedBox(height: 8),
-                          Text(c, style: const TextStyle(fontWeight: FontWeight.w700)),
+                          Text(categoryDisplayName(c), style: const TextStyle(fontWeight: FontWeight.w700)),
                           Text('$count', style: const TextStyle(fontSize: 32, fontWeight: FontWeight.w800)),
-                          const Text('channels', style: TextStyle(color: Color(0xFF9CA3AF), fontSize: 12)),
+                          const Text('channeli', style: TextStyle(color: Color(0xFF9CA3AF), fontSize: 12)),
                         ],
                       ),
                     ),
@@ -176,7 +176,7 @@ class _CategoriesScreenState extends State<CategoriesScreen> {
                     (c) => DropdownMenuItem<String>(
                       value: c,
                       child: Text(
-                        c,
+                        categoryDisplayName(c),
                         overflow: TextOverflow.ellipsis,
                         style: const TextStyle(fontSize: 13, color: Colors.white),
                       ),

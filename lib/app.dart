@@ -3,10 +3,12 @@ import 'dart:ui';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import 'models/channel.dart';
 import 'models/hero_slide.dart';
 import 'models/plan.dart';
+import 'models/viewer_profile.dart';
 import 'screens/categories_screen.dart';
 import 'screens/home_screen.dart';
 import 'screens/player_screen.dart';
@@ -74,8 +76,20 @@ class _WashaAppState extends State<WashaApp> with WidgetsBindingObserver {
   Timer? carouselTimer;
   Timer? configPoller;
   int carousel = 0;
+  final _scaffoldMessengerKey = GlobalKey<ScaffoldMessengerState>();
+  AppScreen _returnScreen = AppScreen.home;
+  PlayerBackHandler? _playerBackHandler;
+  DateTime? _lastExitBackPress;
+  String _premiumPlanLabel = '';
+  String _premiumAccessSource = 'none';
 
   bool get premium => subService.isPremium(subEnd);
+
+  String get _displayName {
+    final n = userName.trim();
+    if (n.isEmpty || isGenericViewerName(n)) return 'Mtumiaji';
+    return n;
+  }
 
   @override
   void initState() {
@@ -95,7 +109,7 @@ class _WashaAppState extends State<WashaApp> with WidgetsBindingObserver {
   void _startLiveSyncAfterBoot() {
     if (!mounted || bootLoading) return;
     unawaited(_pollConfigMeta());
-    unawaited(_syncPremiumFromServer());
+    unawaited(_syncViewerProfileFromServer());
     unawaited(_syncPushTopics());
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted || bootLoading) return;
@@ -115,7 +129,7 @@ class _WashaAppState extends State<WashaApp> with WidgetsBindingObserver {
   }
 
   Future<void> _init() async {
-    final name = await storage.getName();
+    var name = await storage.getName();
     var subEndLocal = await storage.getSubscriptionEnd();
     final dev = await storage.getOrCreateDeviceId();
     final localPlans = await loadUserPlans();
@@ -166,17 +180,25 @@ class _WashaAppState extends State<WashaApp> with WidgetsBindingObserver {
           await persistPricingSnapshotFromPlans(fetchedPlans);
         }
         try {
-          await api.syncViewer(
-            deviceId: dev,
-            name: name.isEmpty ? 'Free User' : name,
-          );
+          await api.syncViewer(deviceId: dev, name: name.isEmpty ? null : name);
+          final profile = await api.fetchViewerProfile(dev);
+          if (profile != null) {
+            if (!isGenericViewerName(profile.name)) {
+              name = profile.name.trim();
+              await storage.setName(name);
+            }
+            if (profile.premiumActive) {
+              subEndLocal = profile.premiumUntil;
+              await storage.setSubscriptionEnd(subEndLocal);
+            } else {
+              subEndLocal = null;
+              await storage.setSubscriptionEnd(null);
+            }
+            _premiumPlanLabel = profile.planName ?? profile.planKey ?? '';
+            _premiumAccessSource = profile.accessSource;
+          }
         } catch (_) {
           // Non-blocking: app can continue even if user sync endpoint is not ready.
-        }
-        final serverPremium = await api.fetchPremiumUntil(dev);
-        if (serverPremium != null) {
-          subEndLocal = subService.mergeEndDates(subEndLocal, serverPremium);
-          await storage.setSubscriptionEnd(subEndLocal);
         }
       } catch (e, st) {
         final msg = e.toString();
@@ -271,7 +293,7 @@ class _WashaAppState extends State<WashaApp> with WidgetsBindingObserver {
         await _syncFromServer(silent: true);
       }
       if (tick % 2 == 0) {
-        unawaited(_syncPremiumFromServer());
+        unawaited(_syncViewerProfileFromServer());
       }
     } finally {
       metaPollInFlight = false;
@@ -282,22 +304,56 @@ class _WashaAppState extends State<WashaApp> with WidgetsBindingObserver {
     }
   }
 
-  Future<void> _syncPremiumFromServer() async {
+  Future<void> _syncViewerProfileFromServer() async {
     if (deviceId.isEmpty) return;
     try {
-      final serverPremium = await api.fetchPremiumUntil(deviceId);
-      if (!mounted) return;
-      if (serverPremium == null) return;
-      final merged = subService.mergeEndDates(subEnd, serverPremium);
-      if (merged == subEnd) return;
-      await storage.setSubscriptionEnd(merged);
-      if (!mounted) return;
-      final wasPremium = premium;
-      setState(() => subEnd = merged);
-      if (wasPremium != premium) {
-        unawaited(_syncPushTopics());
-      }
+      await api.syncViewer(
+        deviceId: deviceId,
+        name: isGenericViewerName(userName) ? null : userName,
+        phone: pendingPhone.trim().isEmpty ? null : pendingPhone,
+      );
+      final profile = await api.fetchViewerProfile(deviceId);
+      if (!mounted || profile == null) return;
+      _applyViewerProfile(profile);
     } catch (_) {}
+  }
+
+  void _applyViewerProfile(ViewerProfile profile) {
+    final wasPremium = premium;
+    final DateTime? nextEnd;
+    nextEnd = profile.premiumActive ? profile.premiumUntil : null;
+
+    Plan nextPlan = selectedPlan;
+    final key = profile.planKey?.trim();
+    if (key != null && key.isNotEmpty) {
+      for (final p in userPlans) {
+        if (p.id == key) {
+          nextPlan = p;
+          break;
+        }
+      }
+    }
+
+    final nextName = isGenericViewerName(profile.name) ? userName : profile.name.trim();
+    final label = (profile.planName?.trim().isNotEmpty == true)
+        ? profile.planName!.trim()
+        : (key != null && key.isNotEmpty ? nextPlan.name : '');
+
+    setState(() {
+      if (!isGenericViewerName(profile.name)) userName = nextName;
+      subEnd = nextEnd;
+      selectedPlan = nextPlan;
+      _premiumPlanLabel = label;
+      _premiumAccessSource = profile.accessSource;
+    });
+
+    if (!isGenericViewerName(profile.name)) {
+      unawaited(storage.setName(userName));
+    }
+    unawaited(storage.setSubscriptionEnd(nextEnd));
+    if (wasPremium != premium) {
+      unawaited(_syncPushTopics());
+    }
   }
 
   Future<void> _syncFromServer({bool silent = false, bool forceFull = false}) async {
@@ -313,7 +369,7 @@ class _WashaAppState extends State<WashaApp> with WidgetsBindingObserver {
           ? await api.fetchBootstrap()
           : await api.fetchBootstrapSince(remoteConfigVersion);
       if (remote == null) {
-        await _syncPremiumFromServer();
+        await _syncViewerProfileFromServer();
         return;
       }
       if (!mounted) return;
@@ -351,7 +407,7 @@ class _WashaAppState extends State<WashaApp> with WidgetsBindingObserver {
       if (nextPlans.isNotEmpty) {
         await persistPricingSnapshotFromPlans(nextPlans);
       }
-      await _syncPremiumFromServer();
+      await _syncViewerProfileFromServer();
     } catch (_) {
       if (!silent && mounted) {
         setState(() {
@@ -370,7 +426,7 @@ class _WashaAppState extends State<WashaApp> with WidgetsBindingObserver {
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
       unawaited(_syncFromServer(silent: true, forceFull: true));
-      unawaited(_syncPremiumFromServer());
+      unawaited(_syncViewerProfileFromServer());
     }
   }
 
@@ -384,11 +440,54 @@ class _WashaAppState extends State<WashaApp> with WidgetsBindingObserver {
   }
 
   void switchScreen(AppScreen s) {
-    setState(() => current = s);
+    setState(() {
+      current = s;
+      if (s != AppScreen.player) {
+        selectedChannel = null;
+        _playerBackHandler = null;
+      }
+    });
     unawaited(_pollConfigMeta());
     if (s == AppScreen.subscription) {
       unawaited(_syncFromServer(silent: true, forceFull: true));
     }
+    if (s == AppScreen.subscription || s == AppScreen.profile) {
+      unawaited(_syncViewerProfileFromServer());
+    }
+  }
+
+  void _leavePlayer() {
+    switchScreen(_returnScreen);
+  }
+
+  void _onSystemBack() {
+    if (_playerBackHandler?.call() == true) return;
+
+    if (current == AppScreen.player) {
+      _leavePlayer();
+      return;
+    }
+
+    if (current != AppScreen.home) {
+      switchScreen(AppScreen.home);
+      return;
+    }
+
+    final now = DateTime.now();
+    if (_lastExitBackPress != null && now.difference(_lastExitBackPress!) < const Duration(seconds: 2)) {
+      SystemNavigator.pop();
+      return;
+    }
+    _lastExitBackPress = now;
+    _scaffoldMessengerKey.currentState?.showSnackBar(
+      SnackBar(
+        content: const Text('Bonyeza tena kurudi ili kufunga programu'),
+        duration: const Duration(seconds: 2),
+        behavior: SnackBarBehavior.floating,
+        backgroundColor: const Color(0xFF1E293B),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+      ),
+    );
   }
 
   Future<void> activateSubscription(String phone, String name) async {
@@ -486,7 +585,7 @@ class _WashaAppState extends State<WashaApp> with WidgetsBindingObserver {
           try {
             await api.syncViewer(deviceId: deviceId, name: name, phone: phone);
             await _syncFromServer(silent: true);
-            await _syncPremiumFromServer();
+            await _syncViewerProfileFromServer();
           } catch (_) {
             // Payment already succeeded — sync failures must not show as payment errors.
           }
@@ -559,18 +658,19 @@ class _WashaAppState extends State<WashaApp> with WidgetsBindingObserver {
     await _runSonicpesaPayment(phone: phone, name: name);
   }
 
-  Future<void> cancelSubscription() async {
-    await storage.setSubscriptionEnd(null);
-    setState(() => subEnd = null);
-  }
-
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
       debugShowCheckedModeBanner: false,
       title: 'WASHA TV',
       theme: AppTheme.build(),
-      home: Scaffold(
+      scaffoldMessengerKey: _scaffoldMessengerKey,
+      home: PopScope(
+        canPop: false,
+        onPopInvokedWithResult: (didPop, _) {
+          if (!didPop) _onSystemBack();
+        },
+        child: Scaffold(
         body: bootLoading
             ? const Center(child: CircularProgressIndicator())
             : maintenanceMode
@@ -609,6 +709,7 @@ class _WashaAppState extends State<WashaApp> with WidgetsBindingObserver {
                     ),
                 ],
               ),
+        ),
       ),
     );
   }
@@ -738,7 +839,7 @@ class _WashaAppState extends State<WashaApp> with WidgetsBindingObserver {
           onOpenPlayer: _openPlayer,
           onOpenSubscription: () => switchScreen(AppScreen.subscription),
           premium: premium,
-          displayName: userName.isEmpty ? 'Free User' : userName,
+          displayName: _displayName,
         );
       case AppScreen.player:
         return PlayerScreen(
@@ -746,7 +847,8 @@ class _WashaAppState extends State<WashaApp> with WidgetsBindingObserver {
           channel: selectedChannel,
           channelImageCacheEpoch: remoteConfigVersion,
           premium: premium,
-          onBack: () => switchScreen(AppScreen.home),
+          onBack: _leavePlayer,
+          onBackHandlerChanged: (handler) => _playerBackHandler = handler,
           onOpenPlayer: _openPlayer,
           onOpenSubscription: () => switchScreen(AppScreen.subscription),
         );
@@ -761,12 +863,12 @@ class _WashaAppState extends State<WashaApp> with WidgetsBindingObserver {
       case AppScreen.profile:
         return ProfileScreen(
           premium: premium,
-          userName: userName.isEmpty ? 'Free User' : userName,
+          userName: _displayName,
           deviceId: deviceId,
           endDate: subEnd,
-          selectedPlan: selectedPlan,
+          planLabel: _premiumPlanLabel,
+          accessSource: _premiumAccessSource,
           supportWhatsapp: supportWhatsapp,
-          onCancel: cancelSubscription,
           onOpenSubscription: () => switchScreen(AppScreen.subscription),
         );
       case AppScreen.subscription:
@@ -786,6 +888,10 @@ class _WashaAppState extends State<WashaApp> with WidgetsBindingObserver {
           plans: userPlans,
           premium: premium,
           selectedPlan: selectedPlan,
+          endDate: subEnd,
+          planLabel: _premiumPlanLabel,
+          accessSource: _premiumAccessSource,
+          userName: _displayName,
           paymentSucceeded: subscriptionPaymentSuccess,
           onPlanChange: (p) => setState(() => selectedPlan = p),
           onPay: activateSubscription,
@@ -826,6 +932,9 @@ class _WashaAppState extends State<WashaApp> with WidgetsBindingObserver {
         switchScreen(AppScreen.subscription);
       }
       return;
+    }
+    if (current != AppScreen.player) {
+      _returnScreen = current;
     }
     setState(() {
       selectedChannel = c;
