@@ -7,6 +7,7 @@ class AdminUser {
     required this.status,
     required this.subscription,
     required this.createdAt,
+    this.premiumUntil,
     this.adminAccessUntil,
   });
   final String id;
@@ -19,13 +20,25 @@ class AdminUser {
   String subscription;
   final DateTime createdAt;
 
+  /// Paid premium window from transactions (server `premium_until`).
+  DateTime? premiumUntil;
+
   /// Extra premium window granted from admin (extends smartly when stacked).
   DateTime? adminAccessUntil;
 
   bool get adminAccessActive => adminAccessUntil != null && adminAccessUntil!.isAfter(DateTime.now());
 
-  /// Premium from subscription or active admin grant.
-  bool get effectivePremium => subscription == 'premium' || adminAccessActive;
+  /// Matches viewer API premium logic (subscription + dates).
+  bool get effectivePremium {
+    final now = DateTime.now();
+    if (adminAccessActive) return true;
+    if (premiumUntil != null && premiumUntil!.isAfter(now)) return true;
+    if (subscription == 'premium') {
+      // Legacy rows without premium_until — treat as active.
+      return premiumUntil == null;
+    }
+    return false;
+  }
 
   /// Safe for UI / clipboard — never null after hot reload.
   String get displayDeviceId {
@@ -118,6 +131,7 @@ class AdminPayment {
     required this.status,
     required this.transactionId,
     required this.createdAt,
+    this.planKey,
   });
   final String id;
   final String userName;
@@ -126,6 +140,7 @@ class AdminPayment {
   String status;
   final String transactionId;
   final DateTime createdAt;
+  final String? planKey;
 }
 
 class AdminNotification {
@@ -181,6 +196,43 @@ class PricingPlan {
   bool popular;
   bool enabled;
   final String colorKey; // amber, purple, blue
+}
+
+/// Live dashboard metrics from `GET /api/v1/admin/stats/overview`.
+class AdminDashboardStats {
+  AdminDashboardStats({
+    required this.totalUsers,
+    required this.premiumUsers,
+    required this.freeUsers,
+    required this.activeChannels,
+    required this.revenue,
+    required this.monthLabels,
+    required this.newUsersPerMonth,
+    required this.premiumPurchasesPerMonth,
+    required this.revenuePerMonth,
+    required this.dailyLabels,
+    required this.dailyRegistrations,
+    required this.planWeekly,
+    required this.planGold,
+    required this.planPlatinum,
+    required this.planOther,
+  });
+
+  final int totalUsers;
+  final int premiumUsers;
+  final int freeUsers;
+  final int activeChannels;
+  final double revenue;
+  final List<String> monthLabels;
+  final List<double> newUsersPerMonth;
+  final List<double> premiumPurchasesPerMonth;
+  final List<double> revenuePerMonth;
+  final List<String> dailyLabels;
+  final List<double> dailyRegistrations;
+  final int planWeekly;
+  final int planGold;
+  final int planPlatinum;
+  final int planOther;
 }
 
 class AdminSettings {

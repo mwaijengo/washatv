@@ -110,6 +110,7 @@ class _AdminScaffoldState extends State<AdminScaffold> {
   late List<AdminNotification> _notifications;
   late List<AdminLog> _logs;
   late Map<String, PricingPlan> _pricing;
+  AdminDashboardStats? _dashboardStats;
   final _settings = AdminSettings();
   /// Field initializers run on first read — survives hot reload when `initState` does not re-run.
   late final TextEditingController _settingsSiteName = TextEditingController(text: _settings.siteName);
@@ -303,6 +304,9 @@ class _AdminScaffoldState extends State<AdminScaffold> {
       List<AdminSlide>? serverSlides;
       List<AdminPayment>? serverPayments;
       List<AdminNotification>? serverNotifications;
+      AdminDashboardStats? serverStats;
+      List<AdminSubscription>? serverSubscriptions;
+      List<AdminLog>? serverLogs;
 
       if (_hasAdminSession) {
         try {
@@ -311,6 +315,9 @@ class _AdminScaffoldState extends State<AdminScaffold> {
           final slidesRes = await http.get(Uri.parse('$_apiBase/api/v1/admin/slides'), headers: _adminHeaders()).timeout(const Duration(seconds: 12));
           final txRes = await http.get(Uri.parse('$_apiBase/api/v1/admin/transactions'), headers: _adminHeaders()).timeout(const Duration(seconds: 12));
           final notiRes = await http.get(Uri.parse('$_apiBase/api/v1/admin/notifications'), headers: _adminHeaders()).timeout(const Duration(seconds: 12));
+          final statsRes = await http.get(Uri.parse('$_apiBase/api/v1/admin/stats/overview'), headers: _adminHeaders()).timeout(const Duration(seconds: 12));
+          final subsRes = await http.get(Uri.parse('$_apiBase/api/v1/admin/subscriptions'), headers: _adminHeaders()).timeout(const Duration(seconds: 12));
+          final logsRes = await http.get(Uri.parse('$_apiBase/api/v1/admin/logs'), headers: _adminHeaders()).timeout(const Duration(seconds: 12));
           if (usersRes.statusCode >= 200 && usersRes.statusCode < 300) {
             final usersMap = jsonDecode(usersRes.body) as Map<String, dynamic>;
             final rawUsers = (usersMap['users'] as List?)?.cast<dynamic>() ?? const [];
@@ -324,6 +331,7 @@ class _AdminScaffoldState extends State<AdminScaffold> {
                 status: _s(j['status'], fallback: 'active'),
                 subscription: _s(j['subscription'], fallback: 'free'),
                 createdAt: _dt(j['created_at']) ?? DateTime.now(),
+                premiumUntil: _dt(j['premium_until']),
                 adminAccessUntil: _dt(j['admin_access_until']),
               );
             }).toList();
@@ -351,6 +359,7 @@ class _AdminScaffoldState extends State<AdminScaffold> {
                 status: _s(j['status'], fallback: 'completed'),
                 transactionId: _s(j['provider_ref'], fallback: _s(j['id'])),
                 createdAt: _dt(j['created_at']) ?? DateTime.now(),
+                planKey: _s(j['plan_key']).isEmpty ? null : _s(j['plan_key']),
               );
             }).toList();
           }
@@ -365,6 +374,63 @@ class _AdminScaffoldState extends State<AdminScaffold> {
                 message: _s(j['message']),
                 type: _s(j['type'], fallback: 'info'),
                 read: j['read'] as bool? ?? false,
+                createdAt: _dt(j['created_at']) ?? DateTime.now(),
+              );
+            }).toList();
+          }
+          if (statsRes.statusCode >= 200 && statsRes.statusCode < 300) {
+            final statsMap = jsonDecode(statsRes.body) as Map<String, dynamic>;
+            final s = (statsMap['stats'] as Map?)?.cast<String, dynamic>();
+            if (s != null) {
+              final totals = (s['totals'] as Map?)?.cast<String, dynamic>() ?? const {};
+              final growth = (s['user_growth'] as Map?)?.cast<String, dynamic>() ?? const {};
+              final revenue = (s['revenue_overview'] as Map?)?.cast<String, dynamic>() ?? const {};
+              final daily = (s['daily_registrations'] as Map?)?.cast<String, dynamic>() ?? const {};
+              final mix = (s['plan_mix'] as Map?)?.cast<String, dynamic>() ?? const {};
+              serverStats = AdminDashboardStats(
+                totalUsers: (totals['users'] as num?)?.toInt() ?? 0,
+                premiumUsers: (totals['premium_users'] as num?)?.toInt() ?? 0,
+                freeUsers: (totals['free_users'] as num?)?.toInt() ?? 0,
+                activeChannels: (totals['active_channels'] as num?)?.toInt() ?? 0,
+                revenue: (totals['revenue'] as num?)?.toDouble() ?? 0,
+                monthLabels: ((growth['labels'] as List?) ?? const []).map((e) => e.toString()).toList(),
+                newUsersPerMonth: _numList(growth['new_users']),
+                premiumPurchasesPerMonth: _numList(growth['premium_purchases']),
+                revenuePerMonth: _numList(revenue['amounts']),
+                dailyLabels: ((daily['labels'] as List?) ?? const []).map((e) => e.toString()).toList(),
+                dailyRegistrations: _numList(daily['counts']),
+                planWeekly: (mix['weekly'] as num?)?.toInt() ?? 0,
+                planGold: (mix['gold'] as num?)?.toInt() ?? 0,
+                planPlatinum: (mix['platinum'] as num?)?.toInt() ?? 0,
+                planOther: (mix['other'] as num?)?.toInt() ?? 0,
+              );
+            }
+          }
+          if (subsRes.statusCode >= 200 && subsRes.statusCode < 300) {
+            final subsMap = jsonDecode(subsRes.body) as Map<String, dynamic>;
+            final raw = (subsMap['subscriptions'] as List?)?.cast<dynamic>() ?? const [];
+            serverSubscriptions = raw.whereType<Map>().map((rawItem) {
+              final j = rawItem.cast<String, dynamic>();
+              return AdminSubscription(
+                id: _s(j['id']),
+                userName: _s(j['user_name'], fallback: 'Viewer'),
+                plan: _s(j['plan'], fallback: 'gold'),
+                price: (j['price'] as num?)?.toDouble() ?? 0,
+                endDate: _dt(j['end_date']) ?? DateTime.now(),
+                status: _s(j['status'], fallback: 'active'),
+              );
+            }).toList();
+          }
+          if (logsRes.statusCode >= 200 && logsRes.statusCode < 300) {
+            final logsMap = jsonDecode(logsRes.body) as Map<String, dynamic>;
+            final raw = (logsMap['logs'] as List?)?.cast<dynamic>() ?? const [];
+            serverLogs = raw.whereType<Map>().map((rawItem) {
+              final j = rawItem.cast<String, dynamic>();
+              return AdminLog(
+                id: _s(j['id']),
+                adminName: _s(j['admin_name'], fallback: 'Admin'),
+                action: _s(j['action']),
+                details: _s(j['details']),
                 createdAt: _dt(j['created_at']) ?? DateTime.now(),
               );
             }).toList();
@@ -424,6 +490,9 @@ class _AdminScaffoldState extends State<AdminScaffold> {
         }
         if (serverPayments != null) _payments = serverPayments!;
         if (serverNotifications != null) _notifications = serverNotifications!;
+        if (serverStats != null) _dashboardStats = serverStats!;
+        if (serverSubscriptions != null) _subscriptions = serverSubscriptions!;
+        if (serverLogs != null) _logs = serverLogs!;
         final wa = _s(settings['whatsapp_number']);
         _settings.whatsappNumber = wa;
         _settingsWhatsapp.text = wa;
@@ -537,6 +606,93 @@ class _AdminScaffoldState extends State<AdminScaffold> {
     if (s == null || s.isEmpty) return null;
     return DateTime.tryParse(s);
   }
+
+  List<double> _numList(Object? raw) {
+    if (raw is! List) return const [];
+    return raw.map((e) => (e as num?)?.toDouble() ?? 0).toList();
+  }
+
+  /// Last 7 calendar months ending this month (labels + bucket starts).
+  ({List<String> labels, List<DateTime> starts}) _lastSevenMonths() {
+    final now = DateTime.now();
+    final month0 = DateTime(now.year, now.month);
+    final labels = <String>[];
+    final starts = <DateTime>[];
+    const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    for (var i = 6; i >= 0; i--) {
+      final start = DateTime(month0.year, month0.month - i);
+      starts.add(start);
+      labels.add(months[start.month - 1]);
+    }
+    return (labels: labels, starts: starts);
+  }
+
+  bool _inMonth(DateTime dt, DateTime monthStart) {
+    final next = DateTime(monthStart.year, monthStart.month + 1);
+    return !dt.isBefore(monthStart) && dt.isBefore(next);
+  }
+
+  bool _sameDay(DateTime a, DateTime b) => a.year == b.year && a.month == b.month && a.day == b.day;
+
+  AdminDashboardStats? _statsFromLocalLists() {
+    if (_users.isEmpty && _payments.isEmpty && _channels.isEmpty) return null;
+    final buckets = _lastSevenMonths();
+    final newUsers = buckets.starts.map((m) => _users.where((u) => _inMonth(u.createdAt, m)).length.toDouble()).toList();
+    final premiumBuys = buckets.starts
+        .map(
+          (m) => _payments
+              .where((p) => p.status == 'completed' && _inMonth(p.createdAt, m))
+              .length
+              .toDouble(),
+        )
+        .toList();
+    final revenue = buckets.starts
+        .map(
+          (m) => _payments
+              .where((p) => p.status == 'completed' && _inMonth(p.createdAt, m))
+              .fold<double>(0, (a, p) => a + p.amount),
+        )
+        .toList();
+    final today = DateTime.now();
+    final dayStarts = List.generate(7, (i) => DateTime(today.year, today.month, today.day - (6 - i)));
+    const dayLabels = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+    final daily = dayStarts.map((d) => _users.where((u) => _sameDay(u.createdAt, d)).length.toDouble()).toList();
+    final dailyLabels = dayStarts.map((d) => dayLabels[d.weekday - 1]).toList();
+    final premium = _users.where((u) => u.effectivePremium).length;
+    final total = _users.length;
+    var week = 0, gold = 0, plat = 0, other = 0;
+    for (final p in _payments.where((x) => x.status == 'completed')) {
+      switch (p.planKey) {
+        case 'weekly':
+          week++;
+        case 'gold':
+          gold++;
+        case 'platinum':
+          plat++;
+        default:
+          other++;
+      }
+    }
+    return AdminDashboardStats(
+      totalUsers: total,
+      premiumUsers: premium,
+      freeUsers: (total - premium).clamp(0, total),
+      activeChannels: _channels.where((c) => c.status == 'active').length,
+      revenue: _payments.where((p) => p.status == 'completed').fold<double>(0, (a, p) => a + p.amount),
+      monthLabels: buckets.labels,
+      newUsersPerMonth: newUsers,
+      premiumPurchasesPerMonth: premiumBuys,
+      revenuePerMonth: revenue,
+      dailyLabels: dailyLabels,
+      dailyRegistrations: daily,
+      planWeekly: week,
+      planGold: gold,
+      planPlatinum: plat,
+      planOther: other,
+    );
+  }
+
+  AdminDashboardStats? get _effectiveStats => _dashboardStats ?? _statsFromLocalLists();
 
   PricingPlan _pricingFromJson(Map<String, dynamic> j, PricingPlan fallback) {
     return PricingPlan(
@@ -957,35 +1113,43 @@ class _AdminScaffoldState extends State<AdminScaffold> {
 
   // --- Dashboard ---
   Widget _pageDashboard() {
-    final totalUsers = _users.length;
-    final premiumUsers = _users.where((u) => u.effectivePremium).length;
-    final activeChannels = _channels.where((c) => c.status == 'active').length;
-    final revenue = _payments.where((p) => p.status == 'completed').fold<double>(0, (a, b) => a + b.amount);
+    final stats = _effectiveStats;
+    final totalUsers = stats?.totalUsers ?? _users.length;
+    final premiumUsers = stats?.premiumUsers ?? _users.where((u) => u.effectivePremium).length;
+    final freeUsers = stats?.freeUsers ?? (totalUsers - premiumUsers).clamp(0, totalUsers);
+    final activeChannels = stats?.activeChannels ?? _channels.where((c) => c.status == 'active').length;
+    final revenue = stats?.revenue ??
+        _payments.where((p) => p.status == 'completed').fold<double>(0, (a, b) => a + b.amount);
     final recentUsers = _users.take(5).toList();
-    final recentPayments = _payments.where((p) => p.status == 'completed').take(5).toList();
+    final recentPayments =
+        _payments.where((p) => p.status == 'completed').take(5).toList();
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         _pageTitleRow(
           title: 'Admin Dashboard',
-          subtitle: 'Welcome back, Super Admin',
+          subtitle: _hasAdminSession
+              ? (_dashboardStats != null ? 'Live data from database · auto-refresh 15s' : 'Connected · loading stats…')
+              : 'Sign in to load live data',
           action: _btnPrimary(label: 'Add Channel', icon: Icons.add, onTap: () => _showChannelEditor()),
         ),
         const SizedBox(height: 16),
         LayoutBuilder(
           builder: (context, c) {
-            final cols = c.maxWidth < 640 ? 2 : 4;
+            final w = c.maxWidth;
+            final cols = w < 640 ? 2 : (w < 1100 ? 3 : 5);
             return GridView.count(
               shrinkWrap: true,
               physics: const NeverScrollableScrollPhysics(),
               crossAxisCount: cols,
               crossAxisSpacing: 12,
               mainAxisSpacing: 12,
-              childAspectRatio: cols == 2 ? 1.12 : 1.28,
+              childAspectRatio: cols <= 2 ? 1.12 : 1.28,
               children: [
                 _statCard(label: 'Total Users', value: '$totalUsers', icon: Icons.groups_rounded, iconBg: const Color(0x336366F1), iconColor: const Color(0xFF818CF8)),
                 _statCard(label: 'Premium', value: '$premiumUsers', icon: Icons.workspace_premium_rounded, iconBg: const Color(0x33F59E0B), iconColor: const Color(0xFFFBBF24)),
+                _statCard(label: 'Free', value: '$freeUsers', icon: Icons.person_outline_rounded, iconBg: const Color(0x3394A3B8), iconColor: const Color(0xFFCBD5E1)),
                 _statCard(label: 'Channels', value: '$activeChannels', icon: Icons.satellite_alt_rounded, iconBg: const Color(0x3310B981), iconColor: const Color(0xFF34D399)),
                 _statCard(label: 'Revenue', value: fmtTzs(revenue), icon: Icons.attach_money_rounded, iconBg: const Color(0x33A855F7), iconColor: const Color(0xFFC084FC)),
               ],
@@ -1151,19 +1315,23 @@ class _AdminScaffoldState extends State<AdminScaffold> {
   }
 
   Widget _userGrowthChart() {
-    const labels = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul'];
-    const zeroSpots = <FlSpot>[
-      FlSpot(0, 0),
-      FlSpot(1, 0),
-      FlSpot(2, 0),
-      FlSpot(3, 0),
-      FlSpot(4, 0),
-      FlSpot(5, 0),
-      FlSpot(6, 0),
-    ];
+    final stats = _effectiveStats;
+    final labels = stats?.monthLabels.isNotEmpty == true
+        ? stats!.monthLabels
+        : const ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul'];
+    final newUsers = stats?.newUsersPerMonth ?? List<double>.filled(labels.length, 0);
+    final premiumBuys = stats?.premiumPurchasesPerMonth ?? List<double>.filled(labels.length, 0);
+    final n = labels.length;
+    final maxY = [
+      ...newUsers,
+      ...premiumBuys,
+    ].fold<double>(0, (a, b) => b > a ? b : a);
+    final yMax = maxY <= 0 ? 1.0 : maxY * 1.15;
+    final totalSpots = List.generate(n, (i) => FlSpot(i.toDouble(), i < newUsers.length ? newUsers[i] : 0));
+    final premiumSpots = List.generate(n, (i) => FlSpot(i.toDouble(), i < premiumBuys.length ? premiumBuys[i] : 0));
     return LineChart(
       LineChartData(
-        gridData: FlGridData(show: true, drawVerticalLine: false, horizontalInterval: 200, getDrawingHorizontalLine: (_) => FlLine(color: const Color(0x08FFFFFF), strokeWidth: 1)),
+        gridData: FlGridData(show: true, drawVerticalLine: false, horizontalInterval: yMax / 4, getDrawingHorizontalLine: (_) => FlLine(color: const Color(0x08FFFFFF), strokeWidth: 1)),
         borderData: FlBorderData(show: false),
         titlesData: FlTitlesData(
           topTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
@@ -1175,7 +1343,10 @@ class _AdminScaffoldState extends State<AdminScaffold> {
               reservedSize: 28,
               getTitlesWidget: (v, m) => Padding(
                 padding: const EdgeInsets.only(top: 8),
-                child: Text(labels[v.toInt().clamp(0, 6)], style: const TextStyle(color: AdminColors.textSecondary, fontSize: 10)),
+                child: Text(
+                  labels[v.toInt().clamp(0, n > 0 ? n - 1 : 0)],
+                  style: const TextStyle(color: AdminColors.textSecondary, fontSize: 10),
+                ),
               ),
             ),
           ),
@@ -1192,7 +1363,7 @@ class _AdminScaffoldState extends State<AdminScaffold> {
         ),
         lineBarsData: [
           LineChartBarData(
-            spots: zeroSpots,
+            spots: totalSpots,
             isCurved: true,
             color: AdminColors.accentPrimary,
             barWidth: 2,
@@ -1200,7 +1371,7 @@ class _AdminScaffoldState extends State<AdminScaffold> {
             belowBarData: BarAreaData(show: true, color: const Color(0x146366F1)),
           ),
           LineChartBarData(
-            spots: zeroSpots,
+            spots: premiumSpots,
             isCurved: true,
             color: AdminColors.accentWarning,
             barWidth: 2,
@@ -1209,20 +1380,27 @@ class _AdminScaffoldState extends State<AdminScaffold> {
           ),
         ],
         minX: 0,
-        maxX: 6,
+        maxX: n > 1 ? (n - 1).toDouble() : 1,
         minY: 0,
+        maxY: yMax,
       ),
     );
   }
 
   Widget _revenueBarChart() {
-    const labels = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul'];
-    const vals = <double>[0, 0, 0, 0, 0, 0, 0];
+    final stats = _effectiveStats;
+    final labels = stats?.monthLabels.isNotEmpty == true
+        ? stats!.monthLabels
+        : const ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul'];
+    final vals = stats?.revenuePerMonth ?? List<double>.filled(labels.length, 0);
+    final n = labels.length;
+    final maxVal = vals.fold<double>(0, (a, b) => b > a ? b : a);
+    final maxY = maxVal <= 0 ? 1.0 : maxVal * 1.15;
     return BarChart(
       BarChartData(
         gridData: FlGridData(show: true, drawVerticalLine: false, getDrawingHorizontalLine: (_) => FlLine(color: const Color(0x08FFFFFF), strokeWidth: 1)),
         borderData: FlBorderData(show: false),
-        maxY: 1,
+        maxY: maxY,
         titlesData: FlTitlesData(
           topTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
           rightTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
@@ -1232,7 +1410,10 @@ class _AdminScaffoldState extends State<AdminScaffold> {
               reservedSize: 28,
               getTitlesWidget: (v, m) => Padding(
                 padding: const EdgeInsets.only(top: 8),
-                child: Text(labels[v.toInt().clamp(0, 6)], style: const TextStyle(color: AdminColors.textSecondary, fontSize: 10)),
+                child: Text(
+                  labels[v.toInt().clamp(0, n > 0 ? n - 1 : 0)],
+                  style: const TextStyle(color: AdminColors.textSecondary, fontSize: 10),
+                ),
               ),
             ),
           ),
@@ -1248,12 +1429,12 @@ class _AdminScaffoldState extends State<AdminScaffold> {
           ),
         ),
         barGroups: List.generate(
-          7,
+          n,
           (i) => BarChartGroupData(
             x: i,
             barRods: [
               BarChartRodData(
-                toY: vals[i],
+                toY: i < vals.length ? vals[i] : 0,
                 color: const Color(0xB36366F1),
                 width: 18,
                 borderRadius: const BorderRadius.vertical(top: Radius.circular(6)),
@@ -3551,23 +3732,22 @@ class _AdminScaffoldState extends State<AdminScaffold> {
   }
 
   Widget _dailyRegChart() {
-    const zeroSpots = <FlSpot>[
-      FlSpot(0, 0),
-      FlSpot(1, 0),
-      FlSpot(2, 0),
-      FlSpot(3, 0),
-      FlSpot(4, 0),
-      FlSpot(5, 0),
-      FlSpot(6, 0),
-    ];
+    final stats = _effectiveStats;
+    final counts = stats?.dailyRegistrations ?? const [0.0, 0, 0, 0, 0, 0, 0];
+    final n = counts.length;
+    final maxY = counts.fold<double>(0, (a, b) => b > a ? b : a);
+    final yMax = maxY <= 0 ? 1.0 : maxY * 1.15;
+    final spots = List.generate(n, (i) => FlSpot(i.toDouble(), i < counts.length ? counts[i] : 0));
     return LineChart(
       LineChartData(
         gridData: const FlGridData(show: false),
         borderData: FlBorderData(show: false),
         titlesData: const FlTitlesData(show: false),
+        minY: 0,
+        maxY: yMax,
         lineBarsData: [
           LineChartBarData(
-            spots: zeroSpots,
+            spots: spots.isEmpty ? const [FlSpot(0, 0)] : spots,
             isCurved: true,
             color: AdminColors.accentPrimary,
             barWidth: 2,
@@ -3579,15 +3759,30 @@ class _AdminScaffoldState extends State<AdminScaffold> {
   }
 
   Widget _subDoughnut() {
+    final stats = _effectiveStats;
+    final gold = (stats?.planGold ?? 0).toDouble();
+    final plat = (stats?.planPlatinum ?? 0).toDouble();
+    final week = (stats?.planWeekly ?? 0).toDouble();
+    final other = (stats?.planOther ?? 0).toDouble();
+    final total = gold + plat + week + other;
+    if (total <= 0) {
+      return const Center(
+        child: Text('No completed plan payments yet', style: TextStyle(color: AdminColors.textSecondary, fontSize: 12)),
+      );
+    }
     return PieChart(
       PieChartData(
         sectionsSpace: 2,
         centerSpaceRadius: 44,
         sections: [
-          PieChartSectionData(value: 0, color: const Color(0xFFF59E0B), title: 'Gold', radius: 48, titleStyle: const TextStyle(fontSize: 10, color: Colors.white)),
-          PieChartSectionData(value: 0, color: const Color(0xFF8B5CF6), title: 'Plat', radius: 48, titleStyle: const TextStyle(fontSize: 10, color: Colors.white)),
-          PieChartSectionData(value: 0, color: const Color(0xFF3B82F6), title: 'Week', radius: 48, titleStyle: const TextStyle(fontSize: 10, color: Colors.white)),
-          PieChartSectionData(value: 0, color: const Color(0xFF6B7280), title: 'Free', radius: 48, titleStyle: const TextStyle(fontSize: 10, color: Colors.white)),
+          if (gold > 0)
+            PieChartSectionData(value: gold, color: const Color(0xFFF59E0B), title: 'Gold', radius: 48, titleStyle: const TextStyle(fontSize: 10, color: Colors.white)),
+          if (plat > 0)
+            PieChartSectionData(value: plat, color: const Color(0xFF8B5CF6), title: 'Plat', radius: 48, titleStyle: const TextStyle(fontSize: 10, color: Colors.white)),
+          if (week > 0)
+            PieChartSectionData(value: week, color: const Color(0xFF3B82F6), title: 'Week', radius: 48, titleStyle: const TextStyle(fontSize: 10, color: Colors.white)),
+          if (other > 0)
+            PieChartSectionData(value: other, color: const Color(0xFF6B7280), title: 'Other', radius: 48, titleStyle: const TextStyle(fontSize: 10, color: Colors.white)),
         ],
       ),
     );

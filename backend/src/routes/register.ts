@@ -14,6 +14,7 @@ import {
   sonicpesaOrderStatus,
 } from '../lib/sonicpesa.js';
 import { forwardNotificationToSupasoka } from '../lib/supasokaNotifyBridge.js';
+import { fetchAdminStatsOverview, fetchAdminSubscriptions } from '../lib/adminStats.js';
 import bcrypt from 'bcrypt';
 import { nanoid } from 'nanoid';
 
@@ -287,7 +288,7 @@ export async function registerRoutes(
   });
 
   /** Poll SonicPesa order — completes premium when payment succeeds. */
-  app.post<{ Body: { device_id?: string; order_id?: string } }>(
+  app.post<{ Body: { device_id?: string; order_id?: string; user_name?: string; phone?: string } }>(
     '/api/v1/public/payments/sonicpesa/status',
     async (req, reply) => {
       if (!sonicpesaConfigured(env)) {
@@ -339,23 +340,30 @@ export async function registerRoutes(
       const paymentStatus = normalizePaymentStatus(remote.payment_status ?? remote.status ?? 'PENDING');
 
       if (isSonicpesaSuccess(paymentStatus)) {
-        const granted = await grantPremiumFromPayment(pool, {
-          deviceId,
-          userName: (req.body as { user_name?: string })?.user_name?.trim() || 'Viewer',
-          phone: tx.phone ?? '',
-          amount: Number(tx.amount),
-          method: 'M-Pesa',
-          planKey: tx.plan_key ?? '',
-          provider: 'sonicpesa',
-          providerRef: orderId,
-          metadata: { sonicpesa_status: paymentStatus, reference: remote.reference },
-        });
-        return {
-          ok: true,
-          payment_status: paymentStatus,
-          completed: true,
-          premium_until: granted.premium_until,
-        };
+        const body = req.body ?? {};
+        const grantPhone = (body.phone ?? tx.phone ?? '').trim();
+        try {
+          const granted = await grantPremiumFromPayment(pool, {
+            deviceId,
+            userName: body.user_name?.trim() || 'Viewer',
+            phone: grantPhone,
+            amount: Number(tx.amount),
+            method: 'M-Pesa',
+            planKey: tx.plan_key ?? '',
+            provider: 'sonicpesa',
+            providerRef: orderId,
+            metadata: { sonicpesa_status: paymentStatus, reference: remote.reference },
+          });
+          return {
+            ok: true,
+            payment_status: paymentStatus,
+            completed: true,
+            premium_until: granted.premium_until,
+          };
+        } catch (e) {
+          req.log.error(e, 'grantPremiumFromPayment failed after SonicPesa success');
+          return reply.code(500).send({ error: 'Payment received but premium activation failed. Contact support.' });
+        }
       }
 
       if (isSonicpesaFailure(paymentStatus)) {
@@ -759,9 +767,27 @@ export async function registerRoutes(
 
   app.get('/api/v1/admin/users', { preHandler: adminPre }, async () => {
     const r = await pool.query(
-      `SELECT id, name, phone, device_id, status, subscription, admin_access_until, created_at FROM users ORDER BY created_at DESC LIMIT 500`,
+      `SELECT id, name, phone, device_id, status, subscription, premium_until, admin_access_until, created_at
+       FROM users ORDER BY created_at DESC LIMIT 500`,
     );
     return { users: r.rows };
+  });
+
+  app.get('/api/v1/admin/stats/overview', { preHandler: adminPre }, async () => {
+    const stats = await fetchAdminStatsOverview(pool);
+    return { stats };
+  });
+
+  app.get('/api/v1/admin/subscriptions', { preHandler: adminPre }, async () => {
+    const subscriptions = await fetchAdminSubscriptions(pool);
+    return { subscriptions };
+  });
+
+  app.get('/api/v1/admin/logs', { preHandler: adminPre }, async () => {
+    const r = await pool.query(
+      `SELECT id, admin_name, action, details, created_at FROM admin_logs ORDER BY created_at DESC LIMIT 200`,
+    );
+    return { logs: r.rows };
   });
 
   app.patch<{ Params: { id: string }; Body: Record<string, unknown> }>(

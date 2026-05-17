@@ -40,6 +40,12 @@ class SonicpesaPaymentService {
         statusCode: res.statusCode,
       );
     }
+    if (res.statusCode == 403) {
+      throw SonicpesaPaymentException(
+        _message(map, 'Usajili wa premium umezimwa kwa sasa.'),
+        statusCode: res.statusCode,
+      );
+    }
     if (res.statusCode < 200 || res.statusCode >= 300) {
       throw SonicpesaPaymentException(
         _message(map, 'Imeshindikana kuanzisha malipo (${res.statusCode})'),
@@ -62,6 +68,7 @@ class SonicpesaPaymentService {
     required String deviceId,
     required String orderId,
     String? userName,
+    String? phone,
   }) async {
     final res = await http
         .post(
@@ -71,6 +78,7 @@ class SonicpesaPaymentService {
             'device_id': deviceId,
             'order_id': orderId,
             if (userName != null && userName.isNotEmpty) 'user_name': userName,
+            if (phone != null && phone.isNotEmpty) 'phone': phone,
           }),
         )
         .timeout(const Duration(seconds: 25));
@@ -86,11 +94,7 @@ class SonicpesaPaymentService {
     final status = (map['payment_status'] as String?)?.trim().toUpperCase() ?? 'PENDING';
     final completed = map['completed'] == true;
     final failed = map['failed'] == true;
-    DateTime? premiumUntil;
-    final rawUntil = map['premium_until'];
-    if (rawUntil is String && rawUntil.isNotEmpty) {
-      premiumUntil = DateTime.tryParse(rawUntil);
-    }
+    final premiumUntil = _parsePremiumUntil(map['premium_until']);
 
     return SonicpesaStatusResult(
       paymentStatus: status,
@@ -114,6 +118,17 @@ class SonicpesaPaymentService {
     final e = map['error'];
     if (e is String && e.trim().isNotEmpty) return e.trim();
     return fallback;
+  }
+
+  DateTime? _parsePremiumUntil(Object? raw) {
+    if (raw == null) return null;
+    if (raw is int) return DateTime.fromMillisecondsSinceEpoch(raw);
+    if (raw is num) return DateTime.fromMillisecondsSinceEpoch(raw.toInt());
+    final s = raw.toString().trim();
+    if (s.isEmpty) return null;
+    final ms = int.tryParse(s);
+    if (ms != null && ms > 100000000000) return DateTime.fromMillisecondsSinceEpoch(ms);
+    return DateTime.tryParse(s);
   }
 }
 

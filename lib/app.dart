@@ -392,12 +392,39 @@ class _WashaAppState extends State<WashaApp> with WidgetsBindingObserver {
   }
 
   Future<void> activateSubscription(String phone, String name) async {
-    _paymentRetryPhone = phone;
-    _paymentRetryName = name;
-    userName = name;
-    pendingPhone = phone;
-    await storage.setName(name);
-    await _runSonicpesaPayment(phone: phone, name: name);
+    final normalizedPhone = subService.normalizeTzPhone(phone);
+    final trimmedName = name.trim();
+    _paymentRetryPhone = normalizedPhone;
+    _paymentRetryName = trimmedName;
+    userName = trimmedName;
+    pendingPhone = normalizedPhone;
+    await storage.setName(trimmedName);
+    await _runSonicpesaPayment(phone: normalizedPhone, name: trimmedName);
+  }
+
+  /// Resolves premium expiry from status payload + server (retries), then plan duration.
+  Future<DateTime> _resolvePremiumEndAfterPayment({DateTime? fromStatus}) async {
+    DateTime? end = fromStatus;
+    for (var attempt = 0; attempt < 6; attempt++) {
+      if (attempt > 0) {
+        await Future.delayed(Duration(milliseconds: 350 * attempt));
+      }
+      try {
+        final server = await api.fetchPremiumUntil(deviceId);
+        end = subService.mergeEndDates(end, server);
+      } catch (_) {}
+      if (end != null && subService.isPremium(end)) return end;
+    }
+    if (end != null && subService.isPremium(end)) return end;
+    return subService.calculateEndDate(selectedPlan);
+  }
+
+  Future<void> _applyPremiumUnlock({DateTime? statusUntil}) async {
+    final end = await _resolvePremiumEndAfterPayment(fromStatus: statusUntil);
+    await storage.setSubscriptionEnd(end);
+    if (!mounted) return;
+    setState(() => subEnd = end);
+    unawaited(_syncPushTopics());
   }
 
   Future<void> _runSonicpesaPayment({required String phone, required String name}) async {
@@ -428,31 +455,43 @@ class _WashaAppState extends State<WashaApp> with WidgetsBindingObserver {
         paymentStatusLine = init.message;
       });
 
-      const maxAttempts = 45;
+      const maxAttempts = 60;
       for (var i = 0; i < maxAttempts; i++) {
         await Future.delayed(const Duration(seconds: 2));
         if (!mounted || !paymentOverlayOpen) return;
 
-        final status = await sonicPay.checkStatus(
-          deviceId: deviceId,
-          orderId: init.orderId,
-          userName: name,
-        );
+        late final SonicpesaStatusResult status;
+        try {
+          status = await sonicPay.checkStatus(
+            deviceId: deviceId,
+            orderId: init.orderId,
+            userName: name,
+            phone: phone,
+          );
+        } on SonicpesaPaymentException catch (e) {
+          final code = e.statusCode;
+          if (code == 502 || code == 503 || code == 504) {
+            if (mounted) {
+              setState(() => paymentStatusLine = 'Seva inaendelea kuchakata malipo…');
+            }
+            continue;
+          }
+          rethrow;
+        }
 
         if (!mounted) return;
 
         if (status.completed) {
-          if (status.premiumUntil != null) {
-            subEnd = status.premiumUntil;
-            await storage.setSubscriptionEnd(subEnd);
-          } else {
-            subEnd = subService.calculateEndDate(selectedPlan);
-            await storage.setSubscriptionEnd(subEnd);
+          await _applyPremiumUnlock(statusUntil: status.premiumUntil);
+          try {
+            await api.syncViewer(deviceId: deviceId, name: name, phone: phone);
+            await _syncFromServer(silent: true);
+            await _syncPremiumFromServer();
+          } catch (_) {
+            // Payment already succeeded — sync failures must not show as payment errors.
           }
-          await api.syncViewer(deviceId: deviceId, name: name, phone: phone);
-          await _syncFromServer(silent: true);
-          await _syncPremiumFromServer();
 
+          if (!mounted) return;
           setState(() {
             paymentPhase = SonicpesaPaymentPhase.success;
             subscriptionPaymentSuccess = true;
@@ -479,19 +518,17 @@ class _WashaAppState extends State<WashaApp> with WidgetsBindingObserver {
         'Muda wa kusubiri malipo umeisha. Hakikisha umethibitisha PIN kwenye simu.',
       );
     } on SonicpesaPaymentException catch (e) {
-      if (!mounted) rethrow;
+      if (!mounted) return;
       setState(() {
         paymentPhase = SonicpesaPaymentPhase.failed;
         paymentError = e.message;
       });
-      rethrow;
-    } catch (e) {
-      if (!mounted) rethrow;
+    } catch (_) {
+      if (!mounted) return;
       setState(() {
         paymentPhase = SonicpesaPaymentPhase.failed;
         paymentError = 'Hitilafu ya mtandao. Jaribu tena.';
       });
-      rethrow;
     }
   }
 

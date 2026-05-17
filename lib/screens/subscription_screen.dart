@@ -340,13 +340,7 @@ class _SubscriptionScreenState extends State<SubscriptionScreen> {
                             borderRadius: BorderRadius.circular(18),
                             onTap: !_isFormValid
                                 ? null
-                                : () async {
-                                    try {
-                                      await widget.onPay(phone.text.trim(), name.text.trim());
-                                    } catch (_) {
-                                      return;
-                                    }
-                                  },
+                                : () => unawaited(widget.onPay(phone.text.trim(), name.text.trim())),
                             child: Padding(
                               padding: const EdgeInsets.symmetric(horizontal: 16),
                               child: Row(

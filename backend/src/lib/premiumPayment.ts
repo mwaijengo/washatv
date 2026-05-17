@@ -36,6 +36,26 @@ export async function grantPremiumFromPayment(pool: DbPool, input: GrantPremiumI
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
+
+    const existingTx = await client.query(
+      `SELECT status, user_id FROM transactions WHERE provider = $1 AND provider_ref = $2 LIMIT 1`,
+      [provider, providerRef],
+    );
+    if (existingTx.rowCount) {
+      const row = existingTx.rows[0] as { status: string; user_id: string };
+      if (row.status === 'completed') {
+        const prem = await client.query(`SELECT premium_until FROM users WHERE id = $1`, [row.user_id]);
+        await client.query('COMMIT');
+        const until = prem.rows[0]?.premium_until as Date | null | undefined;
+        return {
+          ok: true,
+          transaction_ref: providerRef,
+          user_id: String(row.user_id),
+          premium_until: until ? new Date(until).toISOString() : null,
+        };
+      }
+    }
+
     const upsertUser = await client.query(
       `INSERT INTO users (id, name, phone, device_id, status, subscription, created_at)
        VALUES ($1, $2, $3, $4, 'active', 'free', now())
