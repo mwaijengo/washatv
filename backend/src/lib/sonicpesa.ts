@@ -69,6 +69,38 @@ export function isSonicpesaFailure(status: string): boolean {
   );
 }
 
+/** SonicPesa wraps order fields in `data` (and sometimes `order_status_data`). */
+function unwrapSonicpesaBody(raw: Record<string, unknown>): Record<string, unknown> {
+  const data = raw.data;
+  const fromData =
+    data && typeof data === 'object' && !Array.isArray(data)
+      ? (data as Record<string, unknown>)
+      : null;
+  const osd = fromData?.order_status_data ?? raw.order_status_data;
+  const fromOsd =
+    osd && typeof osd === 'object' && !Array.isArray(osd) ? (osd as Record<string, unknown>) : null;
+  return { ...raw, ...(fromData ?? {}), ...(fromOsd ?? {}) };
+}
+
+function sonicpesaApiError(raw: Record<string, unknown>, httpStatus: number): string | undefined {
+  const topStatus = String(raw.status ?? '').trim().toLowerCase();
+  if (topStatus === 'error' || topStatus === 'failed' || topStatus === 'failure') {
+    return String(raw.message ?? raw.error ?? 'SonicPesa rejected the request').trim();
+  }
+  if (!httpStatus || httpStatus < 400) return undefined;
+  return String(raw.error ?? raw.message ?? `SonicPesa HTTP ${httpStatus}`).trim();
+}
+
+function readOrderId(body: Record<string, unknown>): string {
+  return String(body.order_id ?? body.orderId ?? body.id ?? '').trim();
+}
+
+function readPaymentStatus(body: Record<string, unknown>): string {
+  return normalizePaymentStatus(
+    body.payment_status ?? body.status ?? body.order_status ?? 'PENDING',
+  );
+}
+
 export async function sonicpesaCreateOrder(env: Env, input: SonicpesaCreateOrderInput): Promise<SonicpesaOrderResult> {
   const base = (env.SONICPESA_BASE_URL ?? DEFAULT_BASE).replace(/\/+$/, '');
   const res = await fetch(`${base}/api/v1/payment/create_order`, {
@@ -77,24 +109,32 @@ export async function sonicpesaCreateOrder(env: Env, input: SonicpesaCreateOrder
     body: JSON.stringify(input),
   });
   const raw = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+  const apiError = sonicpesaApiError(raw, res.status);
+  if (apiError && !res.ok) {
+    return { ok: false, error: apiError, raw };
+  }
   if (!res.ok) {
     return {
       ok: false,
-      error: String(raw.error ?? raw.message ?? `SonicPesa HTTP ${res.status}`),
+      error: apiError ?? `SonicPesa HTTP ${res.status}`,
       raw,
     };
   }
-  const orderId = String(raw.order_id ?? raw.orderId ?? '').trim();
-  const paymentStatus = normalizePaymentStatus(raw.payment_status ?? raw.status ?? 'PENDING');
+
+  const body = unwrapSonicpesaBody(raw);
+  const orderId = readOrderId(body);
+  const paymentStatus = readPaymentStatus(body);
+  const wrappedError = sonicpesaApiError(raw, 0);
+
   return {
-    ok: Boolean(orderId),
+    ok: Boolean(orderId) && !wrappedError,
     order_id: orderId || undefined,
-    reference: String(raw.reference ?? raw.ref ?? '').trim() || undefined,
+    reference: String(body.reference ?? body.ref ?? '').trim() || undefined,
     payment_status: paymentStatus,
     status: paymentStatus,
-    amount: Number(raw.amount ?? input.amount),
-    currency: String(raw.currency ?? input.currency),
-    error: orderId ? undefined : String(raw.error ?? 'Missing order_id from SonicPesa'),
+    amount: Number(body.amount ?? input.amount),
+    currency: String(body.currency ?? input.currency),
+    error: orderId && !wrappedError ? undefined : wrappedError ?? 'SonicPesa did not return an order id',
     raw,
   };
 }
@@ -107,24 +147,28 @@ export async function sonicpesaOrderStatus(env: Env, orderId: string): Promise<S
     body: JSON.stringify({ order_id: orderId }),
   });
   const raw = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+  const apiError = sonicpesaApiError(raw, res.status);
   if (!res.ok) {
     return {
       ok: false,
-      error: String(raw.error ?? raw.message ?? `SonicPesa HTTP ${res.status}`),
+      error: apiError ?? `SonicPesa HTTP ${res.status}`,
       raw,
     };
   }
-  const paymentStatus = normalizePaymentStatus(
-    raw.payment_status ?? raw.status ?? raw.order_status ?? 'PENDING',
-  );
+  if (apiError) {
+    return { ok: false, error: apiError, raw };
+  }
+
+  const body = unwrapSonicpesaBody(raw);
+  const paymentStatus = readPaymentStatus(body);
   return {
     ok: true,
-    order_id: orderId,
+    order_id: readOrderId(body) || orderId,
     payment_status: paymentStatus,
     status: paymentStatus,
-    reference: String(raw.reference ?? '').trim() || undefined,
-    amount: raw.amount != null ? Number(raw.amount) : undefined,
-    currency: raw.currency != null ? String(raw.currency) : undefined,
+    reference: String(body.reference ?? '').trim() || undefined,
+    amount: body.amount != null ? Number(body.amount) : undefined,
+    currency: body.currency != null ? String(body.currency) : undefined,
     raw,
   };
 }

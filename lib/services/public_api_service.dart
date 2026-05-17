@@ -14,6 +14,23 @@ import 'pricing_catalog.dart';
 const _prefsBootstrapCache = 'washatv_bootstrap_cache_v1';
 const _prefsBootstrapSyncSig = 'washatv_bootstrap_sync_sig_v1';
 
+void _throttledApiLog(String tag, Object error) {
+  if (!kDebugMode) return;
+  _ApiLogThrottle.log(tag, error);
+}
+
+class _ApiLogThrottle {
+  static final _last = <String, DateTime>{};
+
+  static void log(String tag, Object error) {
+    final now = DateTime.now();
+    final prev = _last[tag];
+    if (prev != null && now.difference(prev).inSeconds < 45) return;
+    _last[tag] = now;
+    debugPrint('WASHA $tag: $error');
+  }
+}
+
 class PublicBootstrapMeta {
   const PublicBootstrapMeta({required this.version, required this.configSyncedAt});
 
@@ -139,6 +156,31 @@ class PublicApiService {
 
   final String baseUrl;
 
+  /// Consecutive failed lightweight polls (network / timeout).
+  int consecutiveMetaFailures = 0;
+
+  /// When set, callers should skip meta/profile polls until this time.
+  DateTime? metaBackoffUntil;
+
+  bool get shouldSkipLightweightPoll {
+    final until = metaBackoffUntil;
+    return until != null && DateTime.now().isBefore(until);
+  }
+
+  void _noteMetaSuccess() {
+    consecutiveMetaFailures = 0;
+    metaBackoffUntil = null;
+  }
+
+  /// Call after a successful full bootstrap so background polls resume immediately.
+  void resetLightweightPollBackoff() => _noteMetaSuccess();
+
+  void _noteMetaFailure() {
+    consecutiveMetaFailures++;
+    final seconds = (8 * consecutiveMetaFailures).clamp(8, 90);
+    metaBackoffUntil = DateTime.now().add(Duration(seconds: seconds));
+  }
+
   /// Full bootstrap (always returns data; never 304).
   Future<PublicBootstrapData> fetchBootstrap() async {
     final data = await fetchBootstrapSince(0);
@@ -150,24 +192,28 @@ class PublicApiService {
 
   /// Cheap poll target (Supasoka `/config-meta` pattern).
   Future<PublicBootstrapMeta?> fetchBootstrapMeta() async {
+    if (shouldSkipLightweightPoll) return null;
     final uri = Uri.parse('$baseUrl/api/v1/public/bootstrap-meta').replace(
-      queryParameters: {
-        '_': '${DateTime.now().millisecondsSinceEpoch}',
-        'r': '${DateTime.now().microsecondsSinceEpoch}',
-      },
+      queryParameters: {'_': '${DateTime.now().millisecondsSinceEpoch}'},
     );
     try {
-      final res = await http.get(uri, headers: _publicGetHeaders).timeout(const Duration(seconds: 12));
-      if (res.statusCode != 200) return null;
+      final res = await http.get(uri, headers: _publicGetHeaders).timeout(const Duration(seconds: 10));
+      if (res.statusCode != 200) {
+        if (res.statusCode == 404) return null;
+        _noteMetaFailure();
+        return null;
+      }
       final map = jsonDecode(res.body) as Map<String, dynamic>;
       final version = _parseConfigVersionJson(map['version']);
       if (version <= 0 && map['ok'] != true) return null;
+      _noteMetaSuccess();
       return PublicBootstrapMeta(
         version: version > 0 ? version : 1,
         configSyncedAt: _parseConfigVersionJson(map['configSyncedAt']),
       );
     } catch (e) {
-      if (kDebugMode) debugPrint('WASHA bootstrap-meta: $e');
+      _noteMetaFailure();
+      _throttledApiLog('bootstrap-meta', e);
       return null;
     }
   }
@@ -190,15 +236,19 @@ class PublicApiService {
 
   /// Returns remote sync signature if admin changed data since [localSignature]; else null.
   Future<String?> fetchBootstrapMetaIfChanged(String? localSignature, {int localVersion = 0}) async {
+    if (shouldSkipLightweightPoll) return null;
     final meta = await fetchBootstrapMeta();
     if (meta != null) {
       final remote = meta.syncSignature;
       if (localSignature != null && localSignature == remote) return null;
       return remote;
     }
-    final remoteVersion = await fetchConfigVersionOnly();
-    if (remoteVersion != null && remoteVersion > localVersion) {
-      return '$remoteVersion:0';
+    // Only hit legacy `/config` when meta endpoint is missing — not on network errors.
+    if (consecutiveMetaFailures == 0) {
+      final remoteVersion = await fetchConfigVersionOnly();
+      if (remoteVersion != null && remoteVersion > localVersion) {
+        return '$remoteVersion:0';
+      }
     }
     return null;
   }
@@ -207,9 +257,10 @@ class PublicApiService {
   Future<ViewerProfile?> fetchViewerProfile(String deviceId) async {
     final id = deviceId.trim();
     if (id.isEmpty) return null;
+    if (shouldSkipLightweightPoll) return null;
     final uri = Uri.parse('$baseUrl/api/v1/public/user-profile/${Uri.encodeComponent(id)}');
     try {
-      final res = await http.get(uri, headers: _publicGetHeaders).timeout(const Duration(seconds: 12));
+      final res = await http.get(uri, headers: _publicGetHeaders).timeout(const Duration(seconds: 10));
       if (res.statusCode != 200) return null;
       final map = jsonDecode(res.body) as Map<String, dynamic>;
       if (map['ok'] != true) return null;
@@ -233,7 +284,8 @@ class PublicApiService {
         accessSource: (map['accessSource'] as String?)?.trim() ?? 'none',
       );
     } catch (e) {
-      if (kDebugMode) debugPrint('WASHA user-profile: $e');
+      _noteMetaFailure();
+      _throttledApiLog('user-profile', e);
       return null;
     }
   }

@@ -102,8 +102,8 @@ class _WashaAppState extends State<WashaApp> with WidgetsBindingObserver {
       if (slides.isEmpty) return;
       setState(() => carousel = (carousel + 1) % slides.length);
     });
-    // Live sync: meta poll every 2s → full catalog when admin saves (Supasoka pattern).
-    configPoller = Timer.periodic(const Duration(seconds: 2), (_) => _pollConfigMeta());
+    // Live sync: meta poll every 8s (backs off automatically when API is unreachable).
+    configPoller = Timer.periodic(const Duration(seconds: 8), (_) => _pollConfigMeta());
   }
 
   void _startLiveSyncAfterBoot() {
@@ -173,6 +173,7 @@ class _WashaAppState extends State<WashaApp> with WidgetsBindingObserver {
         // blocked storage) and must not look like a dead API / CORS issue.
         remoteFetched = true;
         lastFailure = null;
+        api.resetLightweightPollBackoff();
         try {
           await storage.setSupportWhatsapp(fetchedWa);
         } catch (_) {}
@@ -274,7 +275,7 @@ class _WashaAppState extends State<WashaApp> with WidgetsBindingObserver {
   }
 
   Future<void> _pollConfigMeta() async {
-    if (bootLoading || metaPollInFlight) return;
+    if (bootLoading || metaPollInFlight || api.shouldSkipLightweightPoll) return;
     metaPollInFlight = true;
     try {
       _bumpConfigPollTick();
@@ -289,10 +290,11 @@ class _WashaAppState extends State<WashaApp> with WidgetsBindingObserver {
         } else {
           await _syncFromServer(silent: true, forceFull: true);
         }
-      } else if (tick % 8 == 0 && !syncInFlight) {
+      } else if (tick % 4 == 0 && !syncInFlight && !api.shouldSkipLightweightPoll) {
         await _syncFromServer(silent: true);
       }
-      if (tick % 2 == 0) {
+      // Profile poll ~every 32s during background sync; screen switches still refresh immediately.
+      if (tick % 4 == 0 && !api.shouldSkipLightweightPoll) {
         unawaited(_syncViewerProfileFromServer());
       }
     } finally {
@@ -305,7 +307,7 @@ class _WashaAppState extends State<WashaApp> with WidgetsBindingObserver {
   }
 
   Future<void> _syncViewerProfileFromServer() async {
-    if (deviceId.isEmpty) return;
+    if (deviceId.isEmpty || api.shouldSkipLightweightPoll) return;
     try {
       await api.syncViewer(
         deviceId: deviceId,
@@ -403,6 +405,7 @@ class _WashaAppState extends State<WashaApp> with WidgetsBindingObserver {
               )
             : selectedPlan;
       });
+      api.resetLightweightPollBackoff();
       await storage.setSupportWhatsapp(remote.whatsappNumber);
       if (nextPlans.isNotEmpty) {
         await persistPricingSnapshotFromPlans(nextPlans);
@@ -632,14 +635,28 @@ class _WashaAppState extends State<WashaApp> with WidgetsBindingObserver {
   }
 
   String _statusHint(String status) {
-    switch (status) {
+    switch (status.toUpperCase().replaceAll(' ', '')) {
       case 'INPROGRESS':
       case 'IN_PROGRESS':
+      case 'PROCESSING':
         return 'Malipo yanaendelea…';
       case 'PENDING':
+      case 'INITIATED':
         return 'Inasubiri uthibitisho kwenye simu yako…';
+      case 'SUCCESS':
+      case 'COMPLETED':
+      case 'PAID':
+        return 'Malipo yamekamilika…';
+      case 'CANCELLED':
+      case 'USERCANCELLED':
+        return 'Malipo yameghairiwa kwenye simu.';
+      case 'REJECTED':
+      case 'FAILED':
+      case 'FAILURE':
+      case 'EXPIRED':
+        return 'Malipo hayajakamilika. Jaribu tena.';
       default:
-        return 'Hali: $status';
+        return 'Inasubiri uthibitisho kwenye simu yako…';
     }
   }
 
@@ -715,6 +732,7 @@ class _WashaAppState extends State<WashaApp> with WidgetsBindingObserver {
   }
 
   Future<void> _retryBootstrapAfterError() async {
+    api.resetLightweightPollBackoff();
     setState(() {
       bootstrapError = null;
       bootstrapFailureDetail = null;

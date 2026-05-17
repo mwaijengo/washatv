@@ -351,8 +351,7 @@ export async function registerRoutes(
 
     if (!order.ok || !order.order_id) {
       return reply.code(502).send({
-        error: order.error ?? 'SonicPesa create_order failed',
-        details: order.raw ?? null,
+        error: 'Imeshindikana kuanzisha malipo. Hakikisha namba ya simu ni sahihi na jaribu tena.',
       });
     }
 
@@ -425,7 +424,9 @@ export async function registerRoutes(
 
       const remote = await sonicpesaOrderStatus(env, orderId);
       if (!remote.ok) {
-        return reply.code(502).send({ error: remote.error ?? 'status check failed' });
+        return reply.code(502).send({
+          error: 'Imeshindikana kuangalia hali ya malipo. Jaribu tena.',
+        });
       }
 
       const paymentStatus = normalizePaymentStatus(remote.payment_status ?? remote.status ?? 'PENDING');

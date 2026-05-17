@@ -42,19 +42,21 @@ class SonicpesaPaymentService {
     }
     if (res.statusCode == 403) {
       throw SonicpesaPaymentException(
-        _message(map, 'Usajili wa premium umezimwa kwa sasa.'),
+        _userFacingMessage(map, res.statusCode, fallback: 'Usajili wa premium umezimwa kwa sasa.'),
         statusCode: res.statusCode,
       );
     }
     if (res.statusCode < 200 || res.statusCode >= 300) {
       throw SonicpesaPaymentException(
-        _message(map, 'Imeshindikana kuanzisha malipo (${res.statusCode})'),
+        _userFacingMessage(map, res.statusCode, fallback: 'Imeshindikana kuanzisha malipo. Jaribu tena.'),
         statusCode: res.statusCode,
       );
     }
     final orderId = (map['order_id'] as String?)?.trim() ?? '';
     if (orderId.isEmpty) {
-      throw SonicpesaPaymentException('Hakuna order_id kutoka kwa SonicPesa.');
+      throw SonicpesaPaymentException(
+        _userFacingMessage(map, res.statusCode, fallback: 'Imeshindikana kuanzisha malipo. Jaribu tena.'),
+      );
     }
     return SonicpesaInitiateResult(
       orderId: orderId,
@@ -86,7 +88,7 @@ class SonicpesaPaymentService {
     final map = _decode(res);
     if (res.statusCode < 200 || res.statusCode >= 300) {
       throw SonicpesaPaymentException(
-        _message(map, 'Imeshindikana kuangalia hali ya malipo'),
+        _userFacingMessage(map, res.statusCode, fallback: 'Imeshindikana kuangalia hali ya malipo.'),
         statusCode: res.statusCode,
       );
     }
@@ -114,10 +116,46 @@ class SonicpesaPaymentService {
     }
   }
 
-  String _message(Map<String, dynamic> map, String fallback) {
-    final e = map['error'];
-    if (e is String && e.trim().isNotEmpty) return e.trim();
-    return fallback;
+  String _userFacingMessage(Map<String, dynamic> map, int? statusCode, {required String fallback}) {
+    final raw = _rawServerMessage(map);
+    if (raw == null) {
+      if (statusCode == 502 || statusCode == 503 || statusCode == 504) {
+        return 'Seva ya malipo haipatikani kwa sasa. Jaribu tena baada ya dakika moja.';
+      }
+      return fallback;
+    }
+    final lower = raw.toLowerCase();
+    if (lower.contains('order_id') || lower.contains('sonicpesa')) {
+      return 'Imeshindikana kuanzisha malipo. Hakikisha namba ya simu ni sahihi na jaribu tena.';
+    }
+    if (lower.contains('not configured')) {
+      return 'Malipo hayajasanidi kwenye seva. Wasiliana na msaada.';
+    }
+    if (lower.contains('device_id') || lower.contains('plan_key')) {
+      return 'Taarifa za malipo hazikamilika. Funga na fungua programu, kisha jaribu tena.';
+    }
+    if (lower.contains('phone') || lower.contains('tanzanian')) {
+      return 'Weka namba ya simu sahihi (mfano 07XXXXXXXX).';
+    }
+    if (lower.contains('subscription') && lower.contains('disabled')) {
+      return 'Usajili wa premium umezimwa kwa sasa.';
+    }
+    if (lower.contains('plan not found') || lower.contains('not available')) {
+      return 'Mpango uliyochagua haupatikani. Chagua mpango mwingine.';
+    }
+    // Hide raw HTTP codes / English API dumps from the payment UI.
+    if (RegExp(r'\b(4\d{2}|5\d{2})\b').hasMatch(raw) || raw.length > 120) {
+      return fallback;
+    }
+    return raw;
+  }
+
+  String? _rawServerMessage(Map<String, dynamic> map) {
+    for (final key in ['error', 'message']) {
+      final v = map[key];
+      if (v is String && v.trim().isNotEmpty) return v.trim();
+    }
+    return null;
   }
 
   DateTime? _parsePremiumUntil(Object? raw) {
