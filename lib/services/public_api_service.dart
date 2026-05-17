@@ -9,10 +9,14 @@ import '../models/channel.dart';
 import '../models/hero_slide.dart';
 import '../models/plan.dart';
 import '../models/viewer_profile.dart';
+import 'payment_config.dart';
 import 'pricing_catalog.dart';
 
 const _prefsBootstrapCache = 'washatv_bootstrap_cache_v1';
 const _prefsBootstrapSyncSig = 'washatv_bootstrap_sync_sig_v1';
+
+/// Railway cold starts can exceed 10s; lightweight polls use this limit.
+const _lightweightPollTimeout = Duration(seconds: 22);
 
 void _throttledApiLog(String tag, Object error) {
   if (!kDebugMode) return;
@@ -21,11 +25,21 @@ void _throttledApiLog(String tag, Object error) {
 
 class _ApiLogThrottle {
   static final _last = <String, DateTime>{};
+  static final _burstCount = <String, int>{};
+  static final _burstStart = <String, DateTime>{};
 
   static void log(String tag, Object error) {
     final now = DateTime.now();
+    final burstAt = _burstStart[tag];
+    if (burstAt == null || now.difference(burstAt) > const Duration(seconds: 3)) {
+      _burstStart[tag] = now;
+      _burstCount[tag] = 0;
+    }
+    _burstCount[tag] = (_burstCount[tag] ?? 0) + 1;
+    if (_burstCount[tag]! > 1) return;
+
     final prev = _last[tag];
-    if (prev != null && now.difference(prev).inSeconds < 45) return;
+    if (prev != null && now.difference(prev).inSeconds < 90) return;
     _last[tag] = now;
     debugPrint('WASHA $tag: $error');
   }
@@ -156,6 +170,9 @@ class PublicApiService {
 
   final String baseUrl;
 
+  /// True when the app talks to a machine-local Washa API (dev checkout without SonicPesa).
+  bool get isLocalDevelopment => PaymentConfig.isLocalApiHost(baseUrl);
+
   /// Consecutive failed lightweight polls (network / timeout).
   int consecutiveMetaFailures = 0;
 
@@ -197,7 +214,7 @@ class PublicApiService {
       queryParameters: {'_': '${DateTime.now().millisecondsSinceEpoch}'},
     );
     try {
-      final res = await http.get(uri, headers: _publicGetHeaders).timeout(const Duration(seconds: 10));
+      final res = await http.get(uri, headers: _publicGetHeaders).timeout(_lightweightPollTimeout);
       if (res.statusCode != 200) {
         if (res.statusCode == 404) return null;
         _noteMetaFailure();
@@ -224,7 +241,7 @@ class PublicApiService {
       queryParameters: {'_': '${DateTime.now().millisecondsSinceEpoch}'},
     );
     try {
-      final res = await http.get(uri, headers: _publicGetHeaders).timeout(const Duration(seconds: 10));
+      final res = await http.get(uri, headers: _publicGetHeaders).timeout(_lightweightPollTimeout);
       if (res.statusCode == 304) return null;
       if (res.statusCode != 200) return null;
       final map = jsonDecode(res.body) as Map<String, dynamic>;
@@ -260,7 +277,7 @@ class PublicApiService {
     if (shouldSkipLightweightPoll) return null;
     final uri = Uri.parse('$baseUrl/api/v1/public/user-profile/${Uri.encodeComponent(id)}');
     try {
-      final res = await http.get(uri, headers: _publicGetHeaders).timeout(const Duration(seconds: 10));
+      final res = await http.get(uri, headers: _publicGetHeaders).timeout(_lightweightPollTimeout);
       if (res.statusCode != 200) return null;
       final map = jsonDecode(res.body) as Map<String, dynamic>;
       if (map['ok'] != true) return null;
@@ -296,7 +313,7 @@ class PublicApiService {
     if (id.isEmpty) return null;
     final uri = Uri.parse('$baseUrl/api/v1/public/user-premium/${Uri.encodeComponent(id)}');
     try {
-      final res = await http.get(uri, headers: _publicGetHeaders).timeout(const Duration(seconds: 12));
+      final res = await http.get(uri, headers: _publicGetHeaders).timeout(_lightweightPollTimeout);
       if (res.statusCode != 200) return null;
       final map = jsonDecode(res.body) as Map<String, dynamic>;
       if (map['ok'] != true) return null;
@@ -560,6 +577,9 @@ class PublicApiService {
           }),
         )
         .timeout(const Duration(seconds: 20));
+    if (res.statusCode == 403) {
+      throw Exception('Malipo ya majaribio yanapatikana tu ukiendesha app dhidi ya seva ya localhost.');
+    }
     if (res.statusCode < 200 || res.statusCode >= 300) {
       throw Exception('Transaction save failed: ${res.statusCode}');
     }

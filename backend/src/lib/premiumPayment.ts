@@ -73,7 +73,7 @@ export async function grantPremiumFromPayment(pool: DbPool, input: GrantPremiumI
          (id, user_id, phone, amount, currency, method, provider, provider_ref, plan_key, status, completed_at, metadata, created_at, updated_at)
        VALUES
          ($1,$2,$3,$4,'TZS',$5,$6,$7,$8,'completed',now(),$9::jsonb,now(),now())
-       ON CONFLICT (provider, provider_ref) DO UPDATE SET
+       ON CONFLICT (provider, provider_ref) WHERE provider_ref IS NOT NULL DO UPDATE SET
          user_id = EXCLUDED.user_id,
          phone = EXCLUDED.phone,
          amount = EXCLUDED.amount,
@@ -164,7 +164,7 @@ export async function upsertPendingSonicpesaTransaction(
       `INSERT INTO transactions
          (id, user_id, phone, amount, currency, method, provider, provider_ref, plan_key, status, metadata, created_at, updated_at)
        VALUES ($1,$2,$3,$4,'TZS','M-Pesa','sonicpesa',$5,$6,'pending',$7::jsonb,now(),now())
-       ON CONFLICT (provider, provider_ref) DO UPDATE SET
+       ON CONFLICT (provider, provider_ref) WHERE provider_ref IS NOT NULL DO UPDATE SET
          user_id = EXCLUDED.user_id,
          phone = EXCLUDED.phone,
          amount = EXCLUDED.amount,

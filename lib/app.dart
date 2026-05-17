@@ -17,6 +17,7 @@ import 'screens/subscription_screen.dart';
 import 'services/pricing_catalog.dart';
 import 'services/public_api_service.dart';
 import 'services/push_notification_service.dart';
+import 'services/payment_config.dart';
 import 'services/sonicpesa_payment_service.dart';
 import 'services/storage_service.dart';
 import 'services/subscription_service.dart';
@@ -494,14 +495,103 @@ class _WashaAppState extends State<WashaApp> with WidgetsBindingObserver {
   }
 
   Future<void> activateSubscription(String phone, String name) async {
-    final normalizedPhone = subService.normalizeTzPhone(phone);
+    final trimmedPhone = phone.trim();
     final trimmedName = name.trim();
-    _paymentRetryPhone = normalizedPhone;
+
+    if (!PaymentConfig.isValidFullName(trimmedName)) {
+      _scaffoldMessengerKey.currentState?.showSnackBar(
+        const SnackBar(content: Text('Andika majina yako kamili (angalau jina na jina la ukoo).')),
+      );
+      return;
+    }
+    if (!PaymentConfig.isValidTzLocalPhone(trimmedPhone)) {
+      _scaffoldMessengerKey.currentState?.showSnackBar(
+        const SnackBar(content: Text('Namba ya simu lazima iwe tarakimu 10 zianze na 0 (mfano 0712345678).')),
+      );
+      return;
+    }
+
+    _paymentRetryPhone = trimmedPhone;
     _paymentRetryName = trimmedName;
     userName = trimmedName;
-    pendingPhone = normalizedPhone;
+    pendingPhone = trimmedPhone;
     await storage.setName(trimmedName);
-    await _runSonicpesaPayment(phone: normalizedPhone, name: trimmedName);
+
+    if (api.isLocalDevelopment) {
+      await _runLocalPayment(phone: trimmedPhone, name: trimmedName);
+    } else {
+      await _runSonicpesaPayment(phone: trimmedPhone, name: trimmedName);
+    }
+  }
+
+  int _planPriceAmount(Plan plan) {
+    final digits = plan.price.replaceAll(RegExp(r'[^\d]'), '');
+    return int.tryParse(digits) ?? 0;
+  }
+
+  /// Dev-only: complete premium via local API (no SonicPesa). Production uses mobile-money push.
+  Future<void> _runLocalPayment({required String phone, required String name}) async {
+    if (deviceId.isEmpty) {
+      throw SonicpesaPaymentException('Kitambulisho cha kifaa hakipo. Anza upya programu.');
+    }
+
+    setState(() {
+      paymentOverlayOpen = true;
+      paymentPhase = SonicpesaPaymentPhase.initiating;
+      paymentError = null;
+      paymentStatusLine = PaymentConfig.paymentPromptSw;
+      subscriptionPaymentSuccess = false;
+    });
+
+    try {
+      await Future.delayed(const Duration(milliseconds: 900));
+      if (!mounted) return;
+      setState(() {
+        paymentPhase = SonicpesaPaymentPhase.waitingOnPhone;
+        paymentStatusLine = 'Inathibitisha malipo (hali ya majaribio ya localhost)…';
+      });
+
+      final amount = _planPriceAmount(selectedPlan);
+      if (amount <= 0) {
+        throw SonicpesaPaymentException('Bei ya mpango si sahihi.');
+      }
+
+      await api.recordCompletedTransaction(
+        deviceId: deviceId,
+        userName: name,
+        phone: phone,
+        amount: amount.toDouble(),
+        method: 'Mobile Money',
+        planKey: selectedPlan.id,
+      );
+
+      await _applyPremiumUnlock();
+      try {
+        await api.syncViewer(deviceId: deviceId, name: name, phone: phone);
+        await _syncFromServer(silent: true);
+        await _syncViewerProfileFromServer();
+      } catch (_) {}
+
+      if (!mounted) return;
+      setState(() {
+        paymentPhase = SonicpesaPaymentPhase.success;
+        subscriptionPaymentSuccess = true;
+      });
+      await Future.delayed(const Duration(milliseconds: 1400));
+      if (mounted) setState(() => paymentOverlayOpen = false);
+    } on SonicpesaPaymentException catch (e) {
+      if (!mounted) return;
+      setState(() {
+        paymentPhase = SonicpesaPaymentPhase.failed;
+        paymentError = e.message;
+      });
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        paymentPhase = SonicpesaPaymentPhase.failed;
+        paymentError = 'Imeshindikana kuhifadhi malipo ya majaribio. Hakikisha backend ya localhost inaendesha.';
+      });
+    }
   }
 
   /// Resolves premium expiry from status payload + server (retries), then plan duration.
@@ -554,7 +644,7 @@ class _WashaAppState extends State<WashaApp> with WidgetsBindingObserver {
       setState(() {
         paymentOrderId = init.orderId;
         paymentPhase = SonicpesaPaymentPhase.waitingOnPhone;
-        paymentStatusLine = init.message;
+        paymentStatusLine = init.message ?? PaymentConfig.paymentPromptSw;
       });
 
       const maxAttempts = 60;
@@ -911,6 +1001,7 @@ class _WashaAppState extends State<WashaApp> with WidgetsBindingObserver {
           accessSource: _premiumAccessSource,
           userName: _displayName,
           paymentSucceeded: subscriptionPaymentSuccess,
+          localPaymentsOnly: api.isLocalDevelopment,
           onPlanChange: (p) => setState(() => selectedPlan = p),
           onPay: activateSubscription,
         );

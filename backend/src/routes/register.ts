@@ -266,6 +266,12 @@ export async function registerRoutes(
       provider_ref?: string;
     };
   }>('/api/v1/public/transactions/complete', async (req, reply) => {
+    if (env.NODE_ENV === 'production') {
+      return reply.code(403).send({
+        error: 'Direct payment completion is only available against a local development server',
+      });
+    }
+
     const b = req.body ?? {};
     const deviceId = (b.device_id ?? '').trim();
     const amount = Number(b.amount ?? 0);
@@ -318,9 +324,20 @@ export async function registerRoutes(
       if (!deviceId || !planKey) {
         return reply.code(400).send({ error: 'device_id and plan_key are required' });
       }
-      if (!buyerPhone) {
-        return reply.code(400).send({ error: 'phone must be a valid Tanzanian number (e.g. 07XXXXXXXX)' });
-      }
+    if (!buyerPhone) {
+      return reply.code(400).send({ error: 'phone must be 10 digits starting with 0 (e.g. 07XXXXXXXX)' });
+    }
+    const digitsOnly = phoneRaw.replace(/\D/g, '');
+    const localTen = digitsOnly.startsWith('255') && digitsOnly.length >= 12
+      ? `0${digitsOnly.slice(3, 12)}`
+      : digitsOnly.startsWith('0')
+        ? digitsOnly.slice(0, 10)
+        : digitsOnly.length === 9
+          ? `0${digitsOnly}`
+          : digitsOnly;
+    if (!/^0\d{9}$/.test(localTen)) {
+      return reply.code(400).send({ error: 'phone must be 10 digits starting with 0 (e.g. 07XXXXXXXX)' });
+    }
 
       const settings = await pool.query(`SELECT subscription_enabled FROM app_settings WHERE id = 1`);
       const subEnabled = settings.rows[0]?.subscription_enabled;
@@ -359,15 +376,24 @@ export async function registerRoutes(
         });
       }
 
-      await upsertPendingSonicpesaTransaction(pool, {
-        deviceId,
-        userName,
-        phone: phoneRaw,
-        amount,
-        planKey,
-        orderId: order.order_id,
-        metadata: { reference: order.reference, initial_status: order.payment_status },
-      });
+      try {
+        await upsertPendingSonicpesaTransaction(pool, {
+          deviceId,
+          userName,
+          phone: phoneRaw,
+          amount,
+          planKey,
+          orderId: order.order_id,
+          metadata: { reference: order.reference, initial_status: order.payment_status },
+        });
+      } catch (dbErr) {
+        req.log.error(dbErr, 'upsertPendingSonicpesaTransaction failed');
+        return reply.code(502).send({
+          error:
+            'Malipo yameanzishwa lakini seva haikuweza kuyahifadhi. Jaribu tena — usirudie malipo kwenye simu ikiwa umepokea ombi.',
+          order_id: order.order_id,
+        });
+      }
 
       return {
         ok: true,
@@ -377,12 +403,17 @@ export async function registerRoutes(
         currency: 'TZS',
         plan_key: planKey,
         payment_status: order.payment_status ?? 'PENDING',
-        message: 'Angalia simu yako na thibitisha malipo ya M-Pesa.',
+        message:
+          'Angalia simu yako na thibitisha PIN (M-Pesa, Mixx by Yas, Airtel Money, Halotel).',
       };
     } catch (e) {
       req.log.error(e, 'SonicPesa initiate failed');
-      return reply.code(500).send({
-        error: 'Imeshindikana kuanzisha malipo. Jaribu tena baada ya dakika moja.',
+      const msg = e instanceof Error ? e.message : String(e);
+      const unreachable = msg.toLowerCase().includes('fetch') || msg.toLowerCase().includes('timeout');
+      return reply.code(unreachable ? 503 : 500).send({
+        error: unreachable
+          ? 'Seva ya malipo haipatikani kwa sasa. Jaribu tena baada ya dakika moja.'
+          : 'Imeshindikana kuanzisha malipo. Jaribu tena baada ya dakika moja.',
       });
     }
   });

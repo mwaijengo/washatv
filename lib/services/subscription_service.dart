@@ -17,15 +17,17 @@ class SubscriptionService {
     return local.isAfter(remote) ? local : remote;
   }
 
-  /// `07XXXXXXXX` or `2557XXXXXXXX` → `07XXXXXXXX` for API + display.
+  /// `07XXXXXXXX` (10 digits) or `2557XXXXXXXX` → local `07XXXXXXXX` for forms + API.
   String normalizeTzPhone(String raw) {
     final digits = raw.replaceAll(RegExp(r'\D'), '');
     if (digits.isEmpty) return raw.trim();
     if (digits.startsWith('255') && digits.length >= 12) {
-      return '0${digits.substring(3)}';
+      return '0${digits.substring(3, 12)}';
     }
-    if (digits.startsWith('0')) return digits;
-    if (digits.length >= 9) return '0$digits';
+    if (digits.startsWith('0') && digits.length >= 10) {
+      return digits.substring(0, 10);
+    }
+    if (digits.length == 9) return '0$digits';
     return raw.trim();
   }
 

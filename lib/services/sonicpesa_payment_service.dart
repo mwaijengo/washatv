@@ -36,7 +36,14 @@ class SonicpesaPaymentService {
     final map = _decode(res);
     if (res.statusCode == 500) {
       throw SonicpesaPaymentException(
-        _userFacingMessage(map, res.statusCode, fallback: 'Imeshindikana kuanzisha malipo. Jaribu tena baada ya dakika moja.'),
+        _userFacingMessage(map, res.statusCode, fallback: 'Seva ya malipo ina hitilafu. Jaribu tena baada ya dakika moja.'),
+        statusCode: res.statusCode,
+      );
+    }
+    if (res.statusCode == 502) {
+      final partialOrder = (map['order_id'] as String?)?.trim();
+      throw SonicpesaPaymentException(
+        _userFacingMessage(map, res.statusCode, fallback: 'Malipo yameanzishwa lakini hayajakamilika kwenye programu. Jaribu tena.'),
         statusCode: res.statusCode,
       );
     }
@@ -146,8 +153,8 @@ class SonicpesaPaymentService {
     if (lower.contains('device_id') || lower.contains('plan_key')) {
       return 'Taarifa za malipo hazikamilika. Funga na fungua programu, kisha jaribu tena.';
     }
-    if (lower.contains('phone') || lower.contains('tanzanian')) {
-      return 'Weka namba ya simu sahihi (mfano 07XXXXXXXX).';
+    if (lower.contains('phone') || lower.contains('tanzanian') || lower.contains('10 digits')) {
+      return 'Weka namba ya simu sahihi: tarakimu 10 zianze na 0 (mfano 0712345678).';
     }
     if (lower.contains('subscription') && lower.contains('disabled')) {
       return 'Usajili wa premium umezimwa kwa sasa.';
