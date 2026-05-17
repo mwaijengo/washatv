@@ -1,6 +1,9 @@
 import type { Env } from '../config/env.js';
 
 const DEFAULT_BASE = 'https://api.sonicpesa.com';
+const SONICPESA_TIMEOUT_MS = 28_000;
+
+const API_ENVELOPE_STATUSES = new Set(['success', 'error', 'failed', 'failure', 'ok']);
 
 export type SonicpesaCreateOrderInput = {
   buyer_email: string;
@@ -96,19 +99,45 @@ function readOrderId(body: Record<string, unknown>): string {
 }
 
 function readPaymentStatus(body: Record<string, unknown>): string {
+  const statusField = body.status;
+  const statusStr = typeof statusField === 'string' ? statusField.trim().toLowerCase() : '';
+  const statusIsPayment =
+    statusStr.length > 0 && !API_ENVELOPE_STATUSES.has(statusStr);
   return normalizePaymentStatus(
-    body.payment_status ?? body.status ?? body.order_status ?? 'PENDING',
+    body.payment_status ?? body.order_status ?? (statusIsPayment ? statusField : undefined) ?? 'PENDING',
   );
 }
 
-export async function sonicpesaCreateOrder(env: Env, input: SonicpesaCreateOrderInput): Promise<SonicpesaOrderResult> {
+async function sonicpesaPost(
+  env: Env,
+  path: string,
+  payload: Record<string, unknown>,
+): Promise<{ ok: true; res: Response; raw: Record<string, unknown> } | { ok: false; error: string }> {
   const base = (env.SONICPESA_BASE_URL ?? DEFAULT_BASE).replace(/\/+$/, '');
-  const res = await fetch(`${base}/api/v1/payment/create_order`, {
-    method: 'POST',
-    headers: sonicHeaders(env),
-    body: JSON.stringify(input),
-  });
-  const raw = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+  try {
+    const res = await fetch(`${base}${path}`, {
+      method: 'POST',
+      headers: sonicHeaders(env),
+      body: JSON.stringify(payload),
+      signal: AbortSignal.timeout(SONICPESA_TIMEOUT_MS),
+    });
+    const raw = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+    return { ok: true, res, raw };
+  } catch (e) {
+    const name = e instanceof Error ? e.name : '';
+    if (name === 'TimeoutError' || name === 'AbortError') {
+      return { ok: false, error: 'SonicPesa request timed out' };
+    }
+    return { ok: false, error: 'SonicPesa is unreachable' };
+  }
+}
+
+export async function sonicpesaCreateOrder(env: Env, input: SonicpesaCreateOrderInput): Promise<SonicpesaOrderResult> {
+  const posted = await sonicpesaPost(env, '/api/v1/payment/create_order', input);
+  if (!posted.ok) {
+    return { ok: false, error: posted.error };
+  }
+  const { res, raw } = posted;
   const apiError = sonicpesaApiError(raw, res.status);
   if (apiError && !res.ok) {
     return { ok: false, error: apiError, raw };
@@ -140,13 +169,11 @@ export async function sonicpesaCreateOrder(env: Env, input: SonicpesaCreateOrder
 }
 
 export async function sonicpesaOrderStatus(env: Env, orderId: string): Promise<SonicpesaOrderResult> {
-  const base = (env.SONICPESA_BASE_URL ?? DEFAULT_BASE).replace(/\/+$/, '');
-  const res = await fetch(`${base}/api/v1/payment/order_status`, {
-    method: 'POST',
-    headers: sonicHeaders(env),
-    body: JSON.stringify({ order_id: orderId }),
-  });
-  const raw = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+  const posted = await sonicpesaPost(env, '/api/v1/payment/order_status', { order_id: orderId });
+  if (!posted.ok) {
+    return { ok: false, error: posted.error };
+  }
+  const { res, raw } = posted;
   const apiError = sonicpesaApiError(raw, res.status);
   if (!res.ok) {
     return {

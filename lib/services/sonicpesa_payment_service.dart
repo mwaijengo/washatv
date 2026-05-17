@@ -34,9 +34,15 @@ class SonicpesaPaymentService {
         .timeout(const Duration(seconds: 35));
 
     final map = _decode(res);
+    if (res.statusCode == 500) {
+      throw SonicpesaPaymentException(
+        _userFacingMessage(map, res.statusCode, fallback: 'Imeshindikana kuanzisha malipo. Jaribu tena baada ya dakika moja.'),
+        statusCode: res.statusCode,
+      );
+    }
     if (res.statusCode == 503) {
       throw SonicpesaPaymentException(
-        'Malipo hayajasanidi kwenye seva. Wasiliana na msaada.',
+        _userFacingMessage(map, res.statusCode, fallback: 'Seva ya malipo haipatikani kwa sasa. Jaribu tena baada ya dakika moja.'),
         statusCode: res.statusCode,
       );
     }
@@ -119,12 +125,18 @@ class SonicpesaPaymentService {
   String _userFacingMessage(Map<String, dynamic> map, int? statusCode, {required String fallback}) {
     final raw = _rawServerMessage(map);
     if (raw == null) {
-      if (statusCode == 502 || statusCode == 503 || statusCode == 504) {
+      if (statusCode == 500 || statusCode == 502 || statusCode == 503 || statusCode == 504) {
         return 'Seva ya malipo haipatikani kwa sasa. Jaribu tena baada ya dakika moja.';
       }
       return fallback;
     }
     final lower = raw.toLowerCase();
+    if (lower.contains('internal server error') ||
+        lower.contains('fetch failed') ||
+        lower.contains('unreachable') ||
+        lower.contains('timed out')) {
+      return 'Seva ya malipo haipatikani kwa sasa. Jaribu tena baada ya dakika moja.';
+    }
     if (lower.contains('order_id') || lower.contains('sonicpesa')) {
       return 'Imeshindikana kuanzisha malipo. Hakikisha namba ya simu ni sahihi na jaribu tena.';
     }

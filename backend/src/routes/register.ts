@@ -307,74 +307,84 @@ export async function registerRoutes(
       return reply.code(503).send({ error: 'SonicPesa is not configured on server (SONICPESA_API_KEY)' });
     }
 
-    const b = req.body ?? {};
-    const deviceId = (b.device_id ?? '').trim();
-    const planKey = (b.plan_key ?? '').trim();
-    const userName = (b.user_name ?? '').trim() || 'Viewer';
-    const phoneRaw = (b.phone ?? '').trim();
-    const buyerPhone = normalizeTzPhone(phoneRaw);
+    try {
+      const b = req.body ?? {};
+      const deviceId = (b.device_id ?? '').trim();
+      const planKey = (b.plan_key ?? '').trim();
+      const userName = (b.user_name ?? '').trim() || 'Viewer';
+      const phoneRaw = (b.phone ?? '').trim();
+      const buyerPhone = normalizeTzPhone(phoneRaw);
 
-    if (!deviceId || !planKey) {
-      return reply.code(400).send({ error: 'device_id and plan_key are required' });
-    }
-    if (!buyerPhone) {
-      return reply.code(400).send({ error: 'phone must be a valid Tanzanian number (e.g. 07XXXXXXXX)' });
-    }
+      if (!deviceId || !planKey) {
+        return reply.code(400).send({ error: 'device_id and plan_key are required' });
+      }
+      if (!buyerPhone) {
+        return reply.code(400).send({ error: 'phone must be a valid Tanzanian number (e.g. 07XXXXXXXX)' });
+      }
 
-    const settings = await pool.query(`SELECT subscription_enabled FROM app_settings WHERE id = 1`);
-    const subEnabled = settings.rows[0]?.subscription_enabled;
-    if (subEnabled === false) {
-      return reply.code(403).send({ error: 'Subscriptions are disabled' });
-    }
+      const settings = await pool.query(`SELECT subscription_enabled FROM app_settings WHERE id = 1`);
+      const subEnabled = settings.rows[0]?.subscription_enabled;
+      if (subEnabled === false) {
+        return reply.code(403).send({ error: 'Subscriptions are disabled' });
+      }
 
-    const planRow = await pool.query(
-      `SELECT plan_key, name, price, duration_days, enabled FROM pricing_plans WHERE plan_key = $1`,
-      [planKey],
-    );
-    if (!planRow.rowCount) return reply.code(404).send({ error: 'plan not found' });
-    const plan = planRow.rows[0] as { price: number; enabled: boolean; name: string };
-    if (!plan.enabled) return reply.code(400).send({ error: 'plan is not available' });
+      const planRow = await pool.query(
+        `SELECT plan_key, name, price, duration_days, enabled FROM pricing_plans WHERE plan_key = $1`,
+        [planKey],
+      );
+      if (!planRow.rowCount) return reply.code(404).send({ error: 'plan not found' });
+      const plan = planRow.rows[0] as { price: number; enabled: boolean; name: string };
+      if (!plan.enabled) return reply.code(400).send({ error: 'plan is not available' });
 
-    const amount = Math.round(Number(plan.price));
-    if (amount <= 0) return reply.code(400).send({ error: 'invalid plan price' });
+      const amount = Math.round(Number(plan.price));
+      if (amount <= 0) return reply.code(400).send({ error: 'invalid plan price' });
 
-    const emailBase = deviceId.replace(/[^a-zA-Z0-9._-]/g, '').slice(0, 40) || 'viewer';
-    const buyerEmail = (b.buyer_email ?? '').trim() || `${emailBase}@washatv.app`;
+      const emailBase = deviceId.replace(/[^a-zA-Z0-9._-]/g, '').slice(0, 40) || 'viewer';
+      const buyerEmail = (b.buyer_email ?? '').trim() || `${emailBase}@washatv.app`;
 
-    const order = await sonicpesaCreateOrder(env, {
-      buyer_email: buyerEmail,
-      buyer_name: userName,
-      buyer_phone: buyerPhone,
-      amount,
-      currency: 'TZS',
-    });
+      const order = await sonicpesaCreateOrder(env, {
+        buyer_email: buyerEmail,
+        buyer_name: userName,
+        buyer_phone: buyerPhone,
+        amount,
+        currency: 'TZS',
+      });
 
-    if (!order.ok || !order.order_id) {
-      return reply.code(502).send({
-        error: 'Imeshindikana kuanzisha malipo. Hakikisha namba ya simu ni sahihi na jaribu tena.',
+      if (!order.ok || !order.order_id) {
+        const unreachable =
+          order.error?.toLowerCase().includes('unreachable') ||
+          order.error?.toLowerCase().includes('timed out');
+        return reply.code(unreachable ? 503 : 502).send({
+          error: 'Imeshindikana kuanzisha malipo. Hakikisha namba ya simu ni sahihi na jaribu tena.',
+        });
+      }
+
+      await upsertPendingSonicpesaTransaction(pool, {
+        deviceId,
+        userName,
+        phone: phoneRaw,
+        amount,
+        planKey,
+        orderId: order.order_id,
+        metadata: { reference: order.reference, initial_status: order.payment_status },
+      });
+
+      return {
+        ok: true,
+        order_id: order.order_id,
+        reference: order.reference ?? null,
+        amount,
+        currency: 'TZS',
+        plan_key: planKey,
+        payment_status: order.payment_status ?? 'PENDING',
+        message: 'Angalia simu yako na thibitisha malipo ya M-Pesa.',
+      };
+    } catch (e) {
+      req.log.error(e, 'SonicPesa initiate failed');
+      return reply.code(500).send({
+        error: 'Imeshindikana kuanzisha malipo. Jaribu tena baada ya dakika moja.',
       });
     }
-
-    await upsertPendingSonicpesaTransaction(pool, {
-      deviceId,
-      userName,
-      phone: phoneRaw,
-      amount,
-      planKey,
-      orderId: order.order_id,
-      metadata: { reference: order.reference, initial_status: order.payment_status },
-    });
-
-    return {
-      ok: true,
-      order_id: order.order_id,
-      reference: order.reference ?? null,
-      amount,
-      currency: 'TZS',
-      plan_key: planKey,
-      payment_status: order.payment_status ?? 'PENDING',
-      message: 'Angalia simu yako na thibitisha malipo ya M-Pesa.',
-    };
   });
 
   /** Poll SonicPesa order — completes premium when payment succeeds. */
@@ -385,6 +395,7 @@ export async function registerRoutes(
         return reply.code(503).send({ error: 'SonicPesa is not configured on server' });
       }
 
+      try {
       const deviceId = (req.body?.device_id ?? '').trim();
       const orderId = (req.body?.order_id ?? '').trim();
       if (!deviceId || !orderId) {
@@ -424,7 +435,10 @@ export async function registerRoutes(
 
       const remote = await sonicpesaOrderStatus(env, orderId);
       if (!remote.ok) {
-        return reply.code(502).send({
+        const unreachable =
+          remote.error?.toLowerCase().includes('unreachable') ||
+          remote.error?.toLowerCase().includes('timed out');
+        return reply.code(unreachable ? 503 : 502).send({
           error: 'Imeshindikana kuangalia hali ya malipo. Jaribu tena.',
         });
       }
@@ -479,6 +493,12 @@ export async function registerRoutes(
         completed: false,
         pending: true,
       };
+      } catch (e) {
+        req.log.error(e, 'SonicPesa status check failed');
+        return reply.code(500).send({
+          error: 'Imeshindikana kuangalia hali ya malipo. Jaribu tena.',
+        });
+      }
     },
   );
 
