@@ -3,7 +3,11 @@ import 'package:flutter/material.dart';
 import '../services/push_notification_service.dart';
 
 /// Same flow as Supasoka — ask once until OS notification permission is granted.
-Future<void> maybeShowWashaNotificationPermissionDialog(BuildContext context) async {
+Future<void> maybeShowWashaNotificationPermissionDialog(
+  BuildContext context, {
+  String? deviceId,
+  bool isPremium = false,
+}) async {
   final shouldAsk = await PushNotificationService.shouldShowPermissionPrompt();
   if (!shouldAsk || !context.mounted) return;
 
@@ -42,7 +46,7 @@ Future<void> maybeShowWashaNotificationPermissionDialog(BuildContext context) as
             ),
             const SizedBox(height: 12),
             const Text(
-              'Taarifa unazotuma kutoka Supasoka admin zitaonekana hapa pia — mechi, channel, na ujumbe wa akaunti.',
+              'Taarifa kutoka admin zitafika hata ukikaa wiki bila kufungua programu — hakikisha “Ruhusu” na usizime arifa za Washa TV kwenye mipangilio ya simu.',
               style: TextStyle(color: Color(0xFFD1D5DB), height: 1.45, fontSize: 13.5),
             ),
             const SizedBox(height: 16),
@@ -74,6 +78,9 @@ Future<void> maybeShowWashaNotificationPermissionDialog(BuildContext context) as
   );
 
   if (granted == true) {
-    await PushNotificationService.requestPermissionFromPrompt();
+    await PushNotificationService.requestPermissionFromPrompt(
+      deviceId: deviceId,
+      isPremium: isPremium,
+    );
   }
 }

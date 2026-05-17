@@ -4,10 +4,13 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/widgets.dart';
 
 import 'app.dart';
+import 'register_webview_stub.dart'
+    if (dart.library.js_interop) 'register_webview_web.dart';
 import 'services/push_notification_service.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  registerWebviewPlatform();
   runApp(const WashaApp());
   unawaited(_initializePushNotifications());
 }

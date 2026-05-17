@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Keep viewer identity (device id, name, subscription) across app updates and device backup. -->
+<full-backup-content>
+    <include domain="sharedpref" path="." />
+</full-backup-content>

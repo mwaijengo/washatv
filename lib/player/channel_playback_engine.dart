@@ -4,6 +4,8 @@ import 'package:video_player/video_player.dart';
 import 'package:webview_flutter/webview_flutter.dart';
 
 import '../models/channel.dart';
+import '../register_webview_stub.dart'
+    if (dart.library.js_interop) '../register_webview_web.dart' as wv_platform;
 import 'playback_http_headers.dart';
 import 'php_gateway_js.dart';
 import 'stream_url_classifier.dart';
@@ -32,7 +34,7 @@ class ChannelPlaybackSession {
       throw StateError('empty_stream');
     }
 
-    final preferWeb = forceWebView || _shouldUseWebView(url, drm);
+    final preferWeb = _canUseWebView && (forceWebView || _shouldUseWebView(url, drm));
     if (preferWeb) {
       final web = await _openWebView(url);
       return ChannelPlaybackSession._(web: web, useWebView: true);
@@ -42,13 +44,15 @@ class ChannelPlaybackSession {
       final video = await _openNativeVideo(url);
       return ChannelPlaybackSession._(video: video, useWebView: false);
     } catch (e) {
-      if (!forceWebView) {
+      if (_canUseWebView && !forceWebView) {
         final web = await _openWebView(url);
         return ChannelPlaybackSession._(web: web, useWebView: true);
       }
       rethrow;
     }
   }
+
+  static bool get _canUseWebView => wv_platform.isWebViewPlatformReady;
 
   static bool _shouldUseWebView(String url, ChannelDrm drm) {
     if (drm == ChannelDrm.clearkey || drm == ChannelDrm.widevine) return true;

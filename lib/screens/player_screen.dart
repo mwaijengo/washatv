@@ -229,7 +229,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
     } catch (e) {
       if (kDebugMode) debugPrint('Washa playback: $e');
       if (!mounted || token != _loadToken) return;
-      if (!forceWebView && !_webFallbackTried) {
+      if (!kIsWeb && !forceWebView && !_webFallbackTried) {
         _webFallbackTried = true;
         await _startPlayback(ch, forceWebView: true);
         return;

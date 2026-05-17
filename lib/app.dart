@@ -114,16 +114,24 @@ class _WashaAppState extends State<WashaApp> with WidgetsBindingObserver {
     unawaited(_syncPushTopics());
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted || bootLoading) return;
-      unawaited(maybeShowWashaNotificationPermissionDialog(context));
+      unawaited(
+        maybeShowWashaNotificationPermissionDialog(
+          context,
+          deviceId: deviceId,
+          isPremium: premium,
+        ),
+      );
     });
   }
 
   Future<void> _syncPushTopics() async {
+    if (deviceId.isEmpty) return;
     try {
-      await PushNotificationService.syncAudienceTopics(isPremium: premium);
-      if (deviceId.isNotEmpty) {
-        await PushNotificationService.syncDirectUserTopic(deviceId);
-      }
+      await PushNotificationService.ensureRegistered(
+        deviceId: deviceId,
+        isPremium: premium,
+        api: api,
+      );
     } catch (e, st) {
       debugPrint('Washa push topics: $e\n$st');
     }
@@ -132,7 +140,7 @@ class _WashaAppState extends State<WashaApp> with WidgetsBindingObserver {
   Future<void> _init() async {
     var name = await storage.getName();
     var subEndLocal = await storage.getSubscriptionEnd();
-    final dev = await storage.getOrCreateDeviceId();
+    final dev = await storage.ensureDeviceIdPersisted();
     final localPlans = await loadUserPlans();
     final localWa = await storage.getSupportWhatsapp();
     var fetchedPlans = localPlans;
@@ -429,9 +437,18 @@ class _WashaAppState extends State<WashaApp> with WidgetsBindingObserver {
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
+      unawaited(_reconcileDeviceIdFromStorage());
       unawaited(_syncFromServer(silent: true, forceFull: true));
       unawaited(_syncViewerProfileFromServer());
     }
+  }
+
+  /// Keeps the same device id after app updates / OS restore (never rotate silently).
+  Future<void> _reconcileDeviceIdFromStorage() async {
+    final id = await storage.ensureDeviceIdPersisted();
+    if (!mounted || id.isEmpty) return;
+    if (id != deviceId) setState(() => deviceId = id);
+    unawaited(_syncPushTopics());
   }
 
   @override
@@ -572,13 +589,7 @@ class _WashaAppState extends State<WashaApp> with WidgetsBindingObserver {
         await _syncViewerProfileFromServer();
       } catch (_) {}
 
-      if (!mounted) return;
-      setState(() {
-        paymentPhase = SonicpesaPaymentPhase.success;
-        subscriptionPaymentSuccess = true;
-      });
-      await Future.delayed(const Duration(milliseconds: 1400));
-      if (mounted) setState(() => paymentOverlayOpen = false);
+      await _finalizePaymentSuccess();
     } on SonicpesaPaymentException catch (e) {
       if (!mounted) return;
       setState(() {
@@ -615,8 +626,37 @@ class _WashaAppState extends State<WashaApp> with WidgetsBindingObserver {
     final end = await _resolvePremiumEndAfterPayment(fromStatus: statusUntil);
     await storage.setSubscriptionEnd(end);
     if (!mounted) return;
-    setState(() => subEnd = end);
+    setState(() {
+      subEnd = end;
+      _premiumPlanLabel = selectedPlan.name;
+      _premiumAccessSource = 'payment';
+    });
     unawaited(_syncPushTopics());
+  }
+
+  /// Brief overlay success, then premium status on Fungua zote (no stuck “Malipo Tayari!” screen).
+  Future<void> _finalizePaymentSuccess() async {
+    if (!mounted) return;
+    setState(() {
+      paymentPhase = SonicpesaPaymentPhase.success;
+      subscriptionPaymentSuccess = true;
+    });
+    await Future.delayed(const Duration(milliseconds: 1100));
+    if (!mounted) return;
+    setState(() => paymentOverlayOpen = false);
+    await Future.delayed(const Duration(seconds: 4));
+    if (!mounted) return;
+    setState(() => subscriptionPaymentSuccess = false);
+  }
+
+  void _dismissPaymentOverlayToStatus() {
+    setState(() {
+      paymentOverlayOpen = false;
+      subscriptionPaymentSuccess = true;
+    });
+    Future.delayed(const Duration(seconds: 4), () {
+      if (mounted) setState(() => subscriptionPaymentSuccess = false);
+    });
   }
 
   Future<void> _runSonicpesaPayment({required String phone, required String name}) async {
@@ -683,15 +723,7 @@ class _WashaAppState extends State<WashaApp> with WidgetsBindingObserver {
             // Payment already succeeded — sync failures must not show as payment errors.
           }
 
-          if (!mounted) return;
-          setState(() {
-            paymentPhase = SonicpesaPaymentPhase.success;
-            subscriptionPaymentSuccess = true;
-          });
-          await Future.delayed(const Duration(milliseconds: 1400));
-          if (mounted) {
-            setState(() => paymentOverlayOpen = false);
-          }
+          await _finalizePaymentSuccess();
           return;
         }
 
@@ -813,6 +845,7 @@ class _WashaAppState extends State<WashaApp> with WidgetsBindingObserver {
                       errorMessage: paymentError,
                       onCancel: _cancelPaymentOverlay,
                       onRetry: paymentPhase == SonicpesaPaymentPhase.failed ? () => unawaited(_retryPayment()) : null,
+                      onContinue: paymentPhase == SonicpesaPaymentPhase.success ? _dismissPaymentOverlayToStatus : null,
                     ),
                 ],
               ),

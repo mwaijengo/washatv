@@ -1,9 +1,28 @@
+import 'dart:math';
+
+import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+/// Local persistence for viewer identity and subscription.
+///
+/// **Device ID** is created once and stored in SharedPreferences. It survives
+/// normal app updates on Android/iOS/Web (same install / same site origin).
+/// Do not rename [_deviceIdKey] — that would orphan existing users.
 class StorageService {
   static const _nameKey = 'washatvUserName';
   static const _subEndKey = 'washatvSubEnd';
   static const _deviceIdKey = 'washatvDeviceId';
+  static const _deviceIdBackupKey = 'washatvDeviceId_backup';
+
+  /// Older builds — read once and migrate to [_deviceIdKey].
+  static const _legacyDeviceIdKeys = <String>[
+    'device_id',
+    'washatv_device_id',
+    'viewer_device_id',
+  ];
+
+  static final RegExp _deviceIdPattern = RegExp(r'^WTV-[A-Z0-9]{4}-[A-Z0-9]{4,32}$');
+
   /// Written by admin Settings; read by the viewer app Profile WhatsApp row.
   static const supportWhatsappPrefsKey = 'washatvSupportWhatsapp';
 
@@ -33,17 +52,68 @@ class StorageService {
     await p.setString(_subEndKey, value.toIso8601String());
   }
 
+  /// Stable viewer id for API + premium. Never rotated after first save.
   Future<String> getOrCreateDeviceId() async {
     final p = await SharedPreferences.getInstance();
-    final saved = p.getString(_deviceIdKey);
-    if (saved != null && saved.isNotEmpty) return saved;
-    const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
-    final r = DateTime.now().microsecondsSinceEpoch;
-    String next(int add) => chars[(r + add) % chars.length];
-    final id = 'WTV-${next(1)}${next(2)}${next(3)}${next(4)}-'
-        '${next(5)}${next(6)}${next(7)}${next(8)}';
-    await p.setString(_deviceIdKey, id);
+
+    final primary = _normalizeDeviceId(p.getString(_deviceIdKey));
+    if (primary != null) {
+      await _persistDeviceId(p, primary);
+      return primary;
+    }
+
+    final backup = _normalizeDeviceId(p.getString(_deviceIdBackupKey));
+    if (backup != null) {
+      await _persistDeviceId(p, backup);
+      return backup;
+    }
+
+    for (final legacyKey in _legacyDeviceIdKeys) {
+      final legacy = _normalizeDeviceId(p.getString(legacyKey));
+      if (legacy != null) {
+        await _persistDeviceId(p, legacy);
+        return legacy;
+      }
+    }
+
+    final id = _generateDeviceId();
+    await _persistDeviceId(p, id);
+    if (kDebugMode) {
+      debugPrint('WASHA: created new device id $id (first launch on this install)');
+    }
     return id;
+  }
+
+  /// Re-read storage and repair primary/backup copies (e.g. after OS restore).
+  Future<String> ensureDeviceIdPersisted() => getOrCreateDeviceId();
+
+  Future<void> _persistDeviceId(SharedPreferences p, String id) async {
+    await p.setString(_deviceIdKey, id);
+    await p.setString(_deviceIdBackupKey, id);
+    for (final legacyKey in _legacyDeviceIdKeys) {
+      final existing = p.getString(legacyKey);
+      if (existing != id) {
+        await p.setString(legacyKey, id);
+      }
+    }
+  }
+
+  String? _normalizeDeviceId(String? raw) {
+    if (raw == null) return null;
+    final id = raw.trim().toUpperCase();
+    if (id.isEmpty) return null;
+    if (_deviceIdPattern.hasMatch(id)) return id;
+    // Accept legacy ids from very old builds (alphanumeric + dashes).
+    if (RegExp(r'^[A-Z0-9][A-Z0-9._-]{7,63}$').hasMatch(id)) return id;
+    return null;
+  }
+
+  String _generateDeviceId() {
+    const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+    final r = Random.secure();
+    String seg(int len) =>
+        List.generate(len, (_) => chars[r.nextInt(chars.length)]).join();
+    return 'WTV-${seg(4)}-${seg(8)}';
   }
 
   /// Raw number as saved by admin (may include spaces/+). Empty if not configured.

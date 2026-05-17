@@ -52,6 +52,7 @@ class SubscriptionScreen extends StatefulWidget {
     String? errorMessage,
     required VoidCallback onCancel,
     VoidCallback? onRetry,
+    VoidCallback? onContinue,
   }) {
     final isFailed = phase == SonicpesaPaymentPhase.failed || phase == SonicpesaPaymentPhase.cancelled;
     final isSuccess = phase == SonicpesaPaymentPhase.success;
@@ -129,6 +130,16 @@ class SubscriptionScreen extends StatefulWidget {
                       ),
                     ],
                     const SizedBox(height: 20),
+                    if (isSuccess && onContinue != null)
+                      FilledButton(
+                        onPressed: onContinue,
+                        style: FilledButton.styleFrom(
+                          backgroundColor: const Color(0xFF22C55E),
+                          foregroundColor: Colors.white,
+                          minimumSize: const Size(double.infinity, 46),
+                        ),
+                        child: const Text('Angalia hali ya akaunti', style: TextStyle(fontWeight: FontWeight.w800)),
+                      ),
                     if (isFailed && onRetry != null)
                       FilledButton.icon(
                         onPressed: onRetry,
@@ -139,7 +150,7 @@ class SubscriptionScreen extends StatefulWidget {
                           minimumSize: const Size(double.infinity, 46),
                         ),
                       ),
-                    if (!isSuccess || onRetry != null) const SizedBox(height: 8),
+                    if (!isSuccess || onRetry != null || onContinue != null) const SizedBox(height: 8),
                     if (!isSuccess)
                       TextButton(
                         onPressed: onCancel,
@@ -172,8 +183,6 @@ class SubscriptionScreen extends StatefulWidget {
 }
 
 class _SubscriptionScreenState extends State<SubscriptionScreen> {
-  bool get success => widget.paymentSucceeded || _localSuccess;
-  bool _localSuccess = false;
   bool hasSelectedPlan = false;
   final phone = TextEditingController();
   final name = TextEditingController();
@@ -192,56 +201,30 @@ class _SubscriptionScreenState extends State<SubscriptionScreen> {
     super.dispose();
   }
 
-  @override
-  void didUpdateWidget(SubscriptionScreen oldWidget) {
-    super.didUpdateWidget(oldWidget);
-    if (widget.paymentSucceeded && !_localSuccess) {
-      _localSuccess = true;
-    }
+  bool get _showPremiumStatus {
+    if (widget.premium) return true;
+    final end = widget.endDate;
+    return widget.paymentSucceeded && end != null && end.isAfter(DateTime.now());
   }
 
   @override
   Widget build(BuildContext context) {
-    if (success) {
-      return Center(
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Container(
-              width: 92,
-              height: 92,
-              decoration: BoxDecoration(
-                color: const Color(0xFF22C55E),
-                shape: BoxShape.circle,
-                boxShadow: [
-                  BoxShadow(
-                    color: const Color(0xFF22C55E).withValues(alpha: 0.35),
-                    blurRadius: 34,
-                    spreadRadius: 2,
-                  ),
-                ],
-              ),
-              child: const Icon(Icons.check, size: 46, color: Colors.white),
-            ),
-            const SizedBox(height: 16),
-            const Text('Malipo Tayari!', style: TextStyle(fontSize: 34, fontWeight: FontWeight.w900, fontStyle: FontStyle.italic)),
-            const SizedBox(height: 6),
-            const Text('Hongera, sasa unaweza ku-stream channels zote', style: TextStyle(color: Color(0xFF9CA3AF))),
-          ],
-        ),
-      );
-    }
-
-    if (widget.premium) {
+    if (_showPremiumStatus) {
       return SingleChildScrollView(
         padding: const EdgeInsets.fromLTRB(18, 18, 18, 120),
         child: ConstrainedBox(
           constraints: const BoxConstraints(maxWidth: 520),
-          child: _PremiumAccountStatusPanel(
-            userName: widget.userName,
-            endDate: widget.endDate,
-            planLabel: widget.planLabel,
-            accessSource: widget.accessSource,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              if (widget.paymentSucceeded) const _PaymentSuccessBanner(),
+              _PremiumAccountStatusPanel(
+                userName: widget.userName,
+                endDate: widget.endDate,
+                planLabel: widget.planLabel,
+                accessSource: widget.accessSource,
+              ),
+            ],
           ),
         ),
       );
@@ -935,6 +918,55 @@ class _AudioWaveBars extends StatelessWidget {
             ),
           ),
       ],
+    );
+  }
+}
+
+/// Short-lived banner after payment — then premium status stays visible.
+class _PaymentSuccessBanner extends StatelessWidget {
+  const _PaymentSuccessBanner();
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      margin: const EdgeInsets.only(bottom: 14),
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(16),
+        gradient: const LinearGradient(
+          colors: [Color(0xFF14532D), Color(0xFF166534)],
+        ),
+        border: Border.all(color: const Color(0xFF4ADE80)),
+        boxShadow: [
+          BoxShadow(
+            color: const Color(0xFF22C55E).withValues(alpha: 0.2),
+            blurRadius: 16,
+            offset: const Offset(0, 6),
+          ),
+        ],
+      ),
+      child: const Row(
+        children: [
+          Icon(Icons.check_circle_rounded, color: Color(0xFF4ADE80), size: 28),
+          SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'Malipo yamekamilika!',
+                  style: TextStyle(fontWeight: FontWeight.w800, fontSize: 15, color: Color(0xFFF0FDF4)),
+                ),
+                SizedBox(height: 2),
+                Text(
+                  'Akaunti yako ya premium iko hai hapa chini.',
+                  style: TextStyle(fontSize: 12.5, height: 1.35, color: Color(0xFFBBF7D0)),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
     );
   }
 }

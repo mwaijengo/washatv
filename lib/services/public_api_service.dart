@@ -1,6 +1,7 @@
 import 'dart:convert';
 
-import 'package:flutter/foundation.dart' show debugPrint, kDebugMode, kIsWeb;
+import 'package:flutter/foundation.dart'
+    show debugPrint, defaultTargetPlatform, kDebugMode, kIsWeb;
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -527,6 +528,32 @@ class PublicApiService {
       };
 
   /// Registers device on server. Omits generic placeholder names so admin renames are kept.
+  /// Saves FCM token for this device so admin pushes stay deliverable after long idle periods.
+  Future<void> registerFcmToken({
+    required String deviceId,
+    required String fcmToken,
+  }) async {
+    final id = deviceId.trim();
+    final token = fcmToken.trim();
+    if (id.isEmpty || token.isEmpty) return;
+
+    final uri = Uri.parse('$baseUrl/api/v1/public/push/register');
+    final res = await http
+        .post(
+          uri,
+          headers: const {'Content-Type': 'application/json'},
+          body: jsonEncode({
+            'device_id': id,
+            'fcm_token': token,
+            'platform': defaultTargetPlatform.name,
+          }),
+        )
+        .timeout(const Duration(seconds: 15));
+    if (res.statusCode < 200 || res.statusCode >= 300) {
+      throw Exception('FCM register failed: ${res.statusCode}');
+    }
+  }
+
   Future<void> syncViewer({
     required String deviceId,
     String? name,

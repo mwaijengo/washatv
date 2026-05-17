@@ -254,6 +254,32 @@ export async function registerRoutes(
     },
   );
 
+  /** Persist FCM token per device — survives weeks without opening the app (topics + token on server). */
+  app.post<{ Body: { device_id?: string; fcm_token?: string; platform?: string } }>(
+    '/api/v1/public/push/register',
+    async (req, reply) => {
+      const deviceId = (req.body?.device_id ?? '').trim();
+      const fcmToken = (req.body?.fcm_token ?? '').trim();
+      if (!deviceId || !fcmToken) {
+        return reply.code(400).send({ error: 'device_id and fcm_token are required' });
+      }
+      if (fcmToken.length < 20) {
+        return reply.code(400).send({ error: 'invalid fcm_token' });
+      }
+
+      const userId = `USR-${nanoid(10)}`;
+      await pool.query(
+        `INSERT INTO users (id, name, phone, device_id, status, subscription, fcm_token, fcm_updated_at, created_at)
+         VALUES ($1, 'Viewer', 'N/A', $2, 'active', 'free', $3, now(), now())
+         ON CONFLICT (device_id) DO UPDATE SET
+           fcm_token = EXCLUDED.fcm_token,
+           fcm_updated_at = now()`,
+        [userId, deviceId, fcmToken],
+      );
+      return { ok: true };
+    },
+  );
+
   app.post<{
     Body: {
       device_id?: string;
