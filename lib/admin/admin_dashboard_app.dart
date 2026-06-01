@@ -1904,7 +1904,13 @@ class _AdminScaffoldState extends State<AdminScaffold> {
                     icon: Icons.remove_circle_outline,
                     label: 'Ondoa premium',
                     color: const Color(0xFFEF4444),
-                    onTap: () => _revokeAllPremiumAccess(u),
+                    onTap: () async {
+                      try {
+                        await _revokeAllPremiumAccess(u);
+                      } catch (e) {
+                        if (mounted) _showToast('Imeshindwa: $e', _ToastType.error);
+                      }
+                    },
                   ),
               ],
             ),
@@ -2047,8 +2053,9 @@ class _AdminScaffoldState extends State<AdminScaffold> {
     if (status.isNotEmpty) u.status = status;
     final sub = _s(j['subscription']);
     if (sub.isNotEmpty) u.subscription = sub;
-    u.premiumUntil = _dt(j['premium_until']);
-    u.adminAccessUntil = _dt(j['admin_access_until']);
+    // Always overwrite dates — null from server means access was removed.
+    if (j.containsKey('premium_until')) u.premiumUntil = _dt(j['premium_until']);
+    if (j.containsKey('admin_access_until')) u.adminAccessUntil = _dt(j['admin_access_until']);
   }
 
   Future<void> _syncUserToBackend(AdminUser u, Map<String, dynamic> patch) async {
@@ -2071,7 +2078,10 @@ class _AdminScaffoldState extends State<AdminScaffold> {
   }
 
   Future<void> _revokeAllPremiumAccess(AdminUser u, {bool confirm = true}) async {
-    if (!_hasAdminSession) return;
+    if (!_hasAdminSession) {
+      _showToast('Hakuna kikao cha msimamizi', _ToastType.error);
+      return;
+    }
     if (confirm) {
       final ok = await _showDeleteConfirmModal(
         title: 'Ondoa ufikiaji wa premium?',
@@ -2081,26 +2091,35 @@ class _AdminScaffoldState extends State<AdminScaffold> {
       );
       if (!ok || !mounted) return;
     }
-    final res = await http
-        .post(
-          Uri.parse('$_apiBase/api/v1/admin/users/${u.id}/revoke-premium'),
-          headers: _adminHeaders(),
-        )
-        .timeout(const Duration(seconds: 12));
-    if (res.statusCode < 200 || res.statusCode >= 300) {
-      throw Exception('revoke failed ${res.statusCode}');
-    }
-    final map = jsonDecode(res.body) as Map<String, dynamic>;
-    final userJson = map['user'];
-    setState(() {
-      u.subscription = 'free';
-      u.premiumUntil = null;
-      u.adminAccessUntil = null;
-      if (userJson is Map) {
-        _applyServerUserFields(u, userJson.cast<String, dynamic>());
+    try {
+      final res = await http
+          .post(
+            Uri.parse('$_apiBase/api/v1/admin/users/${u.id}/revoke-premium'),
+            headers: _adminHeadersForDelete(),
+          )
+          .timeout(const Duration(seconds: 15));
+      if (!mounted) return;
+      if (res.statusCode < 200 || res.statusCode >= 300) {
+        final body = res.body.trim();
+        final detail = body.isNotEmpty && body.length < 200 ? body : 'HTTP ${res.statusCode}';
+        _showToast('Imeshindwa kuondoa premium: $detail', _ToastType.error);
+        return;
       }
-    });
-    _showToast('Premium imeondolewa', _ToastType.success);
+      final map = jsonDecode(res.body) as Map<String, dynamic>;
+      final userJson = map['user'];
+      setState(() {
+        u.subscription = 'free';
+        u.premiumUntil = null;
+        u.adminAccessUntil = null;
+        if (userJson is Map) {
+          _applyServerUserFields(u, userJson.cast<String, dynamic>());
+        }
+      });
+      _showToast('Premium imeondolewa kwa ${u.name}', _ToastType.success);
+    } on Exception catch (e) {
+      if (!mounted) return;
+      _showToast('Imeshindwa: $e', _ToastType.error);
+    }
   }
 
   Future<void> _applyAdminDuration(AdminUser u, Duration add) async {

@@ -23,9 +23,19 @@ import 'services/storage_service.dart';
 import 'services/subscription_service.dart';
 import 'theme/app_theme.dart';
 import 'widgets/bottom_nav.dart';
+import 'widgets/no_internet_modal.dart';
 import 'widgets/notification_permission_dialog.dart';
 
 enum AppScreen { home, player, categories, profile, subscription }
+
+const _secureChannel = MethodChannel('com.washatv/secure');
+
+Future<void> _applyScreenSecurity(AppScreen screen) async {
+  final secure = screen != AppScreen.profile;
+  try {
+    await _secureChannel.invokeMethod('setSecure', {'secure': secure});
+  } catch (_) {}
+}
 
 class WashaApp extends StatefulWidget {
   const WashaApp({super.key});
@@ -73,6 +83,8 @@ class _WashaAppState extends State<WashaApp> with WidgetsBindingObserver {
   String? bootstrapError;
   /// Last exception from bootstrap (debug/profile only — shown in banner to diagnose emulator/network).
   String? bootstrapFailureDetail;
+  bool _noInternetVisible = false;
+  bool _noInternetRetrying = false;
   Timer? ticker;
   Timer? carouselTimer;
   Timer? configPoller;
@@ -96,6 +108,7 @@ class _WashaAppState extends State<WashaApp> with WidgetsBindingObserver {
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    unawaited(_applyScreenSecurity(current));
     _init();
     ticker = Timer.periodic(const Duration(seconds: 1), (_) => setState(() {}));
     carouselTimer = Timer.periodic(const Duration(seconds: 5), (_) {
@@ -264,6 +277,9 @@ class _WashaAppState extends State<WashaApp> with WidgetsBindingObserver {
             )
           : selectedPlan;
       bootLoading = false;
+      // Show no-internet modal only when all retries failed AND no cached data.
+      _noInternetVisible = fetchErr != null && !kIsWeb;
+      _noInternetRetrying = false;
     });
     _startLiveSyncAfterBoot();
   }
@@ -468,6 +484,7 @@ class _WashaAppState extends State<WashaApp> with WidgetsBindingObserver {
         _playerBackHandler = null;
       }
     });
+    unawaited(_applyScreenSecurity(s));
     unawaited(_pollConfigMeta());
     if (s == AppScreen.subscription) {
       unawaited(_syncFromServer(silent: true, forceFull: true));
@@ -830,7 +847,7 @@ class _WashaAppState extends State<WashaApp> with WidgetsBindingObserver {
                             backgroundColor: Color(0x33FFFFFF),
                             color: Color(0xFF6366F1),
                           ),
-                        if (bootstrapError != null) _bootstrapErrorBanner(),
+                        if (bootstrapError != null && !_noInternetVisible) _bootstrapErrorBanner(),
                         Expanded(child: _buildScreen()),
                         if (current != AppScreen.player)
                           BottomNav(
@@ -851,6 +868,13 @@ class _WashaAppState extends State<WashaApp> with WidgetsBindingObserver {
                       onRetry: paymentPhase == SonicpesaPaymentPhase.failed ? () => unawaited(_retryPayment()) : null,
                       onContinue: paymentPhase == SonicpesaPaymentPhase.success ? _dismissPaymentOverlayToStatus : null,
                     ),
+                  if (_noInternetVisible)
+                    Positioned.fill(
+                      child: NoInternetModal(
+                        isRetrying: _noInternetRetrying,
+                        onRetry: () => unawaited(_retryFromNoInternetModal()),
+                      ),
+                    ),
                 ],
               ),
         ),
@@ -866,6 +890,22 @@ class _WashaAppState extends State<WashaApp> with WidgetsBindingObserver {
       bootLoading = true;
     });
     await _init();
+  }
+
+  Future<void> _retryFromNoInternetModal() async {
+    if (_noInternetRetrying) return;
+    setState(() => _noInternetRetrying = true);
+    api.resetLightweightPollBackoff();
+    setState(() {
+      bootstrapError = null;
+      bootstrapFailureDetail = null;
+      bootLoading = false;
+    });
+    await _init();
+    if (mounted && !_noInternetVisible) return;
+    // If _init succeeded, _noInternetVisible is already false via setState in _init.
+    // If still failing, keep modal open and reset spinner.
+    if (mounted) setState(() => _noInternetRetrying = false);
   }
 
   Widget _bootstrapErrorBanner() {
@@ -1086,6 +1126,7 @@ class _WashaAppState extends State<WashaApp> with WidgetsBindingObserver {
       selectedChannel = c;
       current = AppScreen.player;
     });
+    unawaited(_applyScreenSecurity(AppScreen.player));
   }
 }
 

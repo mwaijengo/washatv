@@ -1023,6 +1023,15 @@ export async function registerRoutes(
       if (b.subscription !== undefined) {
         sets.push(`subscription = $${i++}`);
         vals.push(b.subscription);
+        // When explicitly revoking to free, also wipe premium windows unless caller overrides them.
+        if (b.subscription === 'free') {
+          if (b.premium_until === undefined) {
+            sets.push(`premium_until = NULL`);
+          }
+          if (b.admin_access_until === undefined) {
+            sets.push(`admin_access_until = NULL`);
+          }
+        }
       }
       if (b.admin_access_until !== undefined) {
         sets.push(`admin_access_until = $${i++}`);
@@ -1078,7 +1087,19 @@ export async function registerRoutes(
       if (!r.rowCount) return reply.code(404).send({ error: 'user not found' });
       const v = await bumpConfigVersion(pool);
       sse.notifyConfigVersion(v);
-      const user = r.rows[0] as { admin_access_until: Date | null };
+      const user = r.rows[0] as { name: string; admin_access_until: Date | null };
+      const adminName = (() => {
+        try { return (req.user as { sub?: string })?.sub ?? 'admin'; } catch { return 'admin'; }
+      })();
+      pool.query(
+        `INSERT INTO admin_logs (id, admin_name, action, details, created_at) VALUES ($1,$2,$3,$4,now())`,
+        [
+          `LOG-${nanoid(10)}`,
+          adminName,
+          'grant_premium',
+          `Granted ${Math.round(durationMs / 60000)} min premium to "${user.name}" (id:${id}); expires ${user.admin_access_until ? new Date(user.admin_access_until).toISOString() : 'n/a'}`,
+        ],
+      ).catch(() => {});
       return {
         ok: true,
         version: v,
@@ -1093,7 +1114,7 @@ export async function registerRoutes(
   /** Remove all premium access (paid window, admin grant, legacy subscription flag). */
   app.post<{ Params: { id: string } }>(
     '/api/v1/admin/users/:id/revoke-premium',
-    { preHandler: adminPre },
+    { preHandler: adminPre, attachValidation: true },
     async (req, reply) => {
       const id = req.params.id;
       const r = await pool.query(
@@ -1106,6 +1127,19 @@ export async function registerRoutes(
       if (!r.rowCount) return reply.code(404).send({ error: 'user not found' });
       const v = await bumpConfigVersion(pool);
       sse.notifyConfigVersion(v);
+      const revokedUser = r.rows[0] as { name: string };
+      const adminName = (() => {
+        try { return (req.user as { sub?: string })?.sub ?? 'admin'; } catch { return 'admin'; }
+      })();
+      pool.query(
+        `INSERT INTO admin_logs (id, admin_name, action, details, created_at) VALUES ($1,$2,$3,$4,now())`,
+        [
+          `LOG-${nanoid(10)}`,
+          adminName,
+          'revoke_premium',
+          `Revoked all premium access for "${revokedUser.name}" (id:${id})`,
+        ],
+      ).catch(() => {});
       return { ok: true, version: v, user: r.rows[0] };
     },
   );
