@@ -11,6 +11,8 @@ class PlayerControls extends StatelessWidget {
     this.positionLabel = '0:00',
     this.durationLabel = 'LIVE',
     this.isFullscreen = false,
+    this.visible = true,
+    this.onUserInteraction,
   });
 
   final bool playing;
@@ -21,6 +23,8 @@ class PlayerControls extends StatelessWidget {
   final String positionLabel;
   final String durationLabel;
   final bool isFullscreen;
+  final bool visible;
+  final VoidCallback? onUserInteraction;
 
   @override
   Widget build(BuildContext context) {
@@ -28,54 +32,73 @@ class PlayerControls extends StatelessWidget {
       left: 0,
       right: 0,
       bottom: 0,
-      child: Container(
-        padding: const EdgeInsets.fromLTRB(16, 32, 16, 12),
-        decoration: const BoxDecoration(
-          gradient: LinearGradient(
-            begin: Alignment.bottomCenter,
-            end: Alignment.topCenter,
-            colors: [Color(0xE6000000), Colors.transparent],
-          ),
-        ),
-        child: Column(
-          children: [
-            GestureDetector(
-              onTapDown: (d) {
-                final box = context.findRenderObject() as RenderBox?;
-                if (box == null) return;
-                final local = box.globalToLocal(d.globalPosition);
-                onSeek((local.dx / box.size.width).clamp(0, 1));
-              },
-              child: ClipRRect(
-                borderRadius: BorderRadius.circular(3),
-                child: LinearProgressIndicator(
-                  minHeight: 4,
-                  value: progress,
-                  backgroundColor: const Color(0x33FFFFFF),
-                  valueColor: const AlwaysStoppedAnimation(Color(0xFFEF4444)),
+      child: IgnorePointer(
+        ignoring: !visible,
+        child: AnimatedOpacity(
+          opacity: visible ? 1 : 0,
+          duration: const Duration(milliseconds: 220),
+          curve: Curves.easeOut,
+          child: GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            onTap: onUserInteraction,
+            child: Container(
+              padding: const EdgeInsets.fromLTRB(16, 32, 16, 12),
+              decoration: const BoxDecoration(
+                gradient: LinearGradient(
+                  begin: Alignment.bottomCenter,
+                  end: Alignment.topCenter,
+                  colors: [Color(0xE6000000), Colors.transparent],
                 ),
               ),
+              child: Column(
+                children: [
+                  GestureDetector(
+                    onTapDown: (d) {
+                      onUserInteraction?.call();
+                      final box = context.findRenderObject() as RenderBox?;
+                      if (box == null) return;
+                      final local = box.globalToLocal(d.globalPosition);
+                      onSeek((local.dx / box.size.width).clamp(0, 1));
+                    },
+                    child: ClipRRect(
+                      borderRadius: BorderRadius.circular(3),
+                      child: LinearProgressIndicator(
+                        minHeight: 4,
+                        value: progress,
+                        backgroundColor: const Color(0x33FFFFFF),
+                        valueColor: const AlwaysStoppedAnimation(Color(0xFFEF4444)),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 10),
+                  Row(
+                    children: [
+                      IconButton(
+                        onPressed: () {
+                          onUserInteraction?.call();
+                          onPlay();
+                        },
+                        icon: Icon(playing ? Icons.pause : Icons.play_arrow),
+                      ),
+                      Text(positionLabel, style: const TextStyle(fontSize: 12)),
+                      const SizedBox(width: 8),
+                      const Text('/', style: TextStyle(color: Color(0xFF6B7280))),
+                      const SizedBox(width: 8),
+                      Text(durationLabel, style: const TextStyle(color: Color(0xFF6B7280), fontSize: 12)),
+                      const Spacer(),
+                      IconButton(
+                        onPressed: () {
+                          onUserInteraction?.call();
+                          onToggleFullscreen();
+                        },
+                        icon: Icon(isFullscreen ? Icons.fullscreen_exit : Icons.fullscreen, size: 22),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
             ),
-            const SizedBox(height: 10),
-            Row(
-              children: [
-                IconButton(
-                  onPressed: onPlay,
-                  icon: Icon(playing ? Icons.pause : Icons.play_arrow),
-                ),
-                Text(positionLabel, style: const TextStyle(fontSize: 12)),
-                const SizedBox(width: 8),
-                const Text('/', style: TextStyle(color: Color(0xFF6B7280))),
-                const SizedBox(width: 8),
-                Text(durationLabel, style: const TextStyle(color: Color(0xFF6B7280), fontSize: 12)),
-                const Spacer(),
-                IconButton(
-                  onPressed: onToggleFullscreen,
-                  icon: Icon(isFullscreen ? Icons.fullscreen_exit : Icons.fullscreen, size: 22),
-                ),
-              ],
-            ),
-          ],
+          ),
         ),
       ),
     );

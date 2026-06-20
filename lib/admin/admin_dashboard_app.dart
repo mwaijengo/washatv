@@ -111,6 +111,8 @@ class _AdminScaffoldState extends State<AdminScaffold> {
   late List<AdminLog> _logs;
   late Map<String, PricingPlan> _pricing;
   AdminDashboardStats? _dashboardStats;
+  DateTime? _statsFetchedAt;
+  bool _statsRefreshFailed = false;
   final _settings = AdminSettings();
   /// Field initializers run on first read — survives hot reload when `initState` does not re-run.
   late final TextEditingController _settingsSiteName = TextEditingController(text: _settings.siteName);
@@ -122,6 +124,7 @@ class _AdminScaffoldState extends State<AdminScaffold> {
   bool _sidebarOpen = false;
   final List<_Toast> _toasts = [];
   Timer? _adminRefreshTimer;
+  Timer? _statsRefreshTimer;
   static const _pricingPlanKeys = ['weekly', 'gold', 'platinum'];
   _PricingControllersBundle? _pricingCtrls;
 
@@ -146,7 +149,11 @@ class _AdminScaffoldState extends State<AdminScaffold> {
     _notifications = staticNotifications();
     _logs = generateLogs(_rand);
     unawaited(_bootstrapAdminData());
-    _adminRefreshTimer = Timer.periodic(const Duration(seconds: 15), (_) {
+    _statsRefreshTimer = Timer.periodic(const Duration(seconds: 10), (_) {
+      if (!mounted || !_hasAdminSession) return;
+      unawaited(_refreshDashboardStats());
+    });
+    _adminRefreshTimer = Timer.periodic(const Duration(seconds: 30), (_) {
       if (!mounted || !_hasAdminSession) return;
       if (_page == AdminPageId.pricing) return;
       unawaited(_hydrateFromBackend());
@@ -158,6 +165,8 @@ class _AdminScaffoldState extends State<AdminScaffold> {
     await _loadSavedSettings();
     if (!mounted) return;
     final hydrated = await _hydrateFromBackend();
+    if (!mounted) return;
+    if (_hasAdminSession) await _refreshDashboardStats();
     if (!mounted) return;
     if (!hydrated) await _loadSavedPricing();
   }
@@ -180,6 +189,71 @@ class _AdminScaffoldState extends State<AdminScaffold> {
     _showToast('Umetoka.', _ToastType.info);
   }
 
+  Future<void> _handleAdminUnauthorized() async {
+    if (!mounted) return;
+    _showToast('Session imeisha. Ingia tena.', _ToastType.warning);
+    await widget.auth.logout();
+  }
+
+  String _formatRelative(DateTime? dt) {
+    if (dt == null) return 'just now';
+    final sec = DateTime.now().difference(dt).inSeconds;
+    if (sec < 5) return 'just now';
+    if (sec < 60) return '${sec}s ago';
+    if (sec < 3600) return '${sec ~/ 60}m ago';
+    return '${sec ~/ 3600}h ago';
+  }
+
+  String _dashboardSubtitle() {
+    if (!_hasAdminSession) return 'Sign in to load live data';
+    if (_statsRefreshFailed && _dashboardStats == null) return 'Could not load stats · pull down to retry';
+    if (_statsRefreshFailed) return 'Update failed · last ${_formatRelative(_statsFetchedAt)} · auto 10s';
+    if (_dashboardStats != null) {
+      return 'Live data · updated ${_formatRelative(_statsFetchedAt)} · auto 10s';
+    }
+    return 'Loading live stats…';
+  }
+
+  /// Lightweight stats poll — keeps dashboard metrics fresh without a full admin sync.
+  Future<bool> _refreshDashboardStats({bool notify = true}) async {
+    if (!_hasAdminSession) return false;
+    try {
+      final res = await http
+          .get(Uri.parse('$_apiBase/api/v1/admin/stats/overview'), headers: _adminHeaders())
+          .timeout(const Duration(seconds: 15));
+      if (res.statusCode == 401 || res.statusCode == 403) {
+        await _handleAdminUnauthorized();
+        return false;
+      }
+      if (res.statusCode < 200 || res.statusCode >= 300) {
+        if (notify && mounted) setState(() => _statsRefreshFailed = true);
+        return false;
+      }
+      final map = jsonDecode(res.body) as Map<String, dynamic>;
+      final stats = _parseStatsJson((map['stats'] as Map?)?.cast<String, dynamic>());
+      if (stats == null) {
+        if (notify && mounted) setState(() => _statsRefreshFailed = true);
+        return false;
+      }
+      if (!mounted) return false;
+      if (notify) {
+        setState(() {
+          _dashboardStats = stats;
+          _statsFetchedAt = DateTime.now();
+          _statsRefreshFailed = false;
+        });
+      } else {
+        _dashboardStats = stats;
+        _statsFetchedAt = DateTime.now();
+        _statsRefreshFailed = false;
+      }
+      return true;
+    } catch (_) {
+      if (notify && mounted) setState(() => _statsRefreshFailed = true);
+      return false;
+    }
+  }
+
   Future<void> _loadSavedPricing() async {
     final sp = await SharedPreferences.getInstance();
     final raw = sp.getString('washatvPricing');
@@ -197,7 +271,11 @@ class _AdminScaffoldState extends State<AdminScaffold> {
     } catch (_) {}
   }
 
-  Map<String, String> _adminHeaders() => widget.auth.headers(contentType: 'application/json');
+  Map<String, String> _adminHeaders() => {
+        ...widget.auth.headers(contentType: 'application/json'),
+        'Cache-Control': 'no-cache',
+        'Pragma': 'no-cache',
+      };
 
   /// DELETE without JSON Content-Type — fewer CORS preflight issues on Flutter web.
   Map<String, String> _adminHeadersForDelete() => widget.auth.headers();
@@ -306,91 +384,108 @@ class _AdminScaffoldState extends State<AdminScaffold> {
         bootstrapRes = await bootstrapFuture;
       }
 
-      if (bootstrapRes.statusCode < 200 || bootstrapRes.statusCode >= 300) return false;
-      final map = jsonDecode(bootstrapRes.body) as Map<String, dynamic>;
-      final rawPlans = (map['plans'] as List?)?.cast<dynamic>() ?? const [];
-      final rawChannels = (map['channels'] as List?)?.cast<dynamic>() ?? const [];
-      final rawSlidesFromBootstrap = (map['slides'] as List?)?.cast<dynamic>() ?? const [];
-      final settings = (map['settings'] as Map?)?.cast<String, dynamic>() ?? const <String, dynamic>{};
+      final bootstrapOk = bootstrapRes.statusCode >= 200 && bootstrapRes.statusCode < 300;
+      Map<String, dynamic>? bootstrapMap;
+      if (bootstrapOk) {
+        bootstrapMap = jsonDecode(bootstrapRes.body) as Map<String, dynamic>;
+      }
 
       Map<String, dynamic>? adminSyncMap;
-      if (adminRes != null && adminRes.statusCode >= 200 && adminRes.statusCode < 300) {
-        adminSyncMap = jsonDecode(adminRes.body) as Map<String, dynamic>;
-      } else if (_hasAdminSession) {
-        adminSyncMap = await _fetchLegacyAdminBundle();
+      if (adminRes != null) {
+        if (adminRes.statusCode == 401 || adminRes.statusCode == 403) {
+          await _handleAdminUnauthorized();
+          return false;
+        }
+        if (adminRes.statusCode >= 200 && adminRes.statusCode < 300) {
+          adminSyncMap = jsonDecode(adminRes.body) as Map<String, dynamic>;
+        } else if (_hasAdminSession) {
+          adminSyncMap = await _fetchLegacyAdminBundle();
+        }
       }
 
       if (!mounted) return false;
       setState(() {
-        for (final p in rawPlans) {
-          if (p is! Map) continue;
-          final j = p.cast<String, dynamic>();
-          final key = _s(j['plan_key']);
-          final existing = _pricing[key];
-          if (existing == null) continue;
-          final priceRaw = j['price'];
-          final price = priceRaw is num ? priceRaw.toDouble() : double.tryParse(priceRaw?.toString().trim() ?? '');
-          final daysRaw = j['duration_days'];
-          final days = daysRaw is num ? daysRaw.toInt() : int.tryParse(daysRaw?.toString().trim() ?? '');
-          final en = j['enabled'];
-          final bool? enabled = en is bool
-              ? en
-              : en is num
-                  ? en != 0
-                  : en is String
-                      ? (en.toLowerCase() == 'true' || en == '1')
-                      : null;
-          final name = (j['name'] as String?)?.trim();
-          if (name != null && name.isNotEmpty) existing.name = name;
-          if (price != null) existing.price = price;
-          existing.originalPrice = existing.price;
-          existing.discount = 0;
-          if (days != null) existing.duration = days;
-          if (enabled != null) existing.enabled = enabled;
+        if (bootstrapMap != null) {
+          final map = bootstrapMap;
+          final rawPlans = (map['plans'] as List?)?.cast<dynamic>() ?? const [];
+          final rawChannels = (map['channels'] as List?)?.cast<dynamic>() ?? const [];
+          final rawSlidesFromBootstrap = (map['slides'] as List?)?.cast<dynamic>() ?? const [];
+          final settings = (map['settings'] as Map?)?.cast<String, dynamic>() ?? const <String, dynamic>{};
+          for (final p in rawPlans) {
+            if (p is! Map) continue;
+            final j = p.cast<String, dynamic>();
+            final key = _s(j['plan_key']);
+            final existing = _pricing[key];
+            if (existing == null) continue;
+            final priceRaw = j['price'];
+            final price = priceRaw is num ? priceRaw.toDouble() : double.tryParse(priceRaw?.toString().trim() ?? '');
+            final daysRaw = j['duration_days'];
+            final days = daysRaw is num ? daysRaw.toInt() : int.tryParse(daysRaw?.toString().trim() ?? '');
+            final en = j['enabled'];
+            final bool? enabled = en is bool
+                ? en
+                : en is num
+                    ? en != 0
+                    : en is String
+                        ? (en.toLowerCase() == 'true' || en == '1')
+                        : null;
+            final name = (j['name'] as String?)?.trim();
+            if (name != null && name.isNotEmpty) existing.name = name;
+            if (price != null) existing.price = price;
+            existing.originalPrice = existing.price;
+            existing.discount = 0;
+            if (days != null) existing.duration = days;
+            if (enabled != null) existing.enabled = enabled;
+          }
+          if (adminSyncMap == null) {
+            _channels = _parseAdminChannelsJson(rawChannels);
+            _slides = rawSlidesFromBootstrap.whereType<Map>().map((rawItem) {
+              final j = rawItem.cast<String, dynamic>();
+              return AdminSlide(
+                id: _s(j['id']),
+                title: _s(j['title']),
+                subtitle: _s(j['subtitle']),
+                imageUrl: _s(j['image_url']),
+                premium: j['premium'] as bool? ?? false,
+                active: j['active'] as bool? ?? true,
+                sortOrder: (j['sort_order'] as num?)?.toInt() ?? 0,
+              );
+            }).where((s) => s.id.isNotEmpty && s.title.isNotEmpty && s.imageUrl.isNotEmpty).toList();
+          }
+          final wa = _s(settings['whatsapp_number']);
+          _settings.whatsappNumber = wa;
+          _settingsWhatsapp.text = wa;
+          final site = _s(settings['site_name']);
+          if (site.isNotEmpty) {
+            _settings.siteName = site;
+            _settingsSiteName.text = site;
+          }
+          final subEn = settings['subscription_enabled'];
+          if (subEn is bool) {
+            _settings.subscriptionEnabled = subEn;
+          } else if (subEn is num) {
+            _settings.subscriptionEnabled = subEn != 0;
+          }
+          final maint = settings['maintenance_mode'];
+          if (maint is bool) {
+            _settings.maintenanceMode = maint;
+          } else if (maint is num) {
+            _settings.maintenanceMode = maint != 0;
+          }
         }
         if (adminSyncMap != null) {
           _applyAdminSyncPayload(adminSyncMap);
-        } else {
-          _channels = _parseAdminChannelsJson(rawChannels);
-          _slides = rawSlidesFromBootstrap.whereType<Map>().map((rawItem) {
-            final j = rawItem.cast<String, dynamic>();
-            return AdminSlide(
-              id: _s(j['id']),
-              title: _s(j['title']),
-              subtitle: _s(j['subtitle']),
-              imageUrl: _s(j['image_url']),
-              premium: j['premium'] as bool? ?? false,
-              active: j['active'] as bool? ?? true,
-              sortOrder: (j['sort_order'] as num?)?.toInt() ?? 0,
-            );
-          }).where((s) => s.id.isNotEmpty && s.title.isNotEmpty && s.imageUrl.isNotEmpty).toList();
-        }
-        final wa = _s(settings['whatsapp_number']);
-        _settings.whatsappNumber = wa;
-        _settingsWhatsapp.text = wa;
-        final site = _s(settings['site_name']);
-        if (site.isNotEmpty) {
-          _settings.siteName = site;
-          _settingsSiteName.text = site;
-        }
-        final subEn = settings['subscription_enabled'];
-        if (subEn is bool) {
-          _settings.subscriptionEnabled = subEn;
-        } else if (subEn is num) {
-          _settings.subscriptionEnabled = subEn != 0;
-        }
-        final maint = settings['maintenance_mode'];
-        if (maint is bool) {
-          _settings.maintenanceMode = maint;
-        } else if (maint is num) {
-          _settings.maintenanceMode = maint != 0;
         }
       });
       if (mounted) {
         _syncPricingControllersFromPlans();
         await _persistPricingMapToPrefs();
       }
-      return true;
+      if (_hasAdminSession && _dashboardStats == null) {
+        await _refreshDashboardStats(notify: false);
+        if (mounted) setState(() {});
+      }
+      return bootstrapOk || adminSyncMap != null || _dashboardStats != null;
     } catch (_) {
       return false;
     }
@@ -481,7 +576,24 @@ class _AdminScaffoldState extends State<AdminScaffold> {
 
   List<double> _numList(Object? raw) {
     if (raw is! List) return const [];
-    return raw.map((e) => (e as num?)?.toDouble() ?? 0).toList();
+    return raw.map((e) {
+      if (e is num) return e.toDouble();
+      if (e is String) return double.tryParse(e) ?? 0;
+      return 0.0;
+    }).toList();
+  }
+
+  int _toInt(Object? v) {
+    if (v is int) return v;
+    if (v is num) return v.toInt();
+    if (v is String) return int.tryParse(v) ?? 0;
+    return 0;
+  }
+
+  double _toDouble(Object? v) {
+    if (v is num) return v.toDouble();
+    if (v is String) return double.tryParse(v) ?? 0;
+    return 0;
   }
 
   void _sortAdminLists() {
@@ -521,21 +633,21 @@ class _AdminScaffoldState extends State<AdminScaffold> {
     final daily = (s['daily_registrations'] as Map?)?.cast<String, dynamic>() ?? const {};
     final mix = (s['plan_mix'] as Map?)?.cast<String, dynamic>() ?? const {};
     return AdminDashboardStats(
-      totalUsers: (totals['users'] as num?)?.toInt() ?? 0,
-      premiumUsers: (totals['premium_users'] as num?)?.toInt() ?? 0,
-      freeUsers: (totals['free_users'] as num?)?.toInt() ?? 0,
-      activeChannels: (totals['active_channels'] as num?)?.toInt() ?? 0,
-      revenue: (totals['revenue'] as num?)?.toDouble() ?? 0,
+      totalUsers: _toInt(totals['users']),
+      premiumUsers: _toInt(totals['premium_users']),
+      freeUsers: _toInt(totals['free_users']),
+      activeChannels: _toInt(totals['active_channels']),
+      revenue: _toDouble(totals['revenue']),
       monthLabels: ((growth['labels'] as List?) ?? const []).map((e) => e.toString()).toList(),
       newUsersPerMonth: _numList(growth['new_users']),
       premiumPurchasesPerMonth: _numList(growth['premium_purchases']),
       revenuePerMonth: _numList(revenue['amounts']),
       dailyLabels: ((daily['labels'] as List?) ?? const []).map((e) => e.toString()).toList(),
       dailyRegistrations: _numList(daily['counts']),
-      planWeekly: (mix['weekly'] as num?)?.toInt() ?? 0,
-      planGold: (mix['gold'] as num?)?.toInt() ?? 0,
-      planPlatinum: (mix['platinum'] as num?)?.toInt() ?? 0,
-      planOther: (mix['other'] as num?)?.toInt() ?? 0,
+      planWeekly: _toInt(mix['weekly']),
+      planGold: _toInt(mix['gold']),
+      planPlatinum: _toInt(mix['platinum']),
+      planOther: _toInt(mix['other']),
     );
   }
 
@@ -551,6 +663,12 @@ class _AdminScaffoldState extends State<AdminScaffold> {
         http.get(Uri.parse('$_apiBase/api/v1/admin/subscriptions'), headers: _adminHeaders()).timeout(const Duration(seconds: 15)),
         http.get(Uri.parse('$_apiBase/api/v1/admin/logs'), headers: _adminHeaders()).timeout(const Duration(seconds: 15)),
       ]);
+      for (final res in results) {
+        if (res.statusCode == 401 || res.statusCode == 403) {
+          await _handleAdminUnauthorized();
+          return null;
+        }
+      }
       final bundle = <String, dynamic>{};
       if (results[0].statusCode >= 200 && results[0].statusCode < 300) {
         bundle['users'] = (jsonDecode(results[0].body) as Map)['users'];
@@ -625,7 +743,11 @@ class _AdminScaffoldState extends State<AdminScaffold> {
     }
 
     final stats = _parseStatsJson((adminMap['stats'] as Map?)?.cast<String, dynamic>());
-    if (stats != null) _dashboardStats = stats;
+    if (stats != null) {
+      _dashboardStats = stats;
+      _statsFetchedAt = DateTime.now();
+      _statsRefreshFailed = false;
+    }
 
     final rawSubs = adminMap['subscriptions'];
     if (rawSubs is List) {
@@ -660,7 +782,10 @@ class _AdminScaffoldState extends State<AdminScaffold> {
   }
 
   Future<void> _onPullRefresh() async {
-    await _hydrateFromBackend();
+    await Future.wait([
+      _hydrateFromBackend(),
+      _refreshDashboardStats(),
+    ]);
   }
 
   /// Last 7 calendar months ending this month (labels + bucket starts).
@@ -743,7 +868,11 @@ class _AdminScaffoldState extends State<AdminScaffold> {
     );
   }
 
-  AdminDashboardStats? get _effectiveStats => _dashboardStats ?? _statsFromLocalLists();
+  AdminDashboardStats? get _effectiveStats {
+    if (_dashboardStats != null) return _dashboardStats;
+    if (!_hasAdminSession) return _statsFromLocalLists();
+    return null;
+  }
 
   PricingPlan _pricingFromJson(Map<String, dynamic> j, PricingPlan fallback) {
     return PricingPlan(
@@ -774,6 +903,7 @@ class _AdminScaffoldState extends State<AdminScaffold> {
   @override
   void dispose() {
     _adminRefreshTimer?.cancel();
+    _statsRefreshTimer?.cancel();
     _settingsSiteName.dispose();
     _settingsWhatsapp.dispose();
     _pricingCtrls?.dispose();
@@ -1056,7 +1186,7 @@ class _AdminScaffoldState extends State<AdminScaffold> {
                   ),
                 ),
                 IconButton(
-                  onPressed: () => _showToast('Logging out...', _ToastType.warning),
+                  onPressed: _adminLogout,
                   icon: const Icon(Icons.logout, size: 18, color: Color(0xFF9CA3AF)),
                 ),
               ],
@@ -1171,12 +1301,16 @@ class _AdminScaffoldState extends State<AdminScaffold> {
   // --- Dashboard ---
   Widget _pageDashboard() {
     final stats = _effectiveStats;
-    final totalUsers = stats?.totalUsers ?? _users.length;
-    final premiumUsers = stats?.premiumUsers ?? _users.where((u) => u.effectivePremium).length;
-    final freeUsers = stats?.freeUsers ?? (totalUsers - premiumUsers).clamp(0, totalUsers);
-    final activeChannels = stats?.activeChannels ?? _channels.where((c) => c.status == 'active').length;
+    final loadingStats = _hasAdminSession && stats == null;
+    final totalUsers = stats?.totalUsers ?? (loadingStats ? null : _users.length);
+    final premiumUsers = stats?.premiumUsers ?? (loadingStats ? null : _users.where((u) => u.effectivePremium).length);
+    final freeUsers = stats?.freeUsers ??
+        (loadingStats ? null : ((totalUsers ?? 0) - (premiumUsers ?? 0)).clamp(0, totalUsers ?? 0));
+    final activeChannels = stats?.activeChannels ?? (loadingStats ? null : _channels.where((c) => c.status == 'active').length);
     final revenue = stats?.revenue ??
-        _payments.where((p) => p.status == 'completed').fold<double>(0, (a, b) => a + b.amount);
+        (loadingStats
+            ? null
+            : _payments.where((p) => p.status == 'completed').fold<double>(0, (a, b) => a + b.amount));
     final recentUsers = _users.take(5).toList();
     final recentPayments =
         _payments.where((p) => p.status == 'completed').take(5).toList();
@@ -1186,9 +1320,7 @@ class _AdminScaffoldState extends State<AdminScaffold> {
       children: [
         _pageTitleRow(
           title: 'Admin Dashboard',
-          subtitle: _hasAdminSession
-              ? (_dashboardStats != null ? 'Live data · pull down to refresh · auto 15s' : 'Connected · loading stats…')
-              : 'Sign in to load live data',
+          subtitle: _dashboardSubtitle(),
           action: _btnPrimary(label: 'Add Channel', icon: Icons.add, onTap: () => _showChannelEditor()),
         ),
         const SizedBox(height: 16),
@@ -1204,11 +1336,11 @@ class _AdminScaffoldState extends State<AdminScaffold> {
               mainAxisSpacing: 12,
               childAspectRatio: cols <= 2 ? 1.12 : 1.28,
               children: [
-                _statCard(label: 'Total Users', value: '$totalUsers', icon: Icons.groups_rounded, iconBg: const Color(0x336366F1), iconColor: const Color(0xFF818CF8)),
-                _statCard(label: 'Premium', value: '$premiumUsers', icon: Icons.workspace_premium_rounded, iconBg: const Color(0x33F59E0B), iconColor: const Color(0xFFFBBF24)),
-                _statCard(label: 'Free', value: '$freeUsers', icon: Icons.person_outline_rounded, iconBg: const Color(0x3394A3B8), iconColor: const Color(0xFFCBD5E1)),
-                _statCard(label: 'Channels', value: '$activeChannels', icon: Icons.satellite_alt_rounded, iconBg: const Color(0x3310B981), iconColor: const Color(0xFF34D399)),
-                _statCard(label: 'Revenue', value: fmtTzs(revenue), icon: Icons.attach_money_rounded, iconBg: const Color(0x33A855F7), iconColor: const Color(0xFFC084FC)),
+                _statCard(label: 'Total Users', value: loadingStats ? '…' : '${totalUsers ?? 0}', icon: Icons.groups_rounded, iconBg: const Color(0x336366F1), iconColor: const Color(0xFF818CF8)),
+                _statCard(label: 'Premium', value: loadingStats ? '…' : '${premiumUsers ?? 0}', icon: Icons.workspace_premium_rounded, iconBg: const Color(0x33F59E0B), iconColor: const Color(0xFFFBBF24)),
+                _statCard(label: 'Free', value: loadingStats ? '…' : '${freeUsers ?? 0}', icon: Icons.person_outline_rounded, iconBg: const Color(0x3394A3B8), iconColor: const Color(0xFFCBD5E1)),
+                _statCard(label: 'Channels', value: loadingStats ? '…' : '${activeChannels ?? 0}', icon: Icons.satellite_alt_rounded, iconBg: const Color(0x3310B981), iconColor: const Color(0xFF34D399)),
+                _statCard(label: 'Revenue', value: loadingStats ? '…' : fmtTzs(revenue ?? 0), icon: Icons.attach_money_rounded, iconBg: const Color(0x33A855F7), iconColor: const Color(0xFFC084FC)),
               ],
             );
           },
@@ -3907,6 +4039,8 @@ class _AdminScaffoldState extends State<AdminScaffold> {
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         const Text('Analytics', style: TextStyle(fontSize: 24, fontWeight: FontWeight.w800)),
+        const SizedBox(height: 4),
+        Text(_dashboardSubtitle(), style: const TextStyle(fontSize: 12, color: AdminColors.textSecondary)),
         const SizedBox(height: 16),
         LayoutBuilder(
           builder: (context, c) {

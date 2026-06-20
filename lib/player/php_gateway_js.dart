@@ -16,13 +16,29 @@ const String kPhpGatewayRecoveryJs = '''
     } catch (e) {}
   }
 
+  function hidePageChrome() {
+    try {
+      document.documentElement.style.background = '#000';
+      document.body.style.background = '#000';
+      if (!document.getElementById('washa-hide')) {
+        var style = document.createElement('style');
+        style.id = 'washa-hide';
+        style.textContent =
+          'body > *:not(video):not(script):not(style) { visibility: hidden !important; pointer-events: none !important; }' +
+          'video { visibility: visible !important; pointer-events: auto !important; max-width: 100% !important; max-height: 100% !important; }';
+        (document.head || document.documentElement).appendChild(style);
+      }
+    } catch (e) {}
+  }
+
   function bindVideo(video) {
     if (!video || video.__washaBound) return;
     video.__washaBound = true;
+    hidePageChrome();
     video.setAttribute('playsinline', 'true');
     video.setAttribute('webkit-playsinline', 'true');
     try { video.muted = false; } catch (e) {}
-    video.controls = true;
+    video.controls = false;
 
     video.addEventListener('timeupdate', function () {
       lastProgressAt = Date.now();
@@ -86,6 +102,7 @@ const String kPhpGatewayRecoveryJs = '''
     observer.observe(document.documentElement || document.body, { childList: true, subtree: true });
   } catch (e) {}
 
+  hidePageChrome();
   bindVideo(getVideo());
   startMonitor();
   true;

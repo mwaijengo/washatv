@@ -3,6 +3,16 @@ allprojects {
         google()
         mavenCentral()
     }
+    // audio_session uses a legacy buildscript classpath for KGP — suppress the
+    // redundant resolution so Flutter's built-in Kotlin support takes precedence.
+    configurations.all {
+        resolutionStrategy.eachDependency {
+            if (requested.group == "org.jetbrains.kotlin") {
+                useVersion("2.2.20")
+                because("Align all Kotlin versions with settings.gradle.kts pin")
+            }
+        }
+    }
 }
 
 val newBuildDir: Directory =

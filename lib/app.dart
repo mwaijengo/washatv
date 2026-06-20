@@ -92,6 +92,7 @@ class _WashaAppState extends State<WashaApp> with WidgetsBindingObserver {
   final _scaffoldMessengerKey = GlobalKey<ScaffoldMessengerState>();
   AppScreen _returnScreen = AppScreen.home;
   PlayerBackHandler? _playerBackHandler;
+  bool _playerFullscreen = false;
   DateTime? _lastExitBackPress;
   String _premiumPlanLabel = '';
   String _premiumAccessSource = 'none';
@@ -482,6 +483,7 @@ class _WashaAppState extends State<WashaApp> with WidgetsBindingObserver {
       if (s != AppScreen.player) {
         selectedChannel = null;
         _playerBackHandler = null;
+        _playerFullscreen = false;
       }
     });
     unawaited(_applyScreenSecurity(s));
@@ -839,15 +841,19 @@ class _WashaAppState extends State<WashaApp> with WidgetsBindingObserver {
                 children: [
                   const _OrbBackground(),
                   SafeArea(
+                    top: !_playerFullscreen,
+                    bottom: !_playerFullscreen,
+                    left: !_playerFullscreen,
+                    right: !_playerFullscreen,
                     child: Column(
                       children: [
-                        if (syncRefreshing)
+                        if (syncRefreshing && !_playerFullscreen)
                           const LinearProgressIndicator(
                             minHeight: 2,
                             backgroundColor: Color(0x33FFFFFF),
                             color: Color(0xFF6366F1),
                           ),
-                        if (bootstrapError != null && !_noInternetVisible) _bootstrapErrorBanner(),
+                        if (bootstrapError != null && !_noInternetVisible && !_playerFullscreen) _bootstrapErrorBanner(),
                         Expanded(child: _buildScreen()),
                         if (current != AppScreen.player)
                           BottomNav(
@@ -1034,6 +1040,10 @@ class _WashaAppState extends State<WashaApp> with WidgetsBindingObserver {
           premium: premium,
           onBack: _leavePlayer,
           onBackHandlerChanged: (handler) => _playerBackHandler = handler,
+          onFullscreenChanged: (value) {
+            if (_playerFullscreen == value) return;
+            setState(() => _playerFullscreen = value);
+          },
           onOpenPlayer: _openPlayer,
           onOpenSubscription: () => switchScreen(AppScreen.subscription),
         );

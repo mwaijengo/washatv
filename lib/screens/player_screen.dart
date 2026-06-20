@@ -8,12 +8,18 @@ import 'package:webview_flutter/webview_flutter.dart';
 
 import '../models/channel.dart';
 import '../player/channel_playback_engine.dart';
+import '../player/php_gateway_js.dart';
 import '../utils/cache_bust_image_url.dart';
 import '../widgets/channel_card.dart';
 import '../widgets/playback_unavailable_overlay.dart';
 import '../widgets/player_controls.dart';
 
 typedef PlayerBackHandler = bool Function();
+
+const _kMaxAutoRetries = 8;
+const _kRetryDelay = Duration(seconds: 3);
+const _kWebPlaybackPollInterval = Duration(milliseconds: 800);
+const _kWebPlaybackPollMaxTicks = 45;
 
 class PlayerScreen extends StatefulWidget {
   const PlayerScreen({
@@ -26,6 +32,7 @@ class PlayerScreen extends StatefulWidget {
     required this.channels,
     this.channelImageCacheEpoch = 0,
     this.onBackHandlerChanged,
+    this.onFullscreenChanged,
   });
 
   final Channel? channel;
@@ -36,14 +43,18 @@ class PlayerScreen extends StatefulWidget {
   final List<Channel> channels;
   final int channelImageCacheEpoch;
   final ValueChanged<PlayerBackHandler?>? onBackHandlerChanged;
+  final ValueChanged<bool>? onFullscreenChanged;
 
   @override
   State<PlayerScreen> createState() => _PlayerScreenState();
 }
 
-class _PlayerScreenState extends State<PlayerScreen> {
+class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver {
   bool playing = true;
   bool fullscreen = false;
+  bool _immersiveControlsVisible = false;
+  OverlayEntry? _fullscreenOverlay;
+  Timer? _controlsHideTimer;
   double progress = 0.0;
   String _positionLabel = '0:00';
   String _durationLabel = 'LIVE';
@@ -51,11 +62,15 @@ class _PlayerScreenState extends State<PlayerScreen> {
   VideoPlayerController? _video;
   bool _useWebView = false;
   bool _streamLoading = true;
-  bool _streamUnavailable = false;
+  bool _showManualRetry = false;
   bool _webFallbackTried = false;
+  bool _handlingPlaybackFailure = false;
 
   int _loadToken = 0;
+  int _autoRetryCount = 0;
   Timer? _loadWatchdog;
+  Timer? _playbackRetryTimer;
+  Timer? _webPlaybackPollTimer;
   ChannelPlaybackSession? _session;
 
   Channel get _current => widget.channel ?? widget.channels.first;
@@ -63,6 +78,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     widget.onBackHandlerChanged?.call(_handlePlayerBack);
     unawaited(_startPlayback(_current));
   }
@@ -84,14 +100,27 @@ class _PlayerScreenState extends State<PlayerScreen> {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     widget.onBackHandlerChanged?.call(null);
     _loadWatchdog?.cancel();
+    _cancelPlaybackRetry();
+    _cancelWebPlaybackPoll();
     _detachVideoListener();
-    unawaited(_exitFullscreen(silent: true));
+    _cancelControlsHideTimer();
+    _removeFullscreenOverlay();
+    unawaited(_applyFullscreenSystemUi(enter: false));
+    widget.onFullscreenChanged?.call(false);
     unawaited(_session?.dispose());
     _session = null;
     _video = null;
     super.dispose();
+  }
+
+  @override
+  void didChangeMetrics() {
+    if (fullscreen) {
+      _fullscreenOverlay?.markNeedsBuild();
+    }
   }
 
   void _cancelLoadWatchdog() {
@@ -99,16 +128,134 @@ class _PlayerScreenState extends State<PlayerScreen> {
     _loadWatchdog = null;
   }
 
+  void _cancelPlaybackRetry() {
+    _playbackRetryTimer?.cancel();
+    _playbackRetryTimer = null;
+  }
+
+  void _cancelWebPlaybackPoll() {
+    _webPlaybackPollTimer?.cancel();
+    _webPlaybackPollTimer = null;
+  }
+
   void _armLoadWatchdog(int token, Channel ch, {required bool forceWebView}) {
     _cancelLoadWatchdog();
-    _loadWatchdog = Timer(const Duration(seconds: 12), () {
+    final timeout = forceWebView ? const Duration(seconds: 30) : const Duration(seconds: 12);
+    _loadWatchdog = Timer(timeout, () {
       if (!mounted || token != _loadToken || !_streamLoading) return;
       if (!kIsWeb && !forceWebView && !_webFallbackTried) {
         _webFallbackTried = true;
         unawaited(_startPlayback(ch, forceWebView: true));
         return;
       }
-      _markUnavailable();
+      _handlePlaybackFailure(forceWebView: forceWebView);
+    });
+  }
+
+  void _showRetryPrompt() {
+    if (!mounted) return;
+    setState(() {
+      _showManualRetry = true;
+      _streamLoading = false;
+      playing = false;
+    });
+  }
+
+  void _handlePlaybackFailure({bool forceWebView = false}) {
+    if (!mounted || _handlingPlaybackFailure) return;
+    _handlingPlaybackFailure = true;
+
+    _cancelLoadWatchdog();
+    _cancelWebPlaybackPoll();
+    _cancelPlaybackRetry();
+    _detachVideoListener();
+
+    final retiring = _session;
+    _session = null;
+    _video = null;
+    if (retiring != null) unawaited(retiring.dispose());
+
+    if (!forceWebView && !kIsWeb && !_webFallbackTried && _current.streamUrl.trim().isNotEmpty) {
+      _webFallbackTried = true;
+      _handlingPlaybackFailure = false;
+      unawaited(_startPlayback(_current, forceWebView: true));
+      return;
+    }
+
+    if (_autoRetryCount < _kMaxAutoRetries) {
+      _autoRetryCount++;
+      setState(() {
+        _streamLoading = true;
+        _showManualRetry = false;
+        playing = true;
+      });
+      _playbackRetryTimer = Timer(_kRetryDelay, () {
+        _handlingPlaybackFailure = false;
+        if (!mounted) return;
+        unawaited(_startPlayback(_current, forceWebView: forceWebView || _webFallbackTried));
+      });
+      return;
+    }
+
+    _handlingPlaybackFailure = false;
+    _showRetryPrompt();
+  }
+
+  void _manualRetryPlayback() {
+    _autoRetryCount = 0;
+    _webFallbackTried = false;
+    unawaited(_startPlayback(_current));
+  }
+
+  void _attachWebViewMonitoring(WebViewController web, int token) {
+    web.setNavigationDelegate(
+      NavigationDelegate(
+        onPageStarted: (_) => unawaited(web.runJavaScript(kPhpGatewayRecoveryJs)),
+        onPageFinished: (_) => unawaited(web.runJavaScript(kPhpGatewayRecoveryJs)),
+        onWebResourceError: (error) {
+          if (error.isForMainFrame ?? false) {
+            _handlePlaybackFailure(forceWebView: true);
+          }
+        },
+      ),
+    );
+
+    _cancelWebPlaybackPoll();
+    var ticks = 0;
+    _webPlaybackPollTimer = Timer.periodic(_kWebPlaybackPollInterval, (timer) async {
+      ticks++;
+      if (!mounted || token != _loadToken) {
+        timer.cancel();
+        return;
+      }
+
+      if (ticks > _kWebPlaybackPollMaxTicks) {
+        timer.cancel();
+        _handlePlaybackFailure(forceWebView: true);
+        return;
+      }
+
+      try {
+        final raw = await web.runJavaScriptReturningResult(
+          "(() => { const v = document.querySelector('video'); if (!v) return '0'; if (v.error) return 'err'; if (!v.paused && v.readyState >= 2 && v.currentTime > 0) return '1'; return '0'; })()",
+        );
+        final status = raw.toString().replaceAll('"', '');
+        if (status == '1') {
+          timer.cancel();
+          _cancelLoadWatchdog();
+          _autoRetryCount = 0;
+          if (!mounted || token != _loadToken) return;
+          setState(() {
+            _streamLoading = false;
+            _showManualRetry = false;
+            playing = true;
+            _durationLabel = 'LIVE';
+          });
+        } else if (status == 'err') {
+          timer.cancel();
+          _handlePlaybackFailure(forceWebView: true);
+        }
+      } catch (_) {}
     });
   }
 
@@ -125,29 +272,13 @@ class _PlayerScreenState extends State<PlayerScreen> {
     _video?.removeListener(_onVideoTick);
   }
 
-  void _markUnavailable() {
-    _cancelLoadWatchdog();
-    if (!mounted) return;
-    setState(() {
-      _streamUnavailable = true;
-      _streamLoading = false;
-      playing = false;
-    });
-  }
-
   void _onVideoTick() {
     final v = _video;
     if (v == null || !mounted) return;
 
     if (v.value.hasError && !_useWebView) {
       if (kDebugMode) debugPrint('Washa playback error (hidden from user)');
-      final url = _current.streamUrl.trim();
-      if (!kIsWeb && url.isNotEmpty && !_webFallbackTried) {
-        _webFallbackTried = true;
-        unawaited(_startPlayback(_current, forceWebView: true));
-        return;
-      }
-      _markUnavailable();
+      _handlePlaybackFailure();
       return;
     }
 
@@ -183,9 +314,12 @@ class _PlayerScreenState extends State<PlayerScreen> {
 
   Future<void> _startPlayback(Channel ch, {bool forceWebView = false}) async {
     final token = ++_loadToken;
+    _handlingPlaybackFailure = false;
     final url = ch.streamUrl.trim();
 
     _cancelLoadWatchdog();
+    _cancelPlaybackRetry();
+    _cancelWebPlaybackPoll();
     _detachVideoListener();
     final retiring = _session;
     _session = null;
@@ -196,9 +330,12 @@ class _PlayerScreenState extends State<PlayerScreen> {
 
     setState(() {
       _streamLoading = true;
-      _streamUnavailable = false;
+      _showManualRetry = false;
       _useWebView = false;
-      if (!forceWebView) _webFallbackTried = false;
+      if (!forceWebView) {
+        _webFallbackTried = false;
+        _autoRetryCount = 0;
+      }
       playing = true;
       progress = 0;
       _positionLabel = '0:00';
@@ -206,7 +343,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
     });
 
     if (url.isEmpty) {
-      _markUnavailable();
+      _showRetryPrompt();
       return;
     }
 
@@ -227,10 +364,12 @@ class _PlayerScreenState extends State<PlayerScreen> {
       _useWebView = session.useWebView;
 
       if (session.useWebView) {
-        _cancelLoadWatchdog();
+        final web = session.web!;
+        _attachWebViewMonitoring(web, token);
+        _armLoadWatchdog(token, ch, forceWebView: true);
         setState(() {
-          _streamLoading = false;
-          _streamUnavailable = false;
+          _streamLoading = true;
+          _showManualRetry = false;
           playing = true;
           _durationLabel = 'LIVE';
         });
@@ -246,23 +385,18 @@ class _PlayerScreenState extends State<PlayerScreen> {
       }
 
       _cancelLoadWatchdog();
+      _autoRetryCount = 0;
       setState(() {
         _video = video;
         _streamLoading = false;
-        _streamUnavailable = false;
+        _showManualRetry = false;
         playing = true;
       });
       unawaited(video.play());
     } catch (e) {
       if (kDebugMode) debugPrint('Washa playback: $e');
       if (!mounted || token != _loadToken) return;
-      _cancelLoadWatchdog();
-      if (!kIsWeb && !forceWebView && !_webFallbackTried) {
-        _webFallbackTried = true;
-        unawaited(_startPlayback(ch, forceWebView: true));
-        return;
-      }
-      _markUnavailable();
+      _handlePlaybackFailure(forceWebView: forceWebView);
     }
   }
 
@@ -304,22 +438,121 @@ class _PlayerScreenState extends State<PlayerScreen> {
     if (mounted) setState(() => progress = value.clamp(0.0, 1.0));
   }
 
+  void _cancelControlsHideTimer() {
+    _controlsHideTimer?.cancel();
+    _controlsHideTimer = null;
+  }
+
+  void _scheduleControlsHide() {
+    _cancelControlsHideTimer();
+    _controlsHideTimer = Timer(const Duration(seconds: 4), () {
+      if (!mounted || !fullscreen) return;
+      setState(() => _immersiveControlsVisible = false);
+    });
+  }
+
+  void _showImmersiveControls() {
+    if (!fullscreen) return;
+    if (!_immersiveControlsVisible) {
+      setState(() => _immersiveControlsVisible = true);
+    }
+    _scheduleControlsHide();
+  }
+
+  void _hideImmersiveControls() {
+    _cancelControlsHideTimer();
+    if (_immersiveControlsVisible) {
+      setState(() => _immersiveControlsVisible = false);
+    }
+  }
+
+  void _onImmersiveScreenTap() {
+    if (_immersiveControlsVisible) {
+      _hideImmersiveControls();
+    } else {
+      _showImmersiveControls();
+    }
+  }
+
+  void _removeFullscreenOverlay() {
+    _fullscreenOverlay?.remove();
+    _fullscreenOverlay = null;
+  }
+
+  Future<void> _applyFullscreenSystemUi({required bool enter}) async {
+    try {
+      if (enter) {
+        await SystemChrome.setEnabledSystemUIMode(
+          SystemUiMode.immersiveSticky,
+          overlays: const [],
+        );
+        await SystemChrome.setPreferredOrientations(const [
+          DeviceOrientation.landscapeLeft,
+          DeviceOrientation.landscapeRight,
+        ]);
+      } else {
+        await SystemChrome.setPreferredOrientations(DeviceOrientation.values);
+        await SystemChrome.setPreferredOrientations(const [
+          DeviceOrientation.portraitUp,
+          DeviceOrientation.portraitDown,
+        ]);
+        await SystemChrome.setEnabledSystemUIMode(
+          SystemUiMode.edgeToEdge,
+          overlays: SystemUiOverlay.values,
+        );
+      }
+    } catch (e) {
+      if (kDebugMode) debugPrint('Washa fullscreen UI: $e');
+    }
+  }
+
   Future<void> _enterFullscreen() async {
-    await SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
-    await SystemChrome.setPreferredOrientations([
-      DeviceOrientation.landscapeLeft,
-      DeviceOrientation.landscapeRight,
-    ]);
-    if (mounted) setState(() => fullscreen = true);
+    if (fullscreen || !mounted) return;
+
+    await _applyFullscreenSystemUi(enter: true);
+    if (!mounted) return;
+
+    _immersiveControlsVisible = false;
+    _cancelControlsHideTimer();
+
+    final heroUrl = imageUrlWithCacheEpoch(_current.imageUrl, widget.channelImageCacheEpoch);
+    _fullscreenOverlay = OverlayEntry(
+      builder: (overlayContext) {
+        return PopScope(
+          canPop: false,
+          onPopInvokedWithResult: (didPop, _) {
+            if (!didPop) unawaited(_exitFullscreen());
+          },
+          child: AnnotatedRegion<SystemUiOverlayStyle>(
+            value: SystemUiOverlayStyle.light.copyWith(
+              statusBarColor: Colors.transparent,
+              systemNavigationBarColor: Colors.black,
+            ),
+            child: Material(
+              color: Colors.black,
+              child: _buildPlayerStack(_current, heroUrl, immersive: true),
+            ),
+          ),
+        );
+      },
+    );
+
+    final overlayState = Overlay.maybeOf(context, rootOverlay: true) ?? Overlay.of(context);
+    overlayState.insert(_fullscreenOverlay!);
+    widget.onFullscreenChanged?.call(true);
+    setState(() => fullscreen = true);
   }
 
   Future<void> _exitFullscreen({bool silent = false}) async {
-    await SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
-    await SystemChrome.setPreferredOrientations([
-      DeviceOrientation.portraitUp,
-      DeviceOrientation.portraitDown,
-    ]);
+    if (!fullscreen && !silent) return;
+
+    _cancelControlsHideTimer();
+    _immersiveControlsVisible = false;
+    _removeFullscreenOverlay();
+    await _applyFullscreenSystemUi(enter: false);
+
     if (mounted && (fullscreen || silent)) {
+      widget.onFullscreenChanged?.call(false);
       setState(() => fullscreen = false);
     }
   }
@@ -332,25 +565,51 @@ class _PlayerScreenState extends State<PlayerScreen> {
     }
   }
 
-  Widget _buildVideoLayer(Channel c, String heroUrl) {
+  Widget _buildVideoLayer(Channel c, String heroUrl, {required bool fillScreen}) {
+    final hideWebView = _streamLoading || _showManualRetry;
+
     if (_useWebView && _session?.web != null) {
+      final web = Opacity(
+        opacity: hideWebView ? 0 : 1,
+        child: WebViewWidget(controller: _session!.web!),
+      );
       return ColoredBox(
         color: Colors.black,
-        child: WebViewWidget(controller: _session!.web!),
+        child: fillScreen ? SizedBox.expand(child: web) : web,
       );
     }
 
     final v = _video;
     if (v != null && v.value.isInitialized) {
+      final player = VideoPlayer(v);
+      if (fillScreen) {
+        final size = v.value.size;
+        final width = size.width > 0 ? size.width : 16.0;
+        final height = size.height > 0 ? size.height : 9.0;
+        return ColoredBox(
+          color: Colors.black,
+          child: SizedBox.expand(
+            child: FittedBox(
+              fit: BoxFit.cover,
+              child: SizedBox(width: width, height: height, child: player),
+            ),
+          ),
+        );
+      }
+
       return ColoredBox(
         color: Colors.black,
         child: Center(
           child: AspectRatio(
             aspectRatio: v.value.aspectRatio > 0 ? v.value.aspectRatio : 16 / 9,
-            child: VideoPlayer(v),
+            child: player,
           ),
         ),
       );
+    }
+
+    if (_streamLoading || _showManualRetry) {
+      return const ColoredBox(color: Colors.black);
     }
 
     return Image.network(
@@ -366,46 +625,68 @@ class _PlayerScreenState extends State<PlayerScreen> {
   }
 
   Widget _buildPlayerStack(Channel c, String heroUrl, {required bool immersive}) {
-    return Stack(
-      fit: StackFit.expand,
-      children: [
-        _buildVideoLayer(c, heroUrl),
-        if (!_streamUnavailable && !_streamLoading && _video == null && !_useWebView)
-          Image.network(
-            heroUrl,
-            fit: BoxFit.cover,
-            key: ValueKey('player-poster|${c.id}|$heroUrl'),
-            errorBuilder: (_, __, ___) => const SizedBox.shrink(),
-          ),
-        if (_streamLoading) const _PlaybackLoadingShade(),
-        if (_streamUnavailable) PlaybackUnavailableOverlay(onClose: immersive ? widget.onBack : null),
-        if (!_streamUnavailable && !_streamLoading && !playing)
-          Container(
-            color: const Color(0x66000000),
-            child: Center(
-              child: GestureDetector(
-                onTap: () => unawaited(_togglePlayPause()),
+    final controlsVisible = !immersive || _immersiveControlsVisible;
+
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTap: immersive ? _onImmersiveScreenTap : null,
+      child: Stack(
+        fit: StackFit.expand,
+        children: [
+          _buildVideoLayer(c, heroUrl, fillScreen: immersive),
+          if (!_showManualRetry && !_streamLoading && _video == null && !_useWebView)
+            Image.network(
+              heroUrl,
+              fit: BoxFit.cover,
+              key: ValueKey('player-poster|${c.id}|$heroUrl'),
+              errorBuilder: (_, __, ___) => const SizedBox.shrink(),
+            ),
+          if (_streamLoading) const _PlaybackLoadingShade(),
+          if (_showManualRetry)
+            PlaybackUnavailableOverlay(
+              onRetry: _manualRetryPlayback,
+              onClose: immersive ? widget.onBack : null,
+            ),
+          if (!_showManualRetry && !_streamLoading && !playing)
+            IgnorePointer(
+              ignoring: immersive && !controlsVisible,
+              child: AnimatedOpacity(
+                opacity: controlsVisible || !immersive ? 1 : 0,
+                duration: const Duration(milliseconds: 220),
                 child: Container(
-                  width: 56,
-                  height: 56,
-                  decoration: const BoxDecoration(color: Color(0xF2FFFFFF), shape: BoxShape.circle),
-                  child: const Icon(Icons.play_arrow, color: Color(0xFF111827), size: 34),
+                  color: const Color(0x66000000),
+                  child: Center(
+                    child: GestureDetector(
+                      onTap: () {
+                        if (immersive) _showImmersiveControls();
+                        unawaited(_togglePlayPause());
+                      },
+                      child: Container(
+                        width: 56,
+                        height: 56,
+                        decoration: const BoxDecoration(color: Color(0xF2FFFFFF), shape: BoxShape.circle),
+                        child: const Icon(Icons.play_arrow, color: Color(0xFF111827), size: 34),
+                      ),
+                    ),
+                  ),
                 ),
               ),
             ),
-          ),
-        if (!_streamUnavailable)
-          PlayerControls(
-            playing: playing,
-            progress: progress,
-            positionLabel: _positionLabel,
-            durationLabel: _durationLabel,
-            isFullscreen: fullscreen,
-            onPlay: () => unawaited(_togglePlayPause()),
-            onToggleFullscreen: () => unawaited(_toggleFullscreen()),
-            onSeek: (v) => unawaited(_seekTo(v)),
-          ),
-      ],
+          if (!_showManualRetry && !_streamLoading)
+            PlayerControls(
+              playing: playing,
+              progress: progress,
+              positionLabel: _positionLabel,
+              durationLabel: _durationLabel,
+              isFullscreen: fullscreen,
+              visible: controlsVisible,
+              onUserInteraction: immersive ? _showImmersiveControls : null,
+              onPlay: () => unawaited(_togglePlayPause()),
+              onToggleFullscreen: () => unawaited(_toggleFullscreen()),
+              onSeek: (v) => unawaited(_seekTo(v)),
+            ),
+        ],
+      ),
     );
   }
 
@@ -422,20 +703,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
         : widget.channels.where((e) => e.premium && e.id != c.id).take(12).toList();
 
     if (fullscreen) {
-      return PopScope(
-        canPop: false,
-        onPopInvokedWithResult: (didPop, _) {
-          if (!didPop) unawaited(_exitFullscreen());
-        },
-        child: Scaffold(
-          backgroundColor: Colors.black,
-          body: SafeArea(
-            top: false,
-            bottom: false,
-            child: _buildPlayerStack(c, heroUrl, immersive: true),
-          ),
-        ),
-      );
+      _fullscreenOverlay?.markNeedsBuild();
     }
 
     return Column(
