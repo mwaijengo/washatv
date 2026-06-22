@@ -13,6 +13,8 @@ class PlayerControls extends StatelessWidget {
     this.isFullscreen = false,
     this.visible = true,
     this.onUserInteraction,
+    this.dataSaverEnabled = true,
+    this.onToggleDataSaver,
   });
 
   final bool playing;
@@ -25,6 +27,8 @@ class PlayerControls extends StatelessWidget {
   final bool isFullscreen;
   final bool visible;
   final VoidCallback? onUserInteraction;
+  final bool dataSaverEnabled;
+  final VoidCallback? onToggleDataSaver;
 
   @override
   Widget build(BuildContext context) {
@@ -86,6 +90,30 @@ class PlayerControls extends StatelessWidget {
                       const SizedBox(width: 8),
                       Text(durationLabel, style: const TextStyle(color: Color(0xFF6B7280), fontSize: 12)),
                       const Spacer(),
+                      if (onToggleDataSaver != null)
+                        TextButton.icon(
+                          onPressed: () {
+                            onUserInteraction?.call();
+                            onToggleDataSaver!();
+                          },
+                          style: TextButton.styleFrom(
+                            foregroundColor: dataSaverEnabled ? const Color(0xFF34D399) : const Color(0xFF9CA3AF),
+                            padding: const EdgeInsets.symmetric(horizontal: 8),
+                            minimumSize: const Size(0, 36),
+                            tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                          ),
+                          icon: Icon(
+                            dataSaverEnabled ? Icons.savings_rounded : Icons.savings_outlined,
+                            size: 18,
+                          ),
+                          label: Text(
+                            dataSaverEnabled ? 'Okoa bando' : 'HD',
+                            style: TextStyle(
+                              fontSize: 11,
+                              fontWeight: dataSaverEnabled ? FontWeight.w700 : FontWeight.w500,
+                            ),
+                          ),
+                        ),
                       IconButton(
                         onPressed: () {
                           onUserInteraction?.call();

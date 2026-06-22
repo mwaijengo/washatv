@@ -3,6 +3,14 @@ allprojects {
         google()
         mavenCentral()
     }
+    configurations.all {
+        resolutionStrategy.eachDependency {
+            if (requested.group == "org.jetbrains.kotlin") {
+                useVersion("2.2.20")
+                because("Align all Kotlin versions with settings.gradle.kts pin")
+            }
+        }
+    }
 }
 
 val newBuildDir: Directory =

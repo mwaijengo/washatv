@@ -8,7 +8,10 @@ import 'package:webview_flutter/webview_flutter.dart';
 
 import '../models/channel.dart';
 import '../player/channel_playback_engine.dart';
+import '../player/playback_quality.dart';
 import '../player/php_gateway_js.dart';
+import '../player/webview_playback_probe.dart';
+import '../services/storage_service.dart';
 import '../utils/cache_bust_image_url.dart';
 import '../widgets/channel_card.dart';
 import '../widgets/playback_unavailable_overlay.dart';
@@ -19,7 +22,7 @@ typedef PlayerBackHandler = bool Function();
 const _kMaxAutoRetries = 8;
 const _kRetryDelay = Duration(seconds: 3);
 const _kWebPlaybackPollInterval = Duration(milliseconds: 800);
-const _kWebPlaybackPollMaxTicks = 45;
+const _kWebPlaybackPollMaxTicks = 55;
 
 class PlayerScreen extends StatefulWidget {
   const PlayerScreen({
@@ -65,7 +68,9 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
   bool _showManualRetry = false;
   bool _webFallbackTried = false;
   bool _handlingPlaybackFailure = false;
+  bool _dataSaverEnabled = true;
 
+  final _storage = StorageService();
   int _loadToken = 0;
   int _autoRetryCount = 0;
   Timer? _loadWatchdog;
@@ -80,6 +85,30 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     widget.onBackHandlerChanged?.call(_handlePlayerBack);
+    unawaited(_bootstrapPlayback());
+  }
+
+  Future<void> _bootstrapPlayback() async {
+    await _loadDataSaverPreference();
+    if (!mounted) return;
+    unawaited(_startPlayback(_current));
+  }
+
+  Future<void> _loadDataSaverPreference() async {
+    final enabled = await _storage.getDataSaverEnabled();
+    if (!mounted) return;
+    setState(() => _dataSaverEnabled = enabled);
+  }
+
+  PlaybackQuality get _playbackQuality =>
+      _dataSaverEnabled ? PlaybackQuality.okoaBando : PlaybackQuality.full;
+
+  Future<void> _toggleDataSaver() async {
+    final next = !_dataSaverEnabled;
+    setState(() => _dataSaverEnabled = next);
+    await _storage.setDataSaverEnabled(next);
+    _webFallbackTried = false;
+    _autoRetryCount = 0;
     unawaited(_startPlayback(_current));
   }
 
@@ -140,7 +169,7 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
 
   void _armLoadWatchdog(int token, Channel ch, {required bool forceWebView}) {
     _cancelLoadWatchdog();
-    final timeout = forceWebView ? const Duration(seconds: 30) : const Duration(seconds: 12);
+    final timeout = forceWebView ? const Duration(seconds: 45) : const Duration(seconds: 12);
     _loadWatchdog = Timer(timeout, () {
       if (!mounted || token != _loadToken || !_streamLoading) return;
       if (!kIsWeb && !forceWebView && !_webFallbackTried) {
@@ -236,9 +265,7 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
       }
 
       try {
-        final raw = await web.runJavaScriptReturningResult(
-          "(() => { const v = document.querySelector('video'); if (!v) return '0'; if (v.error) return 'err'; if (!v.paused && v.readyState >= 2 && v.currentTime > 0) return '1'; return '0'; })()",
-        );
+        final raw = await web.runJavaScriptReturningResult(kWebPlaybackStatusJs);
         final status = raw.toString().replaceAll('"', '');
         if (status == '1') {
           timer.cancel();
@@ -353,6 +380,7 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
       final session = await ChannelPlaybackSession.open(
         streamUrl: url,
         drm: ch.drm,
+        quality: _playbackQuality,
         forceWebView: forceWebView,
       );
       if (!mounted || token != _loadToken) {
@@ -680,6 +708,8 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
               durationLabel: _durationLabel,
               isFullscreen: fullscreen,
               visible: controlsVisible,
+              dataSaverEnabled: _dataSaverEnabled,
+              onToggleDataSaver: _toggleDataSaver,
               onUserInteraction: immersive ? _showImmersiveControls : null,
               onPlay: () => unawaited(_togglePlayPause()),
               onToggleFullscreen: () => unawaited(_toggleFullscreen()),

@@ -126,4 +126,17 @@ class StorageService {
     final p = await SharedPreferences.getInstance();
     await p.setString(supportWhatsappPrefsKey, value);
   }
+
+  static const _dataSaverKey = 'washatvOkoaBando';
+
+  /// Okoa bando (data saver) — default ON (360p cap).
+  Future<bool> getDataSaverEnabled() async {
+    final p = await SharedPreferences.getInstance();
+    return p.getBool(_dataSaverKey) ?? true;
+  }
+
+  Future<void> setDataSaverEnabled(bool value) async {
+    final p = await SharedPreferences.getInstance();
+    await p.setBool(_dataSaverKey, value);
+  }
 }

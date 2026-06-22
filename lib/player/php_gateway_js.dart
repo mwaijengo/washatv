@@ -34,6 +34,10 @@ const String kPhpGatewayRecoveryJs = '''
   function bindVideo(video) {
     if (!video || video.__washaBound) return;
     video.__washaBound = true;
+    video.addEventListener('error', function () {
+      window.__washaError = 'video_error';
+      window.__washaPlaying = false;
+    });
     hidePageChrome();
     video.setAttribute('playsinline', 'true');
     video.setAttribute('webkit-playsinline', 'true');
@@ -48,6 +52,8 @@ const String kPhpGatewayRecoveryJs = '''
     video.addEventListener('playing', function () {
       lastProgressAt = Date.now();
       waitingSince = 0;
+      window.__washaPlaying = true;
+      window.__washaError = null;
     });
 
     video.addEventListener('waiting', function () {
