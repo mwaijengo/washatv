@@ -30,10 +30,10 @@ enum AppScreen { home, player, categories, profile, subscription }
 
 const _secureChannel = MethodChannel('com.washatv/secure');
 
-Future<void> _applyScreenSecurity(AppScreen screen) async {
-  final secure = screen != AppScreen.profile;
+Future<void> _enableScreenSecurity() async {
+  if (kIsWeb) return;
   try {
-    await _secureChannel.invokeMethod('setSecure', {'secure': secure});
+    await _secureChannel.invokeMethod('setSecure', {'secure': true});
   } catch (_) {}
 }
 
@@ -85,7 +85,7 @@ class _WashaAppState extends State<WashaApp> with WidgetsBindingObserver {
   String? bootstrapFailureDetail;
   bool _noInternetVisible = false;
   bool _noInternetRetrying = false;
-  Timer? ticker;
+  Timer? _premiumExpiryTimer;
   Timer? carouselTimer;
   Timer? configPoller;
   int carousel = 0;
@@ -109,16 +109,44 @@ class _WashaAppState extends State<WashaApp> with WidgetsBindingObserver {
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
-    unawaited(_applyScreenSecurity(current));
+    unawaited(_enableScreenSecurity());
     _init();
-    ticker = Timer.periodic(const Duration(seconds: 1), (_) => setState(() {}));
+    _schedulePremiumExpiryCheck();
     carouselTimer = Timer.periodic(const Duration(seconds: 5), (_) {
       if (!mounted || current != AppScreen.home) return;
       if (slides.isEmpty) return;
       setState(() => carousel = (carousel + 1) % slides.length);
     });
-    // Live sync: meta poll every 8s (backs off automatically when API is unreachable).
+    // Live sync: meta poll every 8s (paused while player is open).
+    _startConfigPoller();
+  }
+
+  void _startConfigPoller() {
+    configPoller?.cancel();
     configPoller = Timer.periodic(const Duration(seconds: 8), (_) => _pollConfigMeta());
+  }
+
+  void _pauseConfigPoller() {
+    configPoller?.cancel();
+    configPoller = null;
+  }
+
+  /// One-shot timer when premium expires — avoids rebuilding the whole app every second.
+  void _schedulePremiumExpiryCheck() {
+    _premiumExpiryTimer?.cancel();
+    final end = subEnd;
+    if (end == null) return;
+    final now = DateTime.now();
+    if (!end.isAfter(now)) {
+      if (mounted) setState(() {});
+      return;
+    }
+    final wait = end.difference(now) + const Duration(seconds: 1);
+    _premiumExpiryTimer = Timer(wait, () {
+      if (!mounted) return;
+      setState(() {});
+      _schedulePremiumExpiryCheck();
+    });
   }
 
   void _startLiveSyncAfterBoot() {
@@ -282,6 +310,7 @@ class _WashaAppState extends State<WashaApp> with WidgetsBindingObserver {
       _noInternetVisible = fetchErr != null && !kIsWeb;
       _noInternetRetrying = false;
     });
+    _schedulePremiumExpiryCheck();
     _startLiveSyncAfterBoot();
   }
 
@@ -302,6 +331,7 @@ class _WashaAppState extends State<WashaApp> with WidgetsBindingObserver {
 
   Future<void> _pollConfigMeta() async {
     if (bootLoading || metaPollInFlight || api.shouldSkipLightweightPoll) return;
+    if (current == AppScreen.player) return;
     metaPollInFlight = true;
     try {
       _bumpConfigPollTick();
@@ -367,6 +397,21 @@ class _WashaAppState extends State<WashaApp> with WidgetsBindingObserver {
         ? profile.planName!.trim()
         : (key != null && key.isNotEmpty ? nextPlan.name : '');
 
+    if (current == AppScreen.player) {
+      if (!isGenericViewerName(profile.name)) userName = nextName;
+      subEnd = nextEnd;
+      selectedPlan = nextPlan;
+      _premiumPlanLabel = label;
+      _premiumAccessSource = profile.accessSource;
+      if (!isGenericViewerName(profile.name)) {
+        unawaited(storage.setName(userName));
+      }
+      unawaited(storage.setSubscriptionEnd(nextEnd));
+      if (wasPremium != premium) unawaited(_syncPushTopics());
+      _schedulePremiumExpiryCheck();
+      return;
+    }
+
     setState(() {
       if (!isGenericViewerName(profile.name)) userName = nextName;
       subEnd = nextEnd;
@@ -382,10 +427,12 @@ class _WashaAppState extends State<WashaApp> with WidgetsBindingObserver {
     if (wasPremium != premium) {
       unawaited(_syncPushTopics());
     }
+    _schedulePremiumExpiryCheck();
   }
 
   Future<void> _syncFromServer({bool silent = false, bool forceFull = false}) async {
     if (bootLoading) return;
+    if (current == AppScreen.player && silent && !forceFull) return;
     if (syncInFlight) {
       if (forceFull) pendingConfigSync = true;
       return;
@@ -454,8 +501,11 @@ class _WashaAppState extends State<WashaApp> with WidgetsBindingObserver {
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
+      unawaited(_enableScreenSecurity());
       unawaited(_reconcileDeviceIdFromStorage());
-      unawaited(_syncFromServer(silent: true, forceFull: true));
+      if (current != AppScreen.player) {
+        unawaited(_syncFromServer(silent: true, forceFull: true));
+      }
       unawaited(_syncViewerProfileFromServer());
     }
   }
@@ -471,7 +521,7 @@ class _WashaAppState extends State<WashaApp> with WidgetsBindingObserver {
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
-    ticker?.cancel();
+    _premiumExpiryTimer?.cancel();
     carouselTimer?.cancel();
     configPoller?.cancel();
     super.dispose();
@@ -484,9 +534,9 @@ class _WashaAppState extends State<WashaApp> with WidgetsBindingObserver {
         selectedChannel = null;
         _playerBackHandler = null;
         _playerFullscreen = false;
+        _startConfigPoller();
       }
     });
-    unawaited(_applyScreenSecurity(s));
     unawaited(_pollConfigMeta());
     if (s == AppScreen.subscription) {
       unawaited(_syncFromServer(silent: true, forceFull: true));
@@ -654,6 +704,7 @@ class _WashaAppState extends State<WashaApp> with WidgetsBindingObserver {
       _premiumPlanLabel = selectedPlan.name;
       _premiumAccessSource = 'payment';
     });
+    _schedulePremiumExpiryCheck();
     unawaited(_syncPushTopics());
   }
 
@@ -1136,7 +1187,7 @@ class _WashaAppState extends State<WashaApp> with WidgetsBindingObserver {
       selectedChannel = c;
       current = AppScreen.player;
     });
-    unawaited(_applyScreenSecurity(AppScreen.player));
+    _pauseConfigPoller();
   }
 }
 

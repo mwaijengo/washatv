@@ -25,28 +25,37 @@ String buildShakaPlayerHtml({
   <style>
     html, body { margin: 0; padding: 0; width: 100%; height: 100%; background: #000; overflow: hidden; }
     video { width: 100%; height: 100%; object-fit: contain; background: #000; }
+    .shaka-text-container, .shaka-error-container, .shaka-errors,
+    #shaka-player-ui-error-container, .shaka-message-container,
+    #error-container, #error-display, pre, code {
+      display: none !important; visibility: hidden !important; opacity: 0 !important;
+    }
   </style>
   <script src="https://cdn.jsdelivr.net/npm/shaka-player@4.12.5/dist/shaka-player.compiled.js"></script>
 </head>
 <body>
-  <video id="video" playsinline webkit-playsinline autoplay></video>
+  <video id="video" playsinline webkit-playsinline autoplay muted></video>
   <script>
     (function () {
       var cfg = $config;
       window.__washaPlaying = false;
+      window.__washaPlaybackLocked = false;
       window.__washaError = null;
 
       function markPlaying() {
         window.__washaPlaying = true;
+        window.__washaPlaybackLocked = true;
         window.__washaError = null;
       }
 
       function markError(msg) {
         window.__washaPlaying = false;
-        window.__washaError = msg || 'playback_error';
+        window.__washaPlaybackLocked = false;
+        window.__washaError = 'playback_error';
       }
 
       function tryPlay(video) {
+        if (window.__washaUserPaused) return;
         try {
           var p = video.play();
           if (p && typeof p.catch === 'function') p.catch(function () {});
@@ -64,21 +73,29 @@ String buildShakaPlayerHtml({
         var player = new shaka.Player(video);
 
         player.addEventListener('error', function (evt) {
-          markError((evt.detail && evt.detail.message) || 'shaka_error');
+          markError('shaka_error');
         });
 
-        video.addEventListener('playing', markPlaying);
+        video.addEventListener('playing', function () {
+          markPlaying();
+          setTimeout(function () {
+            if (window.__washaUserPaused) return;
+            try { video.muted = false; } catch (e) {}
+          }, 120);
+        });
         video.addEventListener('timeupdate', function () {
-          if (!video.paused && video.readyState >= 2) markPlaying();
+          if (window.__washaUserPaused) return;
+          if (!video.paused && video.readyState >= 3) markPlaying();
         });
 
         var playerConfig = {
           streaming: {
             bufferingGoal: 12,
             rebufferingGoal: 4,
-            retryParameters: { timeout: 15000, maxAttempts: 4, baseDelay: 500 }
+            bufferBehind: 20,
+            retryParameters: { timeout: 12000, maxAttempts: 4, baseDelay: 500 }
           },
-          abr: { enabled: true }
+          abr: { enabled: true, switchInterval: 8 }
         };
 
         if (cfg.maxHeight > 0) {
@@ -110,9 +127,10 @@ String buildShakaPlayerHtml({
 
         try {
           await player.load(cfg.url);
+          window.__washaShakaPlayer = player;
           tryPlay(video);
         } catch (e) {
-          markError((e && e.message) || 'load_failed');
+          markError('load_failed');
         }
       }
 

@@ -26,18 +26,19 @@ void main() {
   });
 
   group('ChannelPlaybackSession.playbackRoutePlan', () {
-    test('php uses direct webview first', () {
+    test('php gateway embed uses direct webview only', () {
       final routes = ChannelPlaybackSession.playbackRoutePlan(
         url: 'https://gate.example.com/live.php?ch=1',
       );
-      expect(routes.first, PlaybackRoute.directWebView);
+      expect(routes, [PlaybackRoute.directWebView]);
     });
 
-    test('mpd uses shaka first', () {
+    test('mpd tries native exo before shaka', () {
       final routes = ChannelPlaybackSession.playbackRoutePlan(
         url: 'https://cdn.example.com/live.mpd',
       );
-      expect(routes.first, PlaybackRoute.shakaWebView);
+      expect(routes.first, PlaybackRoute.nativeExo);
+      expect(routes, contains(PlaybackRoute.shakaWebView));
     });
 
     test('drm uses shaka first', () {
@@ -48,12 +49,13 @@ void main() {
       expect(routes.first, PlaybackRoute.shakaWebView);
     });
 
-    test('okoa bando hls prefers shaka for 360p cap', () {
+    test('okoa bando hls still prefers native exo for fast start', () {
       final routes = ChannelPlaybackSession.playbackRoutePlan(
         url: 'https://cdn.example.com/live.m3u8',
         quality: PlaybackQuality.okoaBando,
       );
-      expect(routes.first, PlaybackRoute.shakaWebView);
+      expect(routes.first, PlaybackRoute.nativeExo);
+      expect(routes, contains(PlaybackRoute.shakaWebView));
     });
 
     test('full quality hls prefers native exo', () {

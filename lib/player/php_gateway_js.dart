@@ -1,116 +1,120 @@
-/// Injected after gateway pages load to recover HTML5 video playback.
-const String kPhpGatewayRecoveryJs = '''
+export 'web_quality_js.dart' show kWebQualityApplyJs, kWebQualityInstallJs;
+
+/// Passive observer for external Shaka gateway pages (sp1.php, sp2.php).
+const String kPhpGatewayPassiveJs = '''
 (function () {
-  var lastProgressAt = Date.now();
-  var waitingSince = 0;
-  var monitorStarted = false;
+  if (window.__washaGatewayPassive) return true;
+  window.__washaGatewayPassive = true;
 
-  function getVideo() {
-    return document.querySelector('video');
-  }
-
-  function tryPlay(video) {
+  function styleVideo() {
     try {
-      var p = video.play && video.play();
-      if (p && typeof p.catch === 'function') p.catch(function(){});
-    } catch (e) {}
-  }
-
-  function hidePageChrome() {
-    try {
-      document.documentElement.style.background = '#000';
-      document.body.style.background = '#000';
-      if (!document.getElementById('washa-hide')) {
+      if (!document.getElementById('washa-style')) {
         var style = document.createElement('style');
-        style.id = 'washa-hide';
+        style.id = 'washa-style';
         style.textContent =
-          'body > *:not(video):not(script):not(style) { visibility: hidden !important; pointer-events: none !important; }' +
-          'video { visibility: visible !important; pointer-events: auto !important; max-width: 100% !important; max-height: 100% !important; }';
+          'html, body { margin: 0 !important; padding: 0 !important; width: 100% !important; height: 100% !important; background: #000 !important; overflow: hidden !important; }' +
+          'video { width: 100% !important; height: 100% !important; object-fit: contain !important; background: #000 !important; }' +
+          'body > img, body > div > img { display: none !important; }' +
+          '.shaka-text-container, .shaka-error-container, .shaka-errors, #shaka-player-ui-error-container, ' +
+          '.shaka-message-container, #error-container, #error-display, .error-display, pre, code, ' +
+          '.alert, .alert-danger, .error-message { display: none !important; visibility: hidden !important; opacity: 0 !important; }';
         (document.head || document.documentElement).appendChild(style);
       }
+      document.documentElement.style.background = '#000';
+      document.body.style.background = '#000';
+      var v = document.querySelector('video');
+      if (v) {
+        v.removeAttribute('poster');
+        v.style.background = '#000';
+      }
     } catch (e) {}
   }
 
-  function bindVideo(video) {
-    if (!video || video.__washaBound) return;
-    video.__washaBound = true;
-    video.addEventListener('error', function () {
-      window.__washaError = 'video_error';
-      window.__washaPlaying = false;
-    });
-    hidePageChrome();
-    video.setAttribute('playsinline', 'true');
-    video.setAttribute('webkit-playsinline', 'true');
-    try { video.muted = false; } catch (e) {}
-    video.controls = false;
-
-    video.addEventListener('timeupdate', function () {
-      lastProgressAt = Date.now();
-      waitingSince = 0;
-    });
-
-    video.addEventListener('playing', function () {
-      lastProgressAt = Date.now();
-      waitingSince = 0;
-      window.__washaPlaying = true;
-      window.__washaError = null;
-    });
-
-    video.addEventListener('waiting', function () {
-      waitingSince = waitingSince || Date.now();
-    });
-
-    tryPlay(video);
+  function nudgePlayOn(video) {
+    if (!video || window.__washaUserPaused) return;
+    if (!video.paused && video.readyState >= 2) return;
+    try {
+      video.muted = true;
+      var p = video.play && video.play();
+      if (p && typeof p.then === 'function') {
+        p.then(function () { try { video.muted = false; } catch (e) {} });
+      } else {
+        try { video.muted = false; } catch (e) {}
+      }
+    } catch (e) {}
   }
 
-  function startMonitor() {
-    if (monitorStarted) return;
-    monitorStarted = true;
-    var ticks = 0;
-    setInterval(function () {
-      ticks++;
-      var video = getVideo();
-      if (!video) return;
-      bindVideo(video);
+  function nudgePlayOnce() {
+    nudgePlayOn(document.querySelector('video'));
+  }
 
-      var now = Date.now();
-      var noProgressMs = now - lastProgressAt;
-      if (video.paused && !video.ended) {
-        tryPlay(video);
+  function observeVideo(video) {
+    if (!video || video.__washaObserved) return;
+    video.__washaObserved = true;
+    video.setAttribute('playsinline', 'true');
+    video.setAttribute('webkit-playsinline', 'true');
+    video.setAttribute('autoplay', 'true');
+    nudgePlayOn(video);
+    video.addEventListener('playing', function () {
+      if (window.__washaUserPaused) return;
+      window.__washaPlaying = true;
+      window.__washaPlaybackLocked = true;
+      window.__washaError = null;
+      try { video.muted = false; } catch (e) {}
+    });
+    video.addEventListener('timeupdate', function () {
+      if (window.__washaUserPaused) return;
+      if (video.currentTime > 0.05 || video.videoWidth > 0) {
+        window.__washaPlaying = true;
+        window.__washaPlaybackLocked = true;
+        window.__washaError = null;
       }
+    });
+    video.addEventListener('pause', function () {
+      if (window.__washaUserPaused) {
+        window.__washaPlaying = false;
+        window.__washaPlaybackLocked = false;
+      }
+    });
+  }
 
-      if (ticks <= 8 && (video.readyState < 2 || video.paused)) {
-        tryPlay(video);
+  function hideTechMessages() {
+    try {
+      var kids = document.body ? document.body.children : [];
+      for (var i = 0; i < kids.length; i++) {
+        var el = kids[i];
+        if (!el || el.tagName === 'VIDEO' || el.tagName === 'STYLE' || el.tagName === 'SCRIPT') continue;
+        if (el.id === 'washa-style' || el.id === 'washa-hide-errors') continue;
+        if (el.querySelector && el.querySelector('video')) continue;
+        var txt = (el.textContent || '').trim().toLowerCase();
+        if (!txt) continue;
+        if (txt.indexOf('error') >= 0 || txt.indexOf('shaka') >= 0 || txt.indexOf('http') >= 0 || /\\b\\d{4}\\b/.test(txt)) {
+          el.style.display = 'none';
+        }
       }
+    } catch (e) {}
+  }
 
-      if ((video.readyState < 3 || video.seeking) && waitingSince === 0) {
-        waitingSince = now;
-      }
-
-      var stallLimit = ticks <= 12 ? 3500 : 8000;
-      if (waitingSince > 0 && noProgressMs > stallLimit) {
-        try {
-          if (isFinite(video.currentTime) && video.currentTime > 0.15) {
-            video.currentTime = Math.max(0, video.currentTime - 0.1);
-          }
-        } catch (e) {}
-        tryPlay(video);
-        waitingSince = now;
-      }
-    }, 600);
+  function tick() {
+    styleVideo();
+    hideTechMessages();
+    var v = document.querySelector('video');
+    if (v) observeVideo(v);
   }
 
   try {
-    var observer = new MutationObserver(function () {
-      var v = getVideo();
-      if (v) bindVideo(v);
-    });
+    var observer = new MutationObserver(tick);
     observer.observe(document.documentElement || document.body, { childList: true, subtree: true });
   } catch (e) {}
 
-  hidePageChrome();
-  bindVideo(getVideo());
-  startMonitor();
+  tick();
+  nudgePlayOnce();
+  setTimeout(nudgePlayOnce, 80);
+  setTimeout(nudgePlayOnce, 250);
+  setTimeout(nudgePlayOnce, 600);
+  setInterval(tick, 1500);
   true;
 })();
 ''';
+
+const String kPhpGatewayRecoveryJs = kPhpGatewayPassiveJs;

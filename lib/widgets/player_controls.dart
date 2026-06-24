@@ -1,34 +1,36 @@
 import 'package:flutter/material.dart';
 
+import '../theme/app_theme.dart';
+
 class PlayerControls extends StatelessWidget {
   const PlayerControls({
     super.key,
     required this.playing,
     required this.progress,
     required this.onPlay,
-    required this.onToggleFullscreen,
     required this.onSeek,
     this.positionLabel = '0:00',
     this.durationLabel = 'LIVE',
-    this.isFullscreen = false,
     this.visible = true,
     this.onUserInteraction,
-    this.dataSaverEnabled = true,
-    this.onToggleDataSaver,
+    this.onOpenLanguage,
+    this.onOpenSettings,
+    this.isFullscreen = false,
+    this.onToggleFullscreen,
   });
 
   final bool playing;
   final double progress;
   final VoidCallback onPlay;
-  final VoidCallback onToggleFullscreen;
   final ValueChanged<double> onSeek;
   final String positionLabel;
   final String durationLabel;
-  final bool isFullscreen;
   final bool visible;
   final VoidCallback? onUserInteraction;
-  final bool dataSaverEnabled;
-  final VoidCallback? onToggleDataSaver;
+  final VoidCallback? onOpenLanguage;
+  final VoidCallback? onOpenSettings;
+  final bool isFullscreen;
+  final VoidCallback? onToggleFullscreen;
 
   @override
   Widget build(BuildContext context) {
@@ -70,7 +72,7 @@ class PlayerControls extends StatelessWidget {
                         minHeight: 4,
                         value: progress,
                         backgroundColor: const Color(0x33FFFFFF),
-                        valueColor: const AlwaysStoppedAnimation(Color(0xFFEF4444)),
+                        valueColor: const AlwaysStoppedAnimation(AppTheme.danger),
                       ),
                     ),
                   ),
@@ -90,37 +92,36 @@ class PlayerControls extends StatelessWidget {
                       const SizedBox(width: 8),
                       Text(durationLabel, style: const TextStyle(color: Color(0xFF6B7280), fontSize: 12)),
                       const Spacer(),
-                      if (onToggleDataSaver != null)
-                        TextButton.icon(
+                      if (onOpenLanguage != null)
+                        IconButton(
+                          tooltip: 'Lugha',
                           onPressed: () {
                             onUserInteraction?.call();
-                            onToggleDataSaver!();
+                            onOpenLanguage!();
                           },
-                          style: TextButton.styleFrom(
-                            foregroundColor: dataSaverEnabled ? const Color(0xFF34D399) : const Color(0xFF9CA3AF),
-                            padding: const EdgeInsets.symmetric(horizontal: 8),
-                            minimumSize: const Size(0, 36),
-                            tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                          ),
+                          icon: const Icon(Icons.public, size: 22),
+                        ),
+                      if (onOpenSettings != null)
+                        IconButton(
+                          tooltip: 'Mipangilio',
+                          onPressed: () {
+                            onUserInteraction?.call();
+                            onOpenSettings!();
+                          },
+                          icon: const Icon(Icons.settings, size: 22),
+                        ),
+                      if (onToggleFullscreen != null)
+                        IconButton(
+                          tooltip: isFullscreen ? 'Toka skrini nzima' : 'Skrini nzima',
+                          onPressed: () {
+                            onUserInteraction?.call();
+                            onToggleFullscreen!();
+                          },
                           icon: Icon(
-                            dataSaverEnabled ? Icons.savings_rounded : Icons.savings_outlined,
-                            size: 18,
-                          ),
-                          label: Text(
-                            dataSaverEnabled ? 'Okoa bando' : 'HD',
-                            style: TextStyle(
-                              fontSize: 11,
-                              fontWeight: dataSaverEnabled ? FontWeight.w700 : FontWeight.w500,
-                            ),
+                            isFullscreen ? Icons.fullscreen_exit : Icons.fullscreen,
+                            size: 22,
                           ),
                         ),
-                      IconButton(
-                        onPressed: () {
-                          onUserInteraction?.call();
-                          onToggleFullscreen();
-                        },
-                        icon: Icon(isFullscreen ? Icons.fullscreen_exit : Icons.fullscreen, size: 22),
-                      ),
                     ],
                   ),
                 ],

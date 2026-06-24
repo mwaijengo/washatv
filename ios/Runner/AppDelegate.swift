@@ -12,6 +12,9 @@ import UIKit
   ) -> Bool {
     let result = super.application(application, didFinishLaunchingWithOptions: launchOptions)
     setupSecureChannel()
+    DispatchQueue.main.async { [weak self] in
+      self?.setScreenshotProtection(enabled: true)
+    }
     return result
   }
 

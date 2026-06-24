@@ -16,7 +16,7 @@ class PlaybackUnavailableOverlay extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return ColoredBox(
-      color: const Color(0xE6000000),
+      color: Colors.black,
       child: Center(
         child: Column(
           mainAxisSize: MainAxisSize.min,
