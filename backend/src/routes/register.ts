@@ -5,6 +5,11 @@ import { bumpConfigVersion, getConfigMeta, getConfigVersion } from '../lib/versi
 import type { SseHub } from '../lib/sseHub.js';
 import { grantPremiumFromPayment, upsertPendingSonicpesaTransaction } from '../lib/premiumPayment.js';
 import {
+  detectTzMobileNetwork,
+  mobileMoneyMethodLabel,
+  paymentPromptForPhone,
+} from '../lib/mobileMoney.js';
+import {
   isSonicpesaFailure,
   isSonicpesaSuccess,
   normalizePaymentStatus,
@@ -172,7 +177,7 @@ export async function registerRoutes(
          FROM pricing_plans ORDER BY plan_key`,
       ),
       pool.query(
-        `SELECT id, name, category, premium, live, status, thumbnail, stream_url, viewers, rating, drm, sort_order, updated_at
+        `SELECT id, name, category, premium, live, status, thumbnail, stream_url, viewers, rating, drm, drm_clear_key, sort_order, updated_at
          FROM channels WHERE status = 'active' ORDER BY sort_order, name`,
       ),
       pool.query(
@@ -218,7 +223,7 @@ export async function registerRoutes(
 
   app.get('/api/v1/public/channels', async () => {
     const r = await pool.query(
-      `SELECT id, name, category, premium, live, status, thumbnail, stream_url, viewers, rating, drm, sort_order, updated_at
+      `SELECT id, name, category, premium, live, status, thumbnail, stream_url, viewers, rating, drm, drm_clear_key, sort_order, updated_at
        FROM channels WHERE status = 'active' ORDER BY sort_order, name`,
     );
     const v = await getConfigVersion(pool);
@@ -396,6 +401,9 @@ export async function registerRoutes(
         });
       }
 
+      const network = detectTzMobileNetwork(localPhone);
+      const payMethod = mobileMoneyMethodLabel(network);
+
       try {
         await upsertPendingSonicpesaTransaction(pool, {
           deviceId,
@@ -404,7 +412,12 @@ export async function registerRoutes(
           amount,
           planKey,
           orderId: order.order_id,
-          metadata: { reference: order.reference, initial_status: order.payment_status },
+          method: payMethod,
+          metadata: {
+            reference: order.reference,
+            initial_status: order.payment_status,
+            network,
+          },
         });
       } catch (dbErr) {
         req.log.error(dbErr, 'upsertPendingSonicpesaTransaction failed');
@@ -423,8 +436,9 @@ export async function registerRoutes(
         currency: 'TZS',
         plan_key: planKey,
         payment_status: order.payment_status ?? 'PENDING',
-        message:
-          'Angalia simu yako na thibitisha PIN (M-Pesa, Mixx by Yas, Airtel Money, Halotel).',
+        message: paymentPromptForPhone(localPhone),
+        network,
+        pay_method: payMethod,
       };
     } catch (e) {
       req.log.error(e, 'SonicPesa initiate failed');
@@ -489,6 +503,17 @@ export async function registerRoutes(
         const unreachable =
           remote.error?.toLowerCase().includes('unreachable') ||
           remote.error?.toLowerCase().includes('timed out');
+        if (tx.status === 'completed') {
+          const prem = await pool.query(`SELECT premium_until FROM users WHERE device_id = $1`, [deviceId]);
+          return {
+            ok: true,
+            payment_status: 'SUCCESS',
+            completed: true,
+            premium_until: prem.rows[0]?.premium_until
+              ? new Date(prem.rows[0].premium_until as Date).toISOString()
+              : null,
+          };
+        }
         return reply.code(unreachable ? 503 : 502).send({
           error: 'Imeshindikana kuangalia hali ya malipo. Jaribu tena.',
         });
@@ -499,13 +524,15 @@ export async function registerRoutes(
       if (isSonicpesaSuccess(paymentStatus)) {
         const body = req.body ?? {};
         const grantPhone = (body.phone ?? tx.phone ?? '').trim();
+        const localGrantPhone = toLocalTzPhone(grantPhone) ?? grantPhone;
+        const payMethod = mobileMoneyMethodLabel(detectTzMobileNetwork(localGrantPhone));
         try {
           const granted = await grantPremiumFromPayment(pool, {
             deviceId,
             userName: body.user_name?.trim() || 'Viewer',
-            phone: grantPhone,
+            phone: localGrantPhone,
             amount: Number(tx.amount),
-            method: 'M-Pesa',
+            method: payMethod,
             planKey: tx.plan_key ?? '',
             provider: 'sonicpesa',
             providerRef: orderId,
@@ -616,12 +643,14 @@ export async function registerRoutes(
         req.log.error({ orderId }, 'SonicPesa webhook: missing device_id on transaction');
         return reply.code(422).send({ error: 'cannot grant premium without device_id' });
       }
+      const localPhone = tx.phone ?? '';
+      const payMethod = mobileMoneyMethodLabel(detectTzMobileNetwork(localPhone));
       await grantPremiumFromPayment(pool, {
         deviceId,
         userName: String(tx.name ?? 'Viewer').trim() || 'Viewer',
-        phone: tx.phone ?? '',
+        phone: localPhone,
         amount: Number(tx.amount),
-        method: 'M-Pesa',
+        method: payMethod,
         planKey: tx.plan_key ?? '',
         provider: 'sonicpesa',
         providerRef: orderId,
@@ -807,7 +836,7 @@ export async function registerRoutes(
 
   app.get('/api/v1/admin/channels', { preHandler: adminPre }, async () => {
     const r = await pool.query(
-      `SELECT id, name, category, premium, live, status, thumbnail, stream_url, viewers, rating, drm, sort_order, updated_at
+      `SELECT id, name, category, premium, live, status, thumbnail, stream_url, viewers, rating, drm, drm_clear_key, sort_order, updated_at
        FROM channels ORDER BY sort_order, name, id`,
     );
     return { channels: r.rows };
@@ -821,8 +850,8 @@ export async function registerRoutes(
     try {
       await client.query('BEGIN');
       await client.query(
-        `INSERT INTO channels (id, name, category, premium, live, status, thumbnail, stream_url, viewers, rating, drm, sort_order, updated_at)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12, now())`,
+        `INSERT INTO channels (id, name, category, premium, live, status, thumbnail, stream_url, viewers, rating, drm, drm_clear_key, sort_order, updated_at)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13, now())`,
         [
           id,
           b.name,
@@ -835,6 +864,7 @@ export async function registerRoutes(
           Number(b.viewers ?? 0),
           String(b.rating ?? '5.0'),
           b.drm ?? 'none',
+          String(b.drm_clear_key ?? b.drmClearKey ?? ''),
           Number(b.sort_order ?? 0),
         ],
       );
@@ -875,6 +905,8 @@ export async function registerRoutes(
           viewers: 'viewers',
           rating: 'rating',
           drm: 'drm',
+          drm_clear_key: 'drm_clear_key',
+          drmClearKey: 'drm_clear_key',
           sort_order: 'sort_order',
         };
         for (const [k, col] of Object.entries(map)) {
@@ -953,7 +985,7 @@ export async function registerRoutes(
          FROM users ORDER BY created_at DESC NULLS LAST, id DESC LIMIT 500`,
       ),
       pool.query(
-        `SELECT id, name, category, premium, live, status, thumbnail, stream_url, viewers, rating, drm, sort_order, updated_at
+        `SELECT id, name, category, premium, live, status, thumbnail, stream_url, viewers, rating, drm, drm_clear_key, sort_order, updated_at
          FROM channels ORDER BY sort_order, name, id`,
       ),
       pool.query(

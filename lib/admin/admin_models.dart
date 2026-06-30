@@ -63,6 +63,7 @@ class AdminChannel {
     required this.viewers,
     required this.rating,
     this.drm,
+    this.drmClearKey = '',
   });
   final String id;
   String name;
@@ -78,6 +79,9 @@ class AdminChannel {
   String rating;
   /// `none` | `clearkey` | `widevine` — nullable so web hot reload does not leave stale null under non-null `String`.
   String? drm;
+
+  /// ClearKey payload when [effectiveDrm] is `clearkey` (hex kid:key, JSON, etc.).
+  String drmClearKey;
 
   String get effectiveDrm {
     final v = drm;

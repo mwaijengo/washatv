@@ -11,6 +11,7 @@ class Channel {
     required this.category,
     this.streamUrl = '',
     this.drm = ChannelDrm.none,
+    this.drmClearKey,
   });
 
   final int id;
@@ -21,6 +22,7 @@ class Channel {
   final String category;
   final String streamUrl;
   final ChannelDrm drm;
+  final String? drmClearKey;
 
   bool get hasStream => streamUrl.trim().isNotEmpty;
 

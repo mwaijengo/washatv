@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/widgets.dart';
+import 'package:media_kit/media_kit.dart';
 
 import 'app.dart';
 import 'register_webview_stub.dart'
@@ -10,6 +11,7 @@ import 'services/push_notification_service.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  MediaKit.ensureInitialized();
   registerWebviewPlatform();
   runApp(const WashaApp());
   unawaited(_initializePushNotifications());

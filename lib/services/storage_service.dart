@@ -128,6 +128,10 @@ class StorageService {
   }
 
   static const _dataSaverKey = 'washatvOkoaBando';
+  static const _pendingPayOrderKey = 'washatvPendingPayOrder';
+  static const _pendingPayPhoneKey = 'washatvPendingPayPhone';
+  static const _pendingPayNameKey = 'washatvPendingPayName';
+  static const _pendingPayPlanKey = 'washatvPendingPayPlan';
 
   /// Okoa bando (data saver) — default ON (360p cap).
   Future<bool> getDataSaverEnabled() async {
@@ -138,5 +142,38 @@ class StorageService {
   Future<void> setDataSaverEnabled(bool value) async {
     final p = await SharedPreferences.getInstance();
     await p.setBool(_dataSaverKey, value);
+  }
+
+  Future<void> savePendingPayment({
+    required String orderId,
+    required String phone,
+    required String name,
+    required String planKey,
+  }) async {
+    final p = await SharedPreferences.getInstance();
+    await p.setString(_pendingPayOrderKey, orderId);
+    await p.setString(_pendingPayPhoneKey, phone);
+    await p.setString(_pendingPayNameKey, name);
+    await p.setString(_pendingPayPlanKey, planKey);
+  }
+
+  Future<({String orderId, String phone, String name, String planKey})?> loadPendingPayment() async {
+    final p = await SharedPreferences.getInstance();
+    final orderId = p.getString(_pendingPayOrderKey)?.trim() ?? '';
+    if (orderId.isEmpty) return null;
+    return (
+      orderId: orderId,
+      phone: p.getString(_pendingPayPhoneKey)?.trim() ?? '',
+      name: p.getString(_pendingPayNameKey)?.trim() ?? '',
+      planKey: p.getString(_pendingPayPlanKey)?.trim() ?? '',
+    );
+  }
+
+  Future<void> clearPendingPayment() async {
+    final p = await SharedPreferences.getInstance();
+    await p.remove(_pendingPayOrderKey);
+    await p.remove(_pendingPayPhoneKey);
+    await p.remove(_pendingPayNameKey);
+    await p.remove(_pendingPayPlanKey);
   }
 }

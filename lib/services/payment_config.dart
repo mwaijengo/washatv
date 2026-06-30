@@ -54,4 +54,59 @@ class PaymentConfig {
 
   static const paymentPromptSw =
       'Angalia simu yako — thibitisha PIN (M-Pesa, Mixx by Yas, Airtel Money, Halotel).';
+
+  /// Detect mobile-money operator from normalized `0XXXXXXXXX` number.
+  static TzMobileNetwork detectNetwork(String raw) {
+    final phone = normalizeTzLocalPhone(raw);
+    if (phone == null || phone.length < 3) return TzMobileNetwork.unknown;
+    final prefix = phone.substring(0, 3);
+    if (halotelPrefixes.contains(prefix) && prefix != '069') {
+      return TzMobileNetwork.halotel;
+    }
+    if (const {'065', '067', '071', '073'}.contains(prefix)) {
+      return TzMobileNetwork.tigo;
+    }
+    if (const {'068', '069'}.contains(prefix)) {
+      return TzMobileNetwork.airtel;
+    }
+    if (const {'074', '075', '076', '077', '078'}.contains(prefix)) {
+      return TzMobileNetwork.mpesa;
+    }
+    if (phone.startsWith('06')) return TzMobileNetwork.halotel;
+    if (phone.startsWith('07')) return TzMobileNetwork.mpesa;
+    return TzMobileNetwork.unknown;
+  }
+
+  static String networkLabel(TzMobileNetwork network) {
+    switch (network) {
+      case TzMobileNetwork.mpesa:
+        return 'M-Pesa';
+      case TzMobileNetwork.airtel:
+        return 'Airtel Money';
+      case TzMobileNetwork.tigo:
+        return 'Mixx by Yas';
+      case TzMobileNetwork.halotel:
+        return 'Halotel';
+      case TzMobileNetwork.unknown:
+        return 'Mobile Money';
+    }
+  }
+
+  /// Network-specific USSD push hint after payment is initiated.
+  static String paymentPromptFor(String rawPhone) {
+    switch (detectNetwork(rawPhone)) {
+      case TzMobileNetwork.mpesa:
+        return 'Angalia simu yako — thibitisha PIN ya M-Pesa.';
+      case TzMobileNetwork.airtel:
+        return 'Angalia simu yako — thibitisha PIN ya Airtel Money.';
+      case TzMobileNetwork.tigo:
+        return 'Angalia simu yako — thibitisha PIN ya Mixx by Yas.';
+      case TzMobileNetwork.halotel:
+        return 'Angalia simu yako — thibitisha PIN ya Halotel.';
+      case TzMobileNetwork.unknown:
+        return paymentPromptSw;
+    }
+  }
 }
+
+enum TzMobileNetwork { mpesa, airtel, tigo, halotel, unknown }

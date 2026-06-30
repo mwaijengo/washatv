@@ -1,0 +1,163 @@
+<?xml version="1.0" encoding="utf-8"?>
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="#FF000000">
+
+    <androidx.media3.ui.PlayerView
+        android:id="@+id/player_view"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        app:animation_enabled="false"
+        app:show_buffering="when_playing"
+        app:show_subtitle_button="false"
+        app:surface_type="surface_view"
+        app:use_controller="false" />
+
+    <FrameLayout
+        android:id="@+id/webview_container"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:visibility="gone" />
+
+    <!-- Top buffering strip (Exo + WebView) -->
+    <ProgressBar
+        android:id="@+id/buffering_bar"
+        style="?android:attr/progressBarStyleHorizontal"
+        android:layout_width="match_parent"
+        android:layout_height="3dp"
+        android:layout_gravity="top"
+        android:indeterminate="true"
+        android:indeterminateDrawable="@drawable/buffering_bar_indeterminate"
+        android:visibility="gone" />
+
+    <!-- Black + spinner until first decoded video frame -->
+    <FrameLayout
+        android:id="@+id/loading_overlay"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:background="#FF000000"
+        android:clickable="false"
+        android:focusable="false"
+        android:visibility="visible">
+
+        <ProgressBar
+            android:id="@+id/loading_spinner"
+            style="?android:attr/progressBarStyleLarge"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="center"
+            android:indeterminateTint="#2196F3" />
+    </FrameLayout>
+
+    <FrameLayout
+        android:id="@+id/rotate_hint_overlay"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:background="#CC000000"
+        android:clickable="true"
+        android:focusable="true"
+        android:visibility="gone">
+
+        <LinearLayout
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="center"
+            android:gravity="center_horizontal"
+            android:orientation="vertical"
+            android:padding="28dp">
+
+            <ImageView
+                android:id="@+id/rotate_hint_phone"
+                android:layout_width="96dp"
+                android:layout_height="96dp"
+                android:contentDescription="@string/rotate_hint_message"
+                android:src="@drawable/ic_rotate_phone_hint" />
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="20dp"
+                android:gravity="center"
+                android:paddingStart="12dp"
+                android:paddingEnd="12dp"
+                android:text="@string/rotate_hint_message"
+                android:textColor="#FFFFFFFF"
+                android:textSize="17sp"
+                android:textStyle="bold" />
+
+            <LinearLayout
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="24dp"
+                android:gravity="center"
+                android:orientation="horizontal">
+
+                <Button
+                    android:id="@+id/btn_rotate_hint_later"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginEnd="10dp"
+                    android:backgroundTint="#40FFFFFF"
+                    android:minHeight="48dp"
+                    android:text="@string/rotate_hint_later"
+                    android:textAllCaps="false"
+                    android:textColor="#FFFFFFFF" />
+
+                <Button
+                    android:id="@+id/btn_rotate_hint_never"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="10dp"
+                    android:backgroundTint="#992196F3"
+                    android:minHeight="48dp"
+                    android:text="@string/rotate_hint_never_again"
+                    android:textAllCaps="false"
+                    android:textColor="#FFFFFFFF" />
+            </LinearLayout>
+        </LinearLayout>
+    </FrameLayout>
+
+    <LinearLayout
+        android:id="@+id/player_top_tools"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="bottom|end"
+        android:layout_marginEnd="12dp"
+        android:layout_marginBottom="20dp"
+        android:clickable="true"
+        android:elevation="48dp"
+        android:focusable="true"
+        android:translationZ="48dp"
+        android:gravity="center_vertical"
+        android:orientation="horizontal"
+        android:visibility="gone">
+
+        <ImageButton
+            android:id="@+id/btn_player_language"
+            android:layout_width="48dp"
+            android:layout_height="48dp"
+            android:layout_marginEnd="6dp"
+            android:background="@drawable/player_toolbar_button_bg"
+            android:clickable="true"
+            android:contentDescription="@string/pick_language"
+            android:focusable="true"
+            android:padding="12dp"
+            android:scaleType="centerInside"
+            android:src="@drawable/ic_player_language" />
+
+        <ImageButton
+            android:id="@+id/btn_player_settings"
+            android:layout_width="48dp"
+            android:layout_height="48dp"
+            android:background="@drawable/player_toolbar_button_bg"
+            android:clickable="true"
+            android:contentDescription="@string/player_settings"
+            android:focusable="true"
+            android:padding="12dp"
+            android:scaleType="centerInside"
+            android:src="@drawable/ic_player_settings" />
+    </LinearLayout>
+
+</FrameLayout>

@@ -420,6 +420,7 @@ class PublicApiService {
       if (name == null || name.isEmpty || thumb == null || thumb.isEmpty || category == null || category.isEmpty) continue;
       final stream = (j['stream_url'] as String?)?.trim() ?? (j['streamUrl'] as String?)?.trim() ?? '';
       final drmRaw = (j['drm'] as String?)?.trim().toLowerCase() ?? 'none';
+      final drmClearKey = (j['drm_clear_key'] as String?)?.trim() ?? (j['drmClearKey'] as String?)?.trim();
       final drm = switch (drmRaw) {
         'clearkey' => ChannelDrm.clearkey,
         'widevine' => ChannelDrm.widevine,
@@ -435,6 +436,7 @@ class PublicApiService {
           category: category,
           streamUrl: stream,
           drm: drm,
+          drmClearKey: drmClearKey?.isNotEmpty == true ? drmClearKey : null,
         ),
       );
     }

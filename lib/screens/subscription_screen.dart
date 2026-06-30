@@ -111,7 +111,7 @@ class SubscriptionScreen extends StatefulWidget {
                       isFailed
                           ? (errorMessage ?? 'Jaribu tena au hakikisha una salio kwenye M-Pesa, Mixx, Airtel Money au Halotel.')
                           : isSuccess
-                              ? 'Hongera! Sasa unaweza ku-stream channels zote.'
+                              ? 'Hongera! Channels zote zimefunguliwa.'
                               : '$planLabel · $amountLabel\n${statusLine ?? PaymentConfig.paymentPromptSw}',
                       textAlign: TextAlign.center,
                       style: TextStyle(
@@ -314,6 +314,10 @@ class _SubscriptionScreenState extends State<SubscriptionScreen> {
                     style: TextStyle(fontSize: 11, color: Color(0xFFF87171)),
                   ),
                 ),
+              if (_phoneOk) ...[
+                const SizedBox(height: 8),
+                _networkBadge(phone.text),
+              ],
             ],
           ),
         ),
@@ -390,6 +394,30 @@ class _SubscriptionScreenState extends State<SubscriptionScreen> {
           ),
           const SizedBox(height: 10),
           child,
+        ],
+      ),
+    );
+  }
+
+  Widget _networkBadge(String rawPhone) {
+    final network = PaymentConfig.detectNetwork(rawPhone);
+    final label = PaymentConfig.networkLabel(network);
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+      decoration: BoxDecoration(
+        color: const Color(0x221E3A8A),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: const Color(0x3393C5FD)),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const Icon(Icons.phone_android_rounded, size: 14, color: Color(0xFF93C5FD)),
+          const SizedBox(width: 6),
+          Text(
+            'Mtandao: $label',
+            style: const TextStyle(fontSize: 11.5, fontWeight: FontWeight.w700, color: Color(0xFFBFDBFE)),
+          ),
         ],
       ),
     );
@@ -974,7 +1002,7 @@ class _PaymentSuccessBanner extends StatelessWidget {
                 ),
                 SizedBox(height: 2),
                 Text(
-                  'Akaunti yako ya premium iko hai hapa chini.',
+                  'Channels zote zimefunguliwa — furahia premium!',
                   style: TextStyle(fontSize: 12.5, height: 1.35, color: Color(0xFFBBF7D0)),
                 ),
               ],

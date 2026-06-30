@@ -1,6 +1,6 @@
 import 'dart:convert';
 
-/// Decrypted stream payload from PHP / HTML gateway pages (EaMax [PhpGatewayExtractor]).
+/// Decrypted stream payload from PHP / HTML gateway pages (mirrors Kotlin [PhpGatewayExtractor]).
 class GatewayExtracted {
   const GatewayExtracted({
     required this.streamUrl,
@@ -17,7 +17,7 @@ class GatewayExtracted {
   final String clearKeyRaw;
 }
 
-/// XOR decrypt for encrypted PHP gateway fields.
+/// Port of Android [PhpGatewayExtractor] for Flutter Web / mobile WebView fetch path.
 class GatewayStreamExtractor {
   static const _streamFields = [
     'encryptedMpd',
@@ -61,6 +61,7 @@ class GatewayStreamExtractor {
     return null;
   }
 
+  /// License / token when stream URL is already known (network intercept path).
   static GatewayExtracted? extractDrmFromHtml(String html, {String fallbackStreamUrl = ''}) {
     final fields = _parseFields(html, requireStream: false);
     if (fields != null &&
@@ -80,6 +81,11 @@ class GatewayStreamExtractor {
     return _extractInlineDrm(html, fallbackStreamUrl: fallbackStreamUrl);
   }
 
+  static GatewayExtracted? extractFromHtml(String html, String fallbackStreamUrl) {
+    return extract(html) ??
+        extractDrmFromHtml(html, fallbackStreamUrl: fallbackStreamUrl);
+  }
+
   static GatewayExtracted _toExtracted(_ParsedFields fields) {
     return GatewayExtracted(
       streamUrl: fields.streamUrl,
@@ -94,7 +100,7 @@ class GatewayStreamExtractor {
     final keyPart = _pickQuoted(html, _keyFields);
     if (keyPart == null || keyPart.isEmpty) return null;
 
-    var streamUrl = '';
+    String streamUrl = '';
     for (final name in _streamFields) {
       final enc = _pickQuoted(html, [name]);
       if (enc != null && enc.isNotEmpty) {

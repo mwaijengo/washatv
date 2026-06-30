@@ -317,6 +317,7 @@ class _AdminScaffoldState extends State<AdminScaffold> {
         viewers: (j['viewers'] as num?)?.toInt() ?? 0,
         rating: _s(j['rating'], fallback: '5.0'),
         drm: _s(j['drm'], fallback: 'none'),
+        drmClearKey: _s(j['drm_clear_key'] ?? j['drmClearKey']),
       );
     }).where((c) => c.id.isNotEmpty && c.name.isNotEmpty).toList();
   }
@@ -3421,6 +3422,7 @@ class _AdminScaffoldState extends State<AdminScaffold> {
     final name = TextEditingController(text: existing?.name ?? '');
     final thumb = TextEditingController(text: existing?.thumbnail ?? '');
     final stream = TextEditingController(text: existing?.streamUrl ?? '');
+    final clearKey = TextEditingController(text: existing?.drmClearKey ?? '');
     var category = existing?.category ?? kAppChannelCategories.first;
     if (!kAppChannelCategories.contains(category)) {
       category = kAppChannelCategories.first;
@@ -3539,6 +3541,30 @@ class _AdminScaffoldState extends State<AdminScaffold> {
                       ],
                       onChanged: (v) => setModal(() => drm = v ?? 'none'),
                     ),
+                    AnimatedSize(
+                      duration: const Duration(milliseconds: 220),
+                      curve: Curves.easeOutCubic,
+                      alignment: Alignment.topCenter,
+                      child: drm == 'clearkey'
+                          ? Padding(
+                              padding: const EdgeInsets.only(top: 12),
+                              child: TextField(
+                                controller: clearKey,
+                                keyboardType: TextInputType.multiline,
+                                minLines: 2,
+                                maxLines: 4,
+                                autocorrect: false,
+                                decoration: _inputDeco().copyWith(
+                                  labelText: 'ClearKey',
+                                  hintText: 'kid_hex:key_hex',
+                                  helperText: 'Hex kid:key, kid,key, au JSON {"keys":[{"kid":"…","k":"…"}]}',
+                                  helperMaxLines: 2,
+                                  prefixIcon: const Icon(Icons.vpn_key_outlined, color: Color(0xFF94A3B8), size: 20),
+                                ),
+                              ),
+                            )
+                          : const SizedBox.shrink(),
+                    ),
                   ],
                 ),
               ),
@@ -3554,6 +3580,11 @@ class _AdminScaffoldState extends State<AdminScaffold> {
                   }
                   final tUrl = thumb.text.trim();
                   final sUrl = stream.text.trim();
+                  final ck = clearKey.text.trim();
+                  if (drm == 'clearkey' && ck.isEmpty) {
+                    _showToast('Andika ClearKey kwa chaneli hii', _ToastType.error);
+                    return;
+                  }
                   late AdminChannel syncChannel;
                   setState(() {
                     if (isEdit && index != null) {
@@ -3566,6 +3597,7 @@ class _AdminScaffoldState extends State<AdminScaffold> {
                       u.live = live;
                       u.status = active ? 'active' : 'inactive';
                       u.drm = drm;
+                      u.drmClearKey = drm == 'clearkey' ? ck : '';
                       syncChannel = u;
                     } else {
                       final created = AdminChannel(
@@ -3580,6 +3612,7 @@ class _AdminScaffoldState extends State<AdminScaffold> {
                         viewers: 0,
                         rating: '5.0',
                         drm: drm,
+                        drmClearKey: drm == 'clearkey' ? ck : '',
                       );
                       _channels.insert(
                         0,
@@ -3600,6 +3633,7 @@ class _AdminScaffoldState extends State<AdminScaffold> {
                       'viewers': syncChannel.viewers,
                       'rating': syncChannel.rating,
                       'drm': syncChannel.effectiveDrm,
+                      'drm_clear_key': syncChannel.drmClearKey,
                       'sort_order': 0,
                     });
                     try {

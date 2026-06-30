@@ -143,6 +143,7 @@ export async function upsertPendingSonicpesaTransaction(
     amount: number;
     planKey: string;
     orderId: string;
+    method?: string;
     metadata?: Record<string, unknown>;
   },
 ): Promise<string> {
@@ -160,10 +161,11 @@ export async function upsertPendingSonicpesaTransaction(
     );
     const userId = String(upsertUser.rows[0].id);
     const txId = `TRX-${nanoid(10)}`;
+    const payMethod = (input.method ?? 'Mobile Money').trim() || 'Mobile Money';
     await client.query(
       `INSERT INTO transactions
          (id, user_id, phone, amount, currency, method, provider, provider_ref, plan_key, status, metadata, created_at, updated_at)
-       VALUES ($1,$2,$3,$4,'TZS','M-Pesa','sonicpesa',$5,$6,'pending',$7::jsonb,now(),now())
+       VALUES ($1,$2,$3,$4,'TZS',$5,'sonicpesa',$6,$7,'pending',$8::jsonb,now(),now())
        ON CONFLICT (provider, provider_ref) WHERE provider_ref IS NOT NULL DO UPDATE SET
          user_id = EXCLUDED.user_id,
          phone = EXCLUDED.phone,
@@ -177,6 +179,7 @@ export async function upsertPendingSonicpesaTransaction(
         userId,
         input.phone.trim() || null,
         input.amount,
+        payMethod,
         input.orderId,
         input.planKey,
         JSON.stringify({

@@ -22,6 +22,7 @@ import 'services/sonicpesa_payment_service.dart';
 import 'services/storage_service.dart';
 import 'services/subscription_service.dart';
 import 'theme/app_theme.dart';
+import 'utils/player_orientation.dart';
 import 'widgets/bottom_nav.dart';
 import 'widgets/no_internet_modal.dart';
 import 'widgets/notification_permission_dialog.dart';
@@ -105,10 +106,16 @@ class _WashaAppState extends State<WashaApp> with WidgetsBindingObserver {
     return n;
   }
 
+  void _lockShellPortrait() {
+    if (_playerFullscreen) return;
+    unawaited(PlayerOrientation.lockHomePortrait());
+  }
+
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    _lockShellPortrait();
     unawaited(_enableScreenSecurity());
     _init();
     _schedulePremiumExpiryCheck();
@@ -154,6 +161,7 @@ class _WashaAppState extends State<WashaApp> with WidgetsBindingObserver {
     unawaited(_pollConfigMeta());
     unawaited(_syncViewerProfileFromServer());
     unawaited(_syncPushTopics());
+    unawaited(_recoverPendingPayment(silent: true));
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted || bootLoading) return;
       unawaited(
@@ -239,13 +247,9 @@ class _WashaAppState extends State<WashaApp> with WidgetsBindingObserver {
               name = profile.name.trim();
               await storage.setName(name);
             }
-            if (profile.premiumActive) {
-              subEndLocal = profile.premiumUntil;
-              await storage.setSubscriptionEnd(subEndLocal);
-            } else {
-              subEndLocal = null;
-              await storage.setSubscriptionEnd(null);
-            }
+            final serverEnd = profile.premiumActive ? profile.premiumUntil : null;
+            subEndLocal = subService.mergeEndDates(subEndLocal, serverEnd);
+            await storage.setSubscriptionEnd(subEndLocal);
             _premiumPlanLabel = profile.planName ?? profile.planKey ?? '';
             _premiumAccessSource = profile.accessSource;
           }
@@ -378,8 +382,8 @@ class _WashaAppState extends State<WashaApp> with WidgetsBindingObserver {
 
   void _applyViewerProfile(ViewerProfile profile) {
     final wasPremium = premium;
-    final DateTime? nextEnd;
-    nextEnd = profile.premiumActive ? profile.premiumUntil : null;
+    final serverEnd = profile.premiumActive ? profile.premiumUntil : null;
+    final nextEnd = subService.mergeEndDates(subEnd, serverEnd);
 
     Plan nextPlan = selectedPlan;
     final key = profile.planKey?.trim();
@@ -501,12 +505,14 @@ class _WashaAppState extends State<WashaApp> with WidgetsBindingObserver {
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
+      _lockShellPortrait();
       unawaited(_enableScreenSecurity());
       unawaited(_reconcileDeviceIdFromStorage());
       if (current != AppScreen.player) {
         unawaited(_syncFromServer(silent: true, forceFull: true));
       }
       unawaited(_syncViewerProfileFromServer());
+      unawaited(_recoverPendingPayment(silent: true));
     }
   }
 
@@ -537,6 +543,7 @@ class _WashaAppState extends State<WashaApp> with WidgetsBindingObserver {
         _startConfigPoller();
       }
     });
+    _lockShellPortrait();
     unawaited(_pollConfigMeta());
     if (s == AppScreen.subscription) {
       unawaited(_syncFromServer(silent: true, forceFull: true));
@@ -706,6 +713,19 @@ class _WashaAppState extends State<WashaApp> with WidgetsBindingObserver {
     });
     _schedulePremiumExpiryCheck();
     unawaited(_syncPushTopics());
+    unawaited(storage.clearPendingPayment());
+  }
+
+  void _showPremiumUnlockedSnack() {
+    _scaffoldMessengerKey.currentState?.showSnackBar(
+      SnackBar(
+        content: const Text('Premium imewashwa! Channels zote zimefunguliwa.'),
+        duration: const Duration(seconds: 4),
+        behavior: SnackBarBehavior.floating,
+        backgroundColor: const Color(0xFF166534),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+      ),
+    );
   }
 
   /// Brief overlay success, then premium status on Fungua zote (no stuck “Malipo Tayari!” screen).
@@ -714,7 +734,9 @@ class _WashaAppState extends State<WashaApp> with WidgetsBindingObserver {
     setState(() {
       paymentPhase = SonicpesaPaymentPhase.success;
       subscriptionPaymentSuccess = true;
+      paymentOrderId = null;
     });
+    _showPremiumUnlockedSnack();
     await Future.delayed(const Duration(milliseconds: 1100));
     if (!mounted) return;
     setState(() => paymentOverlayOpen = false);
@@ -742,7 +764,7 @@ class _WashaAppState extends State<WashaApp> with WidgetsBindingObserver {
       paymentOverlayOpen = true;
       paymentPhase = SonicpesaPaymentPhase.initiating;
       paymentError = null;
-      paymentStatusLine = null;
+      paymentStatusLine = PaymentConfig.paymentPromptFor(phone);
       subscriptionPaymentSuccess = false;
     });
 
@@ -754,66 +776,51 @@ class _WashaAppState extends State<WashaApp> with WidgetsBindingObserver {
         planKey: selectedPlan.id,
       );
 
+      await storage.savePendingPayment(
+        orderId: init.orderId,
+        phone: phone,
+        name: name,
+        planKey: selectedPlan.id,
+      );
+
       if (!mounted) return;
       setState(() {
         paymentOrderId = init.orderId;
         paymentPhase = SonicpesaPaymentPhase.waitingOnPhone;
-        paymentStatusLine = init.message ?? PaymentConfig.paymentPromptSw;
+        paymentStatusLine = init.message.isNotEmpty
+            ? init.message
+            : PaymentConfig.paymentPromptFor(phone);
       });
 
-      const maxAttempts = 60;
+      const maxAttempts = 90;
       for (var i = 0; i < maxAttempts; i++) {
-        await Future.delayed(const Duration(seconds: 2));
+        final delay = i < 20 ? const Duration(seconds: 1) : const Duration(seconds: 2);
+        await Future.delayed(delay);
         if (!mounted || !paymentOverlayOpen) return;
 
-        late final SonicpesaStatusResult status;
-        try {
-          status = await sonicPay.checkStatus(
-            deviceId: deviceId,
-            orderId: init.orderId,
-            userName: name,
-            phone: phone,
-          );
-        } on SonicpesaPaymentException catch (e) {
-          final code = e.statusCode;
-          if (code == 502 || code == 503 || code == 504) {
-            if (mounted) {
-              setState(() => paymentStatusLine = 'Seva inaendelea kuchakata malipo…');
-            }
-            continue;
-          }
-          rethrow;
-        }
+        final completed = await _pollPaymentOnce(
+          orderId: init.orderId,
+          phone: phone,
+          name: name,
+        );
+        if (completed) return;
 
         if (!mounted) return;
-
-        if (status.completed) {
-          await _applyPremiumUnlock(statusUntil: status.premiumUntil);
-          try {
-            await api.syncViewer(deviceId: deviceId, name: name, phone: phone);
-            await _syncFromServer(silent: true);
-            await _syncViewerProfileFromServer();
-          } catch (_) {
-            // Payment already succeeded — sync failures must not show as payment errors.
-          }
-
-          await _finalizePaymentSuccess();
-          return;
-        }
-
-        if (status.failed) {
-          throw SonicpesaPaymentException(
-            status.message ?? 'Malipo yameghairiwa au kukataliwa.',
-          );
-        }
-
         setState(() {
-          paymentStatusLine = _statusHint(status.paymentStatus);
+          paymentStatusLine = i < 8
+              ? PaymentConfig.paymentPromptFor(phone)
+              : 'Bado tunasubiri uthibitisho wa ${PaymentConfig.networkLabel(PaymentConfig.detectNetwork(phone))}…';
         });
       }
 
+      final recovered = await _tryRecoverPremiumFromServer();
+      if (recovered) {
+        await _finalizePaymentSuccess();
+        return;
+      }
+
       throw SonicpesaPaymentException(
-        'Muda wa kusubiri malipo umeisha. Hakikisha umethibitisha PIN kwenye simu.',
+        'Muda wa kusubiri malipo umeisha. Hakikisha umethibitisha PIN kwenye simu, kisha jaribu tena.',
       );
     } on SonicpesaPaymentException catch (e) {
       if (!mounted) return;
@@ -827,6 +834,122 @@ class _WashaAppState extends State<WashaApp> with WidgetsBindingObserver {
         paymentPhase = SonicpesaPaymentPhase.failed;
         paymentError = 'Hitilafu ya mtandao. Jaribu tena.';
       });
+    }
+  }
+
+  /// One status poll — returns true when payment completed and premium applied.
+  Future<bool> _pollPaymentOnce({
+    required String orderId,
+    required String phone,
+    required String name,
+  }) async {
+    late final SonicpesaStatusResult status;
+    try {
+      status = await sonicPay.checkStatus(
+        deviceId: deviceId,
+        orderId: orderId,
+        userName: name,
+        phone: phone,
+      );
+    } on SonicpesaPaymentException catch (e) {
+      final code = e.statusCode;
+      if (code == 502 || code == 503 || code == 504) {
+        if (mounted) {
+          setState(() => paymentStatusLine = 'Seva inaendelea kuchakata malipo…');
+        }
+        return _completePaymentIfPremiumReady();
+      }
+      rethrow;
+    }
+
+    if (status.completed) {
+      await _applyPremiumUnlock(statusUntil: status.premiumUntil);
+      try {
+        await api.syncViewer(deviceId: deviceId, name: name, phone: phone);
+        await _syncFromServer(silent: true);
+        await _syncViewerProfileFromServer();
+      } catch (_) {}
+      return _completePaymentIfPremiumReady();
+    }
+
+    if (status.failed) {
+      await storage.clearPendingPayment();
+      throw SonicpesaPaymentException(
+        status.message ?? 'Malipo yameghairiwa au kukataliwa.',
+      );
+    }
+
+    if (mounted) {
+      setState(() => paymentStatusLine = _statusHint(status.paymentStatus));
+    }
+    return false;
+  }
+
+  Future<bool> _completePaymentIfPremiumReady() async {
+    if (!premium && !subService.isPremium(subEnd)) {
+      final ok = await _tryRecoverPremiumFromServer();
+      if (!ok) return false;
+    }
+    if (paymentOverlayOpen) {
+      await _finalizePaymentSuccess();
+    } else {
+      await storage.clearPendingPayment();
+      if (mounted) {
+        setState(() => subscriptionPaymentSuccess = true);
+        _showPremiumUnlockedSnack();
+        Future.delayed(const Duration(seconds: 4), () {
+          if (mounted) setState(() => subscriptionPaymentSuccess = false);
+        });
+      }
+    }
+    return true;
+  }
+
+  /// After webhook or slow provider — confirm premium on server without a fresh payment.
+  Future<bool> _tryRecoverPremiumFromServer() async {
+    try {
+      final serverEnd = await api.fetchPremiumUntil(deviceId);
+      if (serverEnd != null && subService.isPremium(serverEnd)) {
+        await _applyPremiumUnlock(statusUntil: serverEnd);
+        try {
+          await _syncViewerProfileFromServer();
+        } catch (_) {}
+        return true;
+      }
+    } catch (_) {}
+    return false;
+  }
+
+  /// Resume polling when user closed overlay or app was backgrounded during USSD push.
+  Future<void> _recoverPendingPayment({bool silent = false}) async {
+    if (paymentOverlayOpen || premium || deviceId.isEmpty) return;
+    final pending = await storage.loadPendingPayment();
+    if (pending == null) return;
+
+    if (!silent && mounted) {
+      setState(() => paymentStatusLine = 'Inaangalia malipo yaliyosalia…');
+    }
+
+    for (var i = 0; i < 12; i++) {
+      if (!mounted || premium) return;
+      final done = await _pollPaymentOnce(
+        orderId: pending.orderId,
+        phone: pending.phone,
+        name: pending.name,
+      );
+      if (done) return;
+      await Future.delayed(const Duration(seconds: 2));
+    }
+
+    if (await _tryRecoverPremiumFromServer()) {
+      if (mounted) {
+        setState(() => subscriptionPaymentSuccess = true);
+        _showPremiumUnlockedSnack();
+        Future.delayed(const Duration(seconds: 4), () {
+          if (mounted) setState(() => subscriptionPaymentSuccess = false);
+        });
+      }
+      await storage.clearPendingPayment();
     }
   }
 
@@ -860,8 +983,8 @@ class _WashaAppState extends State<WashaApp> with WidgetsBindingObserver {
     setState(() {
       paymentOverlayOpen = false;
       paymentPhase = SonicpesaPaymentPhase.cancelled;
-      paymentOrderId = null;
     });
+    unawaited(_recoverPendingPayment(silent: true));
   }
 
   Future<void> _retryPayment() async {
@@ -1087,16 +1210,13 @@ class _WashaAppState extends State<WashaApp> with WidgetsBindingObserver {
         return PlayerScreen(
           channels: channels,
           channel: selectedChannel,
-          channelImageCacheEpoch: remoteConfigVersion,
-          premium: premium,
           onBack: _leavePlayer,
           onBackHandlerChanged: (handler) => _playerBackHandler = handler,
           onFullscreenChanged: (value) {
             if (_playerFullscreen == value) return;
             setState(() => _playerFullscreen = value);
+            if (!value) _lockShellPortrait();
           },
-          onOpenPlayer: _openPlayer,
-          onOpenSubscription: () => switchScreen(AppScreen.subscription),
         );
       case AppScreen.categories:
         return CategoriesScreen(
