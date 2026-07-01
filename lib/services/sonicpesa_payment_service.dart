@@ -44,7 +44,6 @@ class SonicpesaPaymentService {
       );
     }
     if (res.statusCode == 502) {
-      final partialOrder = (map['order_id'] as String?)?.trim();
       throw SonicpesaPaymentException(
         _userFacingMessage(map, res.statusCode, fallback: 'Malipo yameanzishwa lakini hayajakamilika kwenye programu. Jaribu tena.'),
         statusCode: res.statusCode,

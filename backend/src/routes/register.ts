@@ -3,7 +3,11 @@ import type { Env } from '../config/env.js';
 import type { DbPool } from '../db/pool.js';
 import { bumpConfigVersion, getConfigMeta, getConfigVersion } from '../lib/version.js';
 import type { SseHub } from '../lib/sseHub.js';
-import { grantPremiumFromPayment, upsertPendingSonicpesaTransaction } from '../lib/premiumPayment.js';
+import {
+  grantPremiumFromPayment,
+  upsertPendingSonicpesaTransaction,
+  withDbRetry,
+} from '../lib/premiumPayment.js';
 import {
   detectTzMobileNetwork,
   mobileMoneyMethodLabel,
@@ -403,34 +407,37 @@ export async function registerRoutes(
 
       const network = detectTzMobileNetwork(localPhone);
       const payMethod = mobileMoneyMethodLabel(network);
+      const orderId = order.order_id;
 
       try {
-        await upsertPendingSonicpesaTransaction(pool, {
-          deviceId,
-          userName,
-          phone: localPhone,
-          amount,
-          planKey,
-          orderId: order.order_id,
-          method: payMethod,
-          metadata: {
-            reference: order.reference,
-            initial_status: order.payment_status,
-            network,
-          },
-        });
+        await withDbRetry(() =>
+          upsertPendingSonicpesaTransaction(pool, {
+            deviceId,
+            userName,
+            phone: localPhone,
+            amount,
+            planKey,
+            orderId,
+            method: payMethod,
+            metadata: {
+              reference: order.reference,
+              initial_status: order.payment_status,
+              network,
+            },
+          }),
+        );
       } catch (dbErr) {
         req.log.error(dbErr, 'upsertPendingSonicpesaTransaction failed');
         return reply.code(502).send({
           error:
             'Malipo yameanzishwa lakini seva haikuweza kuyahifadhi. Jaribu tena — usirudie malipo kwenye simu ikiwa umepokea ombi.',
-          order_id: order.order_id,
+          order_id: orderId,
         });
       }
 
       return {
         ok: true,
-        order_id: order.order_id,
+        order_id: orderId,
         reference: order.reference ?? null,
         amount,
         currency: 'TZS',
@@ -527,17 +534,19 @@ export async function registerRoutes(
         const localGrantPhone = toLocalTzPhone(grantPhone) ?? grantPhone;
         const payMethod = mobileMoneyMethodLabel(detectTzMobileNetwork(localGrantPhone));
         try {
-          const granted = await grantPremiumFromPayment(pool, {
-            deviceId,
-            userName: body.user_name?.trim() || 'Viewer',
-            phone: localGrantPhone,
-            amount: Number(tx.amount),
-            method: payMethod,
-            planKey: tx.plan_key ?? '',
-            provider: 'sonicpesa',
-            providerRef: orderId,
-            metadata: { sonicpesa_status: paymentStatus, reference: remote.reference },
-          });
+          const granted = await withDbRetry(() =>
+            grantPremiumFromPayment(pool, {
+              deviceId,
+              userName: body.user_name?.trim() || 'Viewer',
+              phone: localGrantPhone,
+              amount: Number(tx.amount),
+              method: payMethod,
+              planKey: tx.plan_key ?? '',
+              provider: 'sonicpesa',
+              providerRef: orderId,
+              metadata: { sonicpesa_status: paymentStatus, reference: remote.reference },
+            }),
+          );
           return {
             ok: true,
             payment_status: paymentStatus,
@@ -645,22 +654,30 @@ export async function registerRoutes(
       }
       const localPhone = tx.phone ?? '';
       const payMethod = mobileMoneyMethodLabel(detectTzMobileNetwork(localPhone));
-      await grantPremiumFromPayment(pool, {
-        deviceId,
-        userName: String(tx.name ?? 'Viewer').trim() || 'Viewer',
-        phone: localPhone,
-        amount: Number(tx.amount),
-        method: payMethod,
-        planKey: tx.plan_key ?? '',
-        provider: 'sonicpesa',
-        providerRef: orderId,
-        metadata: {
-          source: 'sonicpesa-webhook',
-          sonicpesa_status: status,
-          sonicpesa_event: event,
-          transid: transid || undefined,
-        },
-      });
+      try {
+        await withDbRetry(() =>
+          grantPremiumFromPayment(pool, {
+            deviceId,
+            userName: String(tx.name ?? 'Viewer').trim() || 'Viewer',
+            phone: localPhone,
+            amount: Number(tx.amount),
+            method: payMethod,
+            planKey: tx.plan_key ?? '',
+            provider: 'sonicpesa',
+            providerRef: orderId,
+            metadata: {
+              source: 'sonicpesa-webhook',
+              sonicpesa_status: status,
+              sonicpesa_event: event,
+              transid: transid || undefined,
+            },
+          }),
+        );
+      } catch (e) {
+        req.log.error(e, 'SonicPesa webhook: grantPremiumFromPayment failed after retries');
+        // Non-2xx so SonicPesa retries the webhook later instead of silently dropping the payment.
+        return reply.code(500).send({ error: 'premium grant failed, will retry' });
+      }
       return { ok: true, completed: true, order_id: orderId };
     }
 

@@ -588,6 +588,10 @@ class _WashaAppState extends State<WashaApp> with WidgetsBindingObserver {
   }
 
   Future<void> activateSubscription(String phone, String name) async {
+    // A payment is already in flight (overlay/poll loop) — ignore re-entrant taps so we
+    // never fire two SonicPesa orders for the same phone number back to back.
+    if (paymentOverlayOpen) return;
+
     final trimmedName = name.trim();
     final trimmedPhone = PaymentConfig.normalizeTzLocalPhone(phone) ?? phone.trim();
 

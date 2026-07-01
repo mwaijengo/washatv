@@ -1,6 +1,28 @@
 import type { DbPool } from '../db/pool.js';
 import { nanoid } from 'nanoid';
 
+/**
+ * Retries a DB write on transient failure (pool/connection blips). Without this, a single
+ * hiccup right after SonicPesa charges the customer permanently orphans the payment: the
+ * pending-transaction row (or the premium grant) never lands, so the money is taken but the
+ * account is never upgraded and no retry path can recover it (webhook payloads carry no
+ * device_id, only order_id).
+ */
+export async function withDbRetry<T>(fn: () => Promise<T>, attempts = 3, delayMs = 400): Promise<T> {
+  let lastErr: unknown;
+  for (let i = 0; i < attempts; i++) {
+    try {
+      return await fn();
+    } catch (e) {
+      lastErr = e;
+      if (i < attempts - 1) {
+        await new Promise((resolve) => setTimeout(resolve, delayMs * (i + 1)));
+      }
+    }
+  }
+  throw lastErr;
+}
+
 export type GrantPremiumInput = {
   deviceId: string;
   userName: string;

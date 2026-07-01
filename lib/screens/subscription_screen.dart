@@ -186,6 +186,9 @@ class _SubscriptionScreenState extends State<SubscriptionScreen> {
   bool hasSelectedPlan = false;
   final phone = TextEditingController();
   final name = TextEditingController();
+  // Guards against double-tap firing two SonicPesa orders for the same phone number
+  // before the payment overlay has a chance to cover this button.
+  bool _submittingPayment = false;
 
   @override
   void initState() {
@@ -451,21 +454,28 @@ class _SubscriptionScreenState extends State<SubscriptionScreen> {
           color: Colors.transparent,
           child: InkWell(
             borderRadius: BorderRadius.circular(18),
-            onTap: () {
-              final normalizedPhone = PaymentConfig.normalizeTzLocalPhone(phone.text) ?? phone.text.trim();
-              unawaited(widget.onPay(normalizedPhone, name.text.trim()));
-            },
-            child: const Padding(
-              padding: EdgeInsets.symmetric(horizontal: 16),
+            onTap: _submittingPayment
+                ? null
+                : () async {
+                    setState(() => _submittingPayment = true);
+                    final normalizedPhone = PaymentConfig.normalizeTzLocalPhone(phone.text) ?? phone.text.trim();
+                    try {
+                      await widget.onPay(normalizedPhone, name.text.trim());
+                    } finally {
+                      if (mounted) setState(() => _submittingPayment = false);
+                    }
+                  },
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 16),
               child: Row(
                 children: [
-                  Icon(Icons.account_balance_wallet_rounded, color: Colors.white, size: 26),
-                  SizedBox(width: 12),
+                  const Icon(Icons.account_balance_wallet_rounded, color: Colors.white, size: 26),
+                  const SizedBox(width: 12),
                   Expanded(
                     child: Text(
-                      'LIPIA SASA',
+                      _submittingPayment ? 'INAENDELEA…' : 'LIPIA SASA',
                       textAlign: TextAlign.center,
-                      style: TextStyle(
+                      style: const TextStyle(
                         fontWeight: FontWeight.w900,
                         letterSpacing: 1.0,
                         color: Colors.white,
@@ -473,7 +483,7 @@ class _SubscriptionScreenState extends State<SubscriptionScreen> {
                       ),
                     ),
                   ),
-                  Icon(Icons.arrow_forward_rounded, color: Colors.white),
+                  const Icon(Icons.arrow_forward_rounded, color: Colors.white),
                 ],
               ),
             ),
