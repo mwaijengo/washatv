@@ -21,6 +21,7 @@ export type SonicpesaOrderResult = {
   status?: string;
   amount?: number;
   currency?: string;
+  buyer_phone?: string;
   error?: string;
   raw?: unknown;
 };
@@ -74,17 +75,35 @@ export function normalizePaymentStatus(raw: unknown): string {
 }
 
 export function isSonicpesaSuccess(status: string): boolean {
-  return status === 'SUCCESS' || status === 'COMPLETED' || status === 'PAID';
+  const s = status.toUpperCase().replace(/[\s_-]+/g, '');
+  return (
+    s === 'SUCCESS' ||
+    s === 'SUCCESSFUL' ||
+    s === 'COMPLETED' ||
+    s === 'COMPLETE' ||
+    s === 'PAID' ||
+    s === 'DONE' ||
+    s === 'SETTLED' ||
+    s === 'TXNSUCCESS' ||
+    s === 'PAYMENTSUCCESS' ||
+    s === 'CONFIRMED'
+  );
 }
 
 export function isSonicpesaFailure(status: string): boolean {
+  const s = status.toUpperCase().replace(/[\s_-]+/g, '');
   return (
-    status === 'CANCELLED' ||
-    status === 'USERCANCELLED' ||
-    status === 'REJECTED' ||
-    status === 'FAILED' ||
-    status === 'FAILURE' ||
-    status === 'EXPIRED'
+    s === 'CANCELLED' ||
+    s === 'CANCELED' ||
+    s === 'USERCANCELLED' ||
+    s === 'USERCANCELED' ||
+    s === 'REJECTED' ||
+    s === 'FAILED' ||
+    s === 'FAILURE' ||
+    s === 'EXPIRED' ||
+    s === 'DECLINED' ||
+    s === 'TIMEOUT' ||
+    s === 'TIMEDOUT'
   );
 }
 
@@ -120,8 +139,19 @@ function readPaymentStatus(body: Record<string, unknown>): string {
   const statusIsPayment =
     statusStr.length > 0 && !API_ENVELOPE_STATUSES.has(statusStr);
   return normalizePaymentStatus(
-    body.payment_status ?? body.order_status ?? (statusIsPayment ? statusField : undefined) ?? 'PENDING',
+    body.payment_status ??
+      body.order_status ??
+      body.transaction_status ??
+      body.txn_status ??
+      (statusIsPayment ? statusField : undefined) ??
+      'PENDING',
   );
+}
+
+function readBuyerPhone(body: Record<string, unknown>): string {
+  return String(
+    body.buyer_phone ?? body.buyerPhone ?? body.phone ?? body.customer_phone ?? body.msisdn ?? '',
+  ).trim();
 }
 
 async function sonicpesaPost(
@@ -212,6 +242,7 @@ export async function sonicpesaOrderStatus(env: Env, orderId: string): Promise<S
     reference: String(body.reference ?? '').trim() || undefined,
     amount: body.amount != null ? Number(body.amount) : undefined,
     currency: body.currency != null ? String(body.currency) : undefined,
+    buyer_phone: readBuyerPhone(body) || undefined,
     raw,
   };
 }

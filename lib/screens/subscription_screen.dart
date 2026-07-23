@@ -53,9 +53,12 @@ class SubscriptionScreen extends StatefulWidget {
     required VoidCallback onCancel,
     VoidCallback? onRetry,
     VoidCallback? onContinue,
+    /// When false, retry checks the existing order instead of starting a new charge.
+    bool allowNewCharge = true,
   }) {
     final isFailed = phase == SonicpesaPaymentPhase.failed || phase == SonicpesaPaymentPhase.cancelled;
     final isSuccess = phase == SonicpesaPaymentPhase.success;
+    final retryLabel = allowNewCharge ? 'Anza malipo mapya' : 'Angalia hali ya malipo';
 
     return Positioned.fill(
       child: Container(
@@ -99,7 +102,7 @@ class SubscriptionScreen extends StatefulWidget {
                       isSuccess
                           ? 'Malipo Yamethibitishwa!'
                           : isFailed
-                              ? 'Malipo Hayajakamilika'
+                              ? (allowNewCharge ? 'Malipo Hayajakamilika' : 'Tunahakiki Malipo')
                               : phase == SonicpesaPaymentPhase.initiating
                                   ? 'Inatuma ombi la malipo…'
                                   : 'Thibitisha kwenye simu yako',
@@ -109,7 +112,10 @@ class SubscriptionScreen extends StatefulWidget {
                     const SizedBox(height: 8),
                     Text(
                       isFailed
-                          ? (errorMessage ?? 'Jaribu tena au hakikisha una salio kwenye M-Pesa, Mixx, Airtel Money au Halotel.')
+                          ? (errorMessage ??
+                              (allowNewCharge
+                                  ? 'Jaribu tena au hakikisha una salio kwenye M-Pesa, Mixx, Airtel Money au Halotel.'
+                                  : 'Pesa inaweza kuwa imetolewa. Bonyeza Angalia hali — usilipie tena.'))
                           : isSuccess
                               ? 'Hongera! Channels zote zimefunguliwa.'
                               : '$planLabel · $amountLabel\n${statusLine ?? PaymentConfig.paymentPromptSw}',
@@ -143,8 +149,11 @@ class SubscriptionScreen extends StatefulWidget {
                     if (isFailed && onRetry != null)
                       FilledButton.icon(
                         onPressed: onRetry,
-                        icon: const Icon(Icons.refresh_rounded, size: 20),
-                        label: const Text('Jaribu tena'),
+                        icon: Icon(
+                          allowNewCharge ? Icons.refresh_rounded : Icons.search_rounded,
+                          size: 20,
+                        ),
+                        label: Text(retryLabel),
                         style: FilledButton.styleFrom(
                           backgroundColor: const Color(0xFF2563EB),
                           minimumSize: const Size(double.infinity, 46),

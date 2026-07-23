@@ -70,6 +70,9 @@ class _WashaAppState extends State<WashaApp> with WidgetsBindingObserver {
   bool subscriptionPaymentSuccess = false;
   String? _paymentRetryPhone;
   String? _paymentRetryName;
+  /// When false, "Jaribu tena" resumes the existing order instead of creating a new STK push.
+  bool _paymentAllowNewCharge = true;
+  DateTime? _paymentCooldownUntil;
   int remoteConfigVersion = 0;
   int remoteConfigSyncedAt = 0;
   String? bootstrapSyncSignature;
@@ -618,11 +621,36 @@ class _WashaAppState extends State<WashaApp> with WidgetsBindingObserver {
     pendingPhone = trimmedPhone;
     await storage.setName(trimmedName);
 
+    // Register phone on server before payment so webhook orphan recovery can match by MSISDN.
+    try {
+      await api.syncViewer(deviceId: deviceId, name: trimmedName, phone: trimmedPhone);
+    } catch (_) {}
+
     if (api.isLocalDevelopment) {
       await _runLocalPayment(phone: trimmedPhone, name: trimmedName);
-    } else {
-      await _runSonicpesaPayment(phone: trimmedPhone, name: trimmedName);
+      return;
     }
+
+    // Resume an open order instead of starting a second charge.
+    final pending = await storage.loadPendingPayment();
+    if (pending != null && pending.orderId.isNotEmpty) {
+      if (pending.planKey.isNotEmpty) {
+        for (final p in userPlans) {
+          if (p.id == pending.planKey) {
+            selectedPlan = p;
+            break;
+          }
+        }
+      }
+      await _resumeSonicpesaPayment(
+        orderId: pending.orderId,
+        phone: pending.phone.isNotEmpty ? pending.phone : trimmedPhone,
+        name: pending.name.isNotEmpty ? pending.name : trimmedName,
+      );
+      return;
+    }
+
+    await _runSonicpesaPayment(phone: trimmedPhone, name: trimmedName);
   }
 
   int _planPriceAmount(Plan plan) {
@@ -739,6 +767,8 @@ class _WashaAppState extends State<WashaApp> with WidgetsBindingObserver {
       paymentPhase = SonicpesaPaymentPhase.success;
       subscriptionPaymentSuccess = true;
       paymentOrderId = null;
+      _paymentAllowNewCharge = true;
+      _paymentCooldownUntil = null;
     });
     _showPremiumUnlockedSnack();
     await Future.delayed(const Duration(milliseconds: 1100));
@@ -759,9 +789,35 @@ class _WashaAppState extends State<WashaApp> with WidgetsBindingObserver {
     });
   }
 
-  Future<void> _runSonicpesaPayment({required String phone, required String name}) async {
+  Future<void> _runSonicpesaPayment({
+    required String phone,
+    required String name,
+    bool forceNew = false,
+  }) async {
     if (deviceId.isEmpty) {
       throw SonicpesaPaymentException('Kitambulisho cha kifaa hakipo. Anza upya programu.');
+    }
+
+    final cooldown = _paymentCooldownUntil;
+    if (!forceNew && cooldown != null && cooldown.isAfter(DateTime.now())) {
+      final pending = await storage.loadPendingPayment();
+      if (pending != null) {
+        await _resumeSonicpesaPayment(
+          orderId: pending.orderId,
+          phone: pending.phone.isNotEmpty ? pending.phone : phone,
+          name: pending.name.isNotEmpty ? pending.name : name,
+        );
+        return;
+      }
+      if (!mounted) return;
+      setState(() {
+        paymentOverlayOpen = true;
+        paymentPhase = SonicpesaPaymentPhase.failed;
+        paymentError =
+            'Subiri kidogo — ombi la awali linaweza bado kuendelea. Angalia simu yako, kisha bonyeza Angalia hali.';
+        _paymentAllowNewCharge = false;
+      });
+      return;
     }
 
     setState(() {
@@ -770,6 +826,7 @@ class _WashaAppState extends State<WashaApp> with WidgetsBindingObserver {
       paymentError = null;
       paymentStatusLine = PaymentConfig.paymentPromptFor(phone);
       subscriptionPaymentSuccess = false;
+      _paymentAllowNewCharge = false;
     });
 
     try {
@@ -778,6 +835,7 @@ class _WashaAppState extends State<WashaApp> with WidgetsBindingObserver {
         userName: name,
         phone: phone,
         planKey: selectedPlan.id,
+        forceNew: forceNew,
       );
 
       await storage.savePendingPayment(
@@ -788,6 +846,18 @@ class _WashaAppState extends State<WashaApp> with WidgetsBindingObserver {
       );
 
       if (!mounted) return;
+
+      if (init.completed) {
+        await _applyPremiumUnlock(statusUntil: init.premiumUntil);
+        try {
+          await api.syncViewer(deviceId: deviceId, name: name, phone: phone);
+          await _syncFromServer(silent: true);
+          await _syncViewerProfileFromServer();
+        } catch (_) {}
+        await _finalizePaymentSuccess();
+        return;
+      }
+
       setState(() {
         paymentOrderId = init.orderId;
         paymentPhase = SonicpesaPaymentPhase.waitingOnPhone;
@@ -796,49 +866,122 @@ class _WashaAppState extends State<WashaApp> with WidgetsBindingObserver {
             : PaymentConfig.paymentPromptFor(phone);
       });
 
-      const maxAttempts = 90;
-      for (var i = 0; i < maxAttempts; i++) {
-        final delay = i < 20 ? const Duration(seconds: 1) : const Duration(seconds: 2);
-        await Future.delayed(delay);
-        if (!mounted || !paymentOverlayOpen) return;
-
-        final completed = await _pollPaymentOnce(
-          orderId: init.orderId,
-          phone: phone,
-          name: name,
-        );
-        if (completed) return;
-
-        if (!mounted) return;
-        setState(() {
-          paymentStatusLine = i < 8
-              ? PaymentConfig.paymentPromptFor(phone)
-              : 'Bado tunasubiri uthibitisho wa ${PaymentConfig.networkLabel(PaymentConfig.detectNetwork(phone))}…';
-        });
-      }
-
-      final recovered = await _tryRecoverPremiumFromServer();
-      if (recovered) {
-        await _finalizePaymentSuccess();
-        return;
-      }
-
-      throw SonicpesaPaymentException(
-        'Muda wa kusubiri malipo umeisha. Hakikisha umethibitisha PIN kwenye simu, kisha jaribu tena.',
+      await _pollUntilDone(
+        orderId: init.orderId,
+        phone: phone,
+        name: name,
       );
     } on SonicpesaPaymentException catch (e) {
+      if (e.orderId != null && e.orderId!.isNotEmpty) {
+        await storage.savePendingPayment(
+          orderId: e.orderId!,
+          phone: phone,
+          name: name,
+          planKey: selectedPlan.id,
+        );
+        if (mounted) setState(() => paymentOrderId = e.orderId);
+      }
+      if (e.cooldownSeconds != null && e.cooldownSeconds! > 0) {
+        _paymentCooldownUntil = DateTime.now().add(Duration(seconds: e.cooldownSeconds!));
+      }
       if (!mounted) return;
       setState(() {
         paymentPhase = SonicpesaPaymentPhase.failed;
         paymentError = e.message;
+        // Only allow a brand-new STK push when the server says it is safe and no order exists.
+        _paymentAllowNewCharge = e.retrySafe && (paymentOrderId == null || paymentOrderId!.isEmpty);
       });
     } catch (_) {
       if (!mounted) return;
       setState(() {
         paymentPhase = SonicpesaPaymentPhase.failed;
-        paymentError = 'Hitilafu ya mtandao. Jaribu tena.';
+        paymentError = 'Hitilafu ya mtandao. Bonyeza Angalia hali — usilipie tena bado.';
+        _paymentAllowNewCharge = false;
       });
     }
+  }
+
+  /// Poll an existing order (never creates a new SonicPesa charge).
+  Future<void> _resumeSonicpesaPayment({
+    required String orderId,
+    required String phone,
+    required String name,
+  }) async {
+    if (deviceId.isEmpty) return;
+
+    setState(() {
+      paymentOverlayOpen = true;
+      paymentOrderId = orderId;
+      paymentPhase = SonicpesaPaymentPhase.waitingOnPhone;
+      paymentError = null;
+      paymentStatusLine = 'Inaangalia hali ya malipo yaliyopo…';
+      subscriptionPaymentSuccess = false;
+      _paymentAllowNewCharge = false;
+    });
+
+    try {
+      await storage.savePendingPayment(
+        orderId: orderId,
+        phone: phone,
+        name: name,
+        planKey: selectedPlan.id,
+      );
+      await _pollUntilDone(orderId: orderId, phone: phone, name: name);
+    } on SonicpesaPaymentException catch (e) {
+      if (!mounted) return;
+      setState(() {
+        paymentPhase = SonicpesaPaymentPhase.failed;
+        paymentError = e.message;
+        _paymentAllowNewCharge = e.retrySafe;
+      });
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        paymentPhase = SonicpesaPaymentPhase.failed;
+        paymentError = 'Hitilafu ya mtandao. Bonyeza Angalia hali.';
+        _paymentAllowNewCharge = false;
+      });
+    }
+  }
+
+  Future<void> _pollUntilDone({
+    required String orderId,
+    required String phone,
+    required String name,
+  }) async {
+    const maxAttempts = 90;
+    for (var i = 0; i < maxAttempts; i++) {
+      final delay = i < 20 ? const Duration(seconds: 1) : const Duration(seconds: 2);
+      await Future.delayed(delay);
+      if (!mounted || !paymentOverlayOpen) return;
+
+      final completed = await _pollPaymentOnce(
+        orderId: orderId,
+        phone: phone,
+        name: name,
+      );
+      if (completed) return;
+
+      if (!mounted) return;
+      setState(() {
+        paymentStatusLine = i < 8
+            ? PaymentConfig.paymentPromptFor(phone)
+            : 'Bado tunasubiri uthibitisho wa ${PaymentConfig.networkLabel(PaymentConfig.detectNetwork(phone))}…';
+      });
+    }
+
+    final recovered = await _tryRecoverPremiumFromServer();
+    if (recovered) {
+      await _finalizePaymentSuccess();
+      return;
+    }
+
+    // Keep the pending order — timeout must NOT clear it or invite a second charge.
+    throw SonicpesaPaymentException(
+      'Muda wa kusubiri umeisha. Ikiwa umethibitisha PIN, bonyeza Angalia hali — usianzishe malipo mapya.',
+      retrySafe: false,
+      orderId: orderId,
+    );
   }
 
   /// One status poll — returns true when payment completed and premium applied.
@@ -854,9 +997,18 @@ class _WashaAppState extends State<WashaApp> with WidgetsBindingObserver {
         orderId: orderId,
         userName: name,
         phone: phone,
+        planKey: selectedPlan.id,
+        amount: _planPriceAmount(selectedPlan),
       );
     } on SonicpesaPaymentException catch (e) {
       final code = e.statusCode;
+      // Payment charged but grant briefly failed — keep waiting / recover from server.
+      if (e.paymentReceived || code == 500) {
+        if (mounted) {
+          setState(() => paymentStatusLine = 'Malipo yamepokelewa — inafungua channels…');
+        }
+        return _completePaymentIfPremiumReady();
+      }
       if (code == 502 || code == 503 || code == 504) {
         if (mounted) {
           setState(() => paymentStatusLine = 'Seva inaendelea kuchakata malipo…');
@@ -878,8 +1030,16 @@ class _WashaAppState extends State<WashaApp> with WidgetsBindingObserver {
 
     if (status.failed) {
       await storage.clearPendingPayment();
+      if (mounted) {
+        setState(() {
+          paymentOrderId = null;
+          _paymentAllowNewCharge = true;
+          _paymentCooldownUntil = null;
+        });
+      }
       throw SonicpesaPaymentException(
         status.message ?? 'Malipo yameghairiwa au kukataliwa.',
+        retrySafe: true,
       );
     }
 
@@ -929,6 +1089,15 @@ class _WashaAppState extends State<WashaApp> with WidgetsBindingObserver {
     if (paymentOverlayOpen || premium || deviceId.isEmpty) return;
     final pending = await storage.loadPendingPayment();
     if (pending == null) return;
+
+    if (pending.planKey.isNotEmpty) {
+      for (final p in userPlans) {
+        if (p.id == pending.planKey) {
+          selectedPlan = p;
+          break;
+        }
+      }
+    }
 
     if (!silent && mounted) {
       setState(() => paymentStatusLine = 'Inaangalia malipo yaliyosalia…');
@@ -995,7 +1164,28 @@ class _WashaAppState extends State<WashaApp> with WidgetsBindingObserver {
     final phone = _paymentRetryPhone;
     final name = _paymentRetryName;
     if (phone == null || name == null) return;
-    await _runSonicpesaPayment(phone: phone, name: name);
+
+    final pending = await storage.loadPendingPayment();
+    final existingOrder = (paymentOrderId?.trim().isNotEmpty == true)
+        ? paymentOrderId!.trim()
+        : pending?.orderId;
+
+    // Default: resume / check existing order. Never create a second charge while one is open.
+    if (existingOrder != null && existingOrder.isNotEmpty && !_paymentAllowNewCharge) {
+      await _resumeSonicpesaPayment(
+        orderId: existingOrder,
+        phone: pending?.phone.isNotEmpty == true ? pending!.phone : phone,
+        name: pending?.name.isNotEmpty == true ? pending!.name : name,
+      );
+      return;
+    }
+
+    // Confirmed failure (or no open order) — safe to start a fresh STK push.
+    await _runSonicpesaPayment(
+      phone: phone,
+      name: name,
+      forceNew: _paymentAllowNewCharge,
+    );
   }
 
   @override
@@ -1051,6 +1241,7 @@ class _WashaAppState extends State<WashaApp> with WidgetsBindingObserver {
                       onCancel: _cancelPaymentOverlay,
                       onRetry: paymentPhase == SonicpesaPaymentPhase.failed ? () => unawaited(_retryPayment()) : null,
                       onContinue: paymentPhase == SonicpesaPaymentPhase.success ? _dismissPaymentOverlayToStatus : null,
+                      allowNewCharge: _paymentAllowNewCharge,
                     ),
                   if (_noInternetVisible)
                     Positioned.fill(

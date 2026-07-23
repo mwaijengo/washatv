@@ -40,8 +40,64 @@ export type GrantPremiumResult = {
   transaction_ref: string;
   user_id: string;
   premium_until: string | null;
+  repaired?: boolean;
+  /** True when this call newly applied premium (not an idempotent no-op). */
+  newly_granted?: boolean;
 };
 
+export type OpenSonicpesaOrder = {
+  orderId: string;
+  status: string;
+  amount: number;
+  planKey: string | null;
+  phone: string | null;
+  userName: string | null;
+  createdAt: Date;
+};
+
+type PgClient = {
+  query: (text: string, params?: unknown[]) => Promise<{ rowCount: number | null; rows: unknown[] }>;
+};
+
+async function resolvePlanDurationDays(client: PgClient, planKey: string): Promise<number> {
+  let durationDays = 30;
+  if (!planKey) return durationDays;
+  const planRow = await client.query(
+    `SELECT duration_days FROM pricing_plans WHERE plan_key = $1 AND enabled = true`,
+    [planKey],
+  );
+  if (planRow.rowCount) {
+    durationDays = Number((planRow.rows[0] as { duration_days: number }).duration_days) || durationDays;
+  }
+  return durationDays;
+}
+
+/** Extend/activate premium for a user; safe to call repeatedly. */
+async function applyPremiumWindow(
+  client: PgClient,
+  userId: string,
+  planKey: string,
+): Promise<Date | null> {
+  const durationDays = await resolvePlanDurationDays(client, planKey);
+  const premiumUntil = new Date(Date.now() + durationDays * 24 * 60 * 60 * 1000);
+  const prem = await client.query(
+    `UPDATE users SET
+       subscription = 'premium',
+       premium_until = CASE
+         WHEN premium_until IS NOT NULL AND premium_until > now() THEN premium_until + ($2 || ' days')::interval
+         ELSE $3::timestamptz
+       END
+     WHERE id = $1
+     RETURNING premium_until`,
+    [userId, String(durationDays), premiumUntil],
+  );
+  return (prem.rows[0] as { premium_until: Date | null } | undefined)?.premium_until ?? null;
+}
+
+/**
+ * Idempotent premium grant for a provider payment reference.
+ * Concurrent callers for the same provider_ref apply premium at most once.
+ */
 export async function grantPremiumFromPayment(pool: DbPool, input: GrantPremiumInput): Promise<GrantPremiumResult> {
   const deviceId = input.deviceId.trim();
   const amount = Number(input.amount);
@@ -59,25 +115,6 @@ export async function grantPremiumFromPayment(pool: DbPool, input: GrantPremiumI
   try {
     await client.query('BEGIN');
 
-    const existingTx = await client.query(
-      `SELECT status, user_id FROM transactions WHERE provider = $1 AND provider_ref = $2 LIMIT 1`,
-      [provider, providerRef],
-    );
-    if (existingTx.rowCount) {
-      const row = existingTx.rows[0] as { status: string; user_id: string };
-      if (row.status === 'completed') {
-        const prem = await client.query(`SELECT premium_until FROM users WHERE id = $1`, [row.user_id]);
-        await client.query('COMMIT');
-        const until = prem.rows[0]?.premium_until as Date | null | undefined;
-        return {
-          ok: true,
-          transaction_ref: providerRef,
-          user_id: String(row.user_id),
-          premium_until: until ? new Date(until).toISOString() : null,
-        };
-      }
-    }
-
     const upsertUser = await client.query(
       `INSERT INTO users (id, name, phone, device_id, status, subscription, created_at)
        VALUES ($1, $2, $3, $4, 'active', 'free', now())
@@ -90,21 +127,25 @@ export async function grantPremiumFromPayment(pool: DbPool, input: GrantPremiumI
     const userId = String(upsertUser.rows[0].id);
 
     const txId = `TRX-${nanoid(10)}`;
-    await client.query(
+    // Only transition non-completed rows → completed. Already-completed conflicts return no row,
+    // so concurrent webhook + status polls cannot double-extend premium_until.
+    const claimed = await client.query(
       `INSERT INTO transactions
          (id, user_id, phone, amount, currency, method, provider, provider_ref, plan_key, status, completed_at, metadata, created_at, updated_at)
        VALUES
          ($1,$2,$3,$4,'TZS',$5,$6,$7,$8,'completed',now(),$9::jsonb,now(),now())
        ON CONFLICT (provider, provider_ref) WHERE provider_ref IS NOT NULL DO UPDATE SET
          user_id = EXCLUDED.user_id,
-         phone = EXCLUDED.phone,
+         phone = COALESCE(EXCLUDED.phone, transactions.phone),
          amount = EXCLUDED.amount,
          method = EXCLUDED.method,
-         plan_key = EXCLUDED.plan_key,
+         plan_key = COALESCE(EXCLUDED.plan_key, transactions.plan_key),
          status = 'completed',
-         completed_at = now(),
-         metadata = EXCLUDED.metadata,
-         updated_at = now()`,
+         completed_at = COALESCE(transactions.completed_at, now()),
+         metadata = COALESCE(transactions.metadata, '{}'::jsonb) || EXCLUDED.metadata,
+         updated_at = now()
+       WHERE transactions.status IS DISTINCT FROM 'completed'
+       RETURNING user_id, plan_key`,
       [
         txId,
         userId,
@@ -118,34 +159,64 @@ export async function grantPremiumFromPayment(pool: DbPool, input: GrantPremiumI
       ],
     );
 
-    let durationDays = 30;
-    if (planKey) {
-      const planRow = await client.query(
-        `SELECT duration_days FROM pricing_plans WHERE plan_key = $1 AND enabled = true`,
-        [planKey],
+    if (claimed.rowCount) {
+      const claimedRow = claimed.rows[0] as { user_id: string; plan_key: string | null };
+      const until = await applyPremiumWindow(
+        client,
+        String(claimedRow.user_id),
+        planKey || claimedRow.plan_key || '',
       );
-      if (planRow.rowCount) {
-        durationDays = Number((planRow.rows[0] as { duration_days: number }).duration_days) || durationDays;
-      }
+      await client.query('COMMIT');
+      return {
+        ok: true,
+        transaction_ref: providerRef,
+        user_id: String(claimedRow.user_id),
+        premium_until: until ? new Date(until).toISOString() : null,
+        newly_granted: true,
+      };
     }
-    const premiumUntil = new Date(Date.now() + durationDays * 24 * 60 * 60 * 1000);
-    const prem = await client.query(
-      `UPDATE users SET
-         subscription = 'premium',
-         premium_until = CASE
-           WHEN premium_until IS NOT NULL AND premium_until > now() THEN premium_until + ($2 || ' days')::interval
-           ELSE $3::timestamptz
-         END
-       WHERE id = $1
-       RETURNING premium_until`,
-      [userId, String(durationDays), premiumUntil],
+
+    // Already completed — return current premium; repair only if never applied.
+    const existingTx = await client.query(
+      `SELECT status, user_id, plan_key FROM transactions WHERE provider = $1 AND provider_ref = $2 LIMIT 1`,
+      [provider, providerRef],
     );
+    const row = existingTx.rows[0] as { status: string; user_id: string; plan_key: string | null } | undefined;
+    if (!row) {
+      throw new Error('transaction missing after conflict');
+    }
+
+    const prem = await client.query(
+      `SELECT premium_until, subscription FROM users WHERE id = $1`,
+      [row.user_id],
+    );
+    const userRow = prem.rows[0] as
+      | { premium_until: Date | null; subscription: string }
+      | undefined;
+    const until = userRow?.premium_until ?? null;
+    const subscription = userRow?.subscription ?? 'free';
+
+    if (until == null && subscription !== 'premium') {
+      const repairedUntil = await applyPremiumWindow(
+        client,
+        row.user_id,
+        planKey || row.plan_key || '',
+      );
+      await client.query('COMMIT');
+      return {
+        ok: true,
+        transaction_ref: providerRef,
+        user_id: String(row.user_id),
+        premium_until: repairedUntil ? new Date(repairedUntil).toISOString() : null,
+        repaired: true,
+      };
+    }
+
     await client.query('COMMIT');
-    const until = prem.rows[0]?.premium_until as Date | null | undefined;
     return {
       ok: true,
       transaction_ref: providerRef,
-      user_id: userId,
+      user_id: String(row.user_id),
       premium_until: until ? new Date(until).toISOString() : null,
     };
   } catch (e) {
@@ -219,4 +290,82 @@ export async function upsertPendingSonicpesaTransaction(
   } finally {
     client.release();
   }
+}
+
+/**
+ * Latest open (pending) SonicPesa order for this device — used to block double STK pushes.
+ */
+export async function findOpenSonicpesaOrderForDevice(
+  pool: DbPool,
+  deviceId: string,
+  maxAgeMinutes = 60,
+): Promise<OpenSonicpesaOrder | null> {
+  const id = deviceId.trim();
+  if (!id) return null;
+  const r = await pool.query(
+    `SELECT t.provider_ref, t.status, t.amount, t.plan_key, t.phone, t.created_at, u.name
+     FROM transactions t
+     JOIN users u ON u.id = t.user_id
+     WHERE u.device_id = $1
+       AND t.provider = 'sonicpesa'
+       AND t.status = 'pending'
+       AND t.created_at > now() - ($2::text || ' minutes')::interval
+     ORDER BY t.created_at DESC
+     LIMIT 1`,
+    [id, String(maxAgeMinutes)],
+  );
+  if (!r.rowCount) return null;
+  const row = r.rows[0] as {
+    provider_ref: string;
+    status: string;
+    amount: number;
+    plan_key: string | null;
+    phone: string | null;
+    created_at: Date;
+    name: string | null;
+  };
+  const orderId = String(row.provider_ref ?? '').trim();
+  if (!orderId) return null;
+  return {
+    orderId,
+    status: row.status,
+    amount: Number(row.amount) || 0,
+    planKey: row.plan_key,
+    phone: row.phone,
+    userName: row.name,
+    createdAt: row.created_at,
+  };
+}
+
+/** Find viewer by Tanzanian phone (local 0… or 255…). */
+export async function findDeviceIdByPhone(pool: DbPool, phoneRaw: string): Promise<string | null> {
+  const local = toLocalDigits(phoneRaw);
+  if (!local) return null;
+  const intl = `255${local.slice(1)}`;
+  const r = await pool.query(
+    `SELECT device_id FROM users
+     WHERE regexp_replace(COALESCE(phone, ''), '\\D', '', 'g') IN ($1, $2, $3)
+     ORDER BY CASE WHEN subscription = 'premium' THEN 0 ELSE 1 END,
+              COALESCE(premium_until, created_at) DESC NULLS LAST
+     LIMIT 1`,
+    [local, intl, local.slice(1)],
+  );
+  if (!r.rowCount) return null;
+  const deviceId = String((r.rows[0] as { device_id: string }).device_id ?? '').trim();
+  return deviceId || null;
+}
+
+function toLocalDigits(raw: string): string | null {
+  let digits = raw.replace(/\D/g, '');
+  if (!digits) return null;
+  if (digits.startsWith('255') && digits.length >= 12) {
+    digits = `0${digits.slice(3, 12)}`;
+  } else if (digits.length === 9 && /^[67]/.test(digits)) {
+    digits = `0${digits}`;
+  } else if (digits.startsWith('0') && digits.length >= 10) {
+    digits = digits.slice(0, 10);
+  } else {
+    return null;
+  }
+  return /^0[67]\d{8}$/.test(digits) ? digits : null;
 }

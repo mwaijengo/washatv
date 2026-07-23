@@ -4,6 +4,8 @@ import type { DbPool } from '../db/pool.js';
 import { bumpConfigVersion, getConfigMeta, getConfigVersion } from '../lib/version.js';
 import type { SseHub } from '../lib/sseHub.js';
 import {
+  findDeviceIdByPhone,
+  findOpenSonicpesaOrderForDevice,
   grantPremiumFromPayment,
   upsertPendingSonicpesaTransaction,
   withDbRetry,
@@ -35,6 +37,17 @@ export async function registerRoutes(
   const { pool, sse, env } = deps;
 
   const adminLoginConfigured = Boolean(env.ADMIN_EMAIL && env.ADMIN_PASSWORD_HASH);
+
+  async function notifyClientsAfterPremiumGrant() {
+    try {
+      const v = await bumpConfigVersion(pool);
+      sse.notifyConfigVersion(v);
+      return v;
+    } catch (e) {
+      app.log.error(e, 'Failed to bump config after premium grant');
+      return null;
+    }
+  }
 
   app.get('/health', async () => ({
     ok: true,
@@ -334,6 +347,7 @@ export async function registerRoutes(
         providerRef,
         metadata: { source: 'viewer-app' },
       });
+      await notifyClientsAfterPremiumGrant();
       return { ok: true, transaction_ref: result.transaction_ref, premium_until: result.premium_until };
     } catch (e) {
       req.log.error(e);
@@ -343,7 +357,15 @@ export async function registerRoutes(
 
   /** Start SonicPesa M-Pesa push (USSD prompt on customer phone). */
   app.post<{
-    Body: { device_id?: string; user_name?: string; phone?: string; plan_key?: string; buyer_email?: string };
+    Body: {
+      device_id?: string;
+      user_name?: string;
+      phone?: string;
+      plan_key?: string;
+      buyer_email?: string;
+      /** When true, force a brand-new order even if a pending one exists (only after confirmed failure). */
+      force_new?: boolean;
+    };
   }>('/api/v1/public/payments/sonicpesa/initiate', async (req, reply) => {
     if (!sonicpesaConfigured(env)) {
       return reply.code(503).send({ error: 'SonicPesa is not configured on server (SONICPESA_API_KEY)' });
@@ -357,6 +379,7 @@ export async function registerRoutes(
       const phoneRaw = (b.phone ?? '').trim();
       const buyerPhone = normalizeTzPhone(phoneRaw);
       const localPhone = toLocalTzPhone(phoneRaw);
+      const forceNew = b.force_new === true;
 
       if (!deviceId || !planKey) {
         return reply.code(400).send({ error: 'device_id and plan_key are required' });
@@ -385,6 +408,87 @@ export async function registerRoutes(
       const amount = Math.round(Number(plan.price));
       if (amount <= 0) return reply.code(400).send({ error: 'invalid plan price' });
 
+      const network = detectTzMobileNetwork(localPhone);
+      const payMethod = mobileMoneyMethodLabel(network);
+
+      // Reuse an open pending order so "Jaribu tena" never fires a second STK/USSD charge
+      // while money may already have been deducted on the first push.
+      if (!forceNew) {
+        const open = await findOpenSonicpesaOrderForDevice(pool, deviceId);
+        if (open) {
+          const remote = await sonicpesaOrderStatus(env, open.orderId);
+          const remoteStatus = remote.ok
+            ? normalizePaymentStatus(remote.payment_status ?? remote.status ?? 'PENDING')
+            : 'PENDING';
+
+          if (remote.ok && isSonicpesaSuccess(remoteStatus)) {
+            try {
+              const granted = await withDbRetry(() =>
+                grantPremiumFromPayment(pool, {
+                  deviceId,
+                  userName: userName || open.userName || 'Viewer',
+                  phone: localPhone || open.phone || '',
+                  amount: open.amount || amount,
+                  method: payMethod,
+                  planKey: open.planKey || planKey,
+                  provider: 'sonicpesa',
+                  providerRef: open.orderId,
+                  metadata: { source: 'sonicpesa-initiate-reuse-complete', sonicpesa_status: remoteStatus },
+                }),
+              );
+              await notifyClientsAfterPremiumGrant();
+              return {
+                ok: true,
+                order_id: open.orderId,
+                amount: open.amount || amount,
+                currency: 'TZS',
+                plan_key: open.planKey || planKey,
+                payment_status: 'SUCCESS',
+                completed: true,
+                reused: true,
+                premium_until: granted.premium_until,
+                message: 'Malipo yamekamilika. Premium imeanzishwa.',
+                network,
+                pay_method: payMethod,
+              };
+            } catch (e) {
+              req.log.error(e, 'initiate reuse: grant after remote success failed');
+              return reply.code(500).send({
+                error: 'Payment received but premium activation failed. Contact support.',
+                payment_received: true,
+                order_id: open.orderId,
+                retry_safe: false,
+              });
+            }
+          }
+
+          if (remote.ok && isSonicpesaFailure(remoteStatus)) {
+            await pool.query(
+              `UPDATE transactions SET status = 'failed', updated_at = now(), metadata = metadata || $2::jsonb
+               WHERE provider = 'sonicpesa' AND provider_ref = $1 AND status = 'pending'`,
+              [open.orderId, JSON.stringify({ sonicpesa_status: remoteStatus, closed_at: 'initiate-reuse' })],
+            );
+            // Fall through to create a fresh order.
+          } else {
+            // Still pending (or status API blip) — hand the same order back. Never create a second charge.
+            return {
+              ok: true,
+              order_id: open.orderId,
+              amount: open.amount || amount,
+              currency: 'TZS',
+              plan_key: open.planKey || planKey,
+              payment_status: remoteStatus,
+              completed: false,
+              pending: true,
+              reused: true,
+              message: paymentPromptForPhone(localPhone),
+              network,
+              pay_method: payMethod,
+            };
+          }
+        }
+      }
+
       const emailBase = deviceId.replace(/[^a-zA-Z0-9._-]/g, '').slice(0, 40) || 'viewer';
       const buyerEmail = (b.buyer_email ?? '').trim() || `${emailBase}@washatv.app`;
 
@@ -397,16 +501,19 @@ export async function registerRoutes(
       });
 
       if (!order.ok || !order.order_id) {
-        const unreachable =
-          order.error?.toLowerCase().includes('unreachable') ||
-          order.error?.toLowerCase().includes('timed out');
+        const errLower = (order.error ?? '').toLowerCase();
+        const timedOut = errLower.includes('timed out') || errLower.includes('timeout');
+        const unreachable = errLower.includes('unreachable') || timedOut;
+        // Timeout after create_order may mean STK was already sent — do not tell user to pay again immediately.
         return reply.code(unreachable ? 503 : 502).send({
-          error: 'Imeshindikana kuanzisha malipo. Hakikisha namba ya simu ni sahihi na jaribu tena.',
+          error: timedOut
+            ? 'Ombi la malipo linaweza kuwa limetumwa. Angalia simu yako kabla ya kujaribu tena.'
+            : 'Imeshindikana kuanzisha malipo. Hakikisha namba ya simu ni sahihi na jaribu tena.',
+          retry_safe: !timedOut,
+          cooldown_seconds: timedOut ? 300 : 60,
         });
       }
 
-      const network = detectTzMobileNetwork(localPhone);
-      const payMethod = mobileMoneyMethodLabel(network);
       const orderId = order.order_id;
 
       try {
@@ -427,12 +534,9 @@ export async function registerRoutes(
           }),
         );
       } catch (dbErr) {
-        req.log.error(dbErr, 'upsertPendingSonicpesaTransaction failed');
-        return reply.code(502).send({
-          error:
-            'Malipo yameanzishwa lakini seva haikuweza kuyahifadhi. Jaribu tena — usirudie malipo kwenye simu ikiwa umepokea ombi.',
-          order_id: orderId,
-        });
+        // Order already exists at SonicPesa — still return order_id so the app can poll.
+        // Status/webhook paths will recreate the pending row and grant when payment succeeds.
+        req.log.error(dbErr, 'upsertPendingSonicpesaTransaction failed — returning order for client recovery');
       }
 
       return {
@@ -446,6 +550,7 @@ export async function registerRoutes(
         message: paymentPromptForPhone(localPhone),
         network,
         pay_method: payMethod,
+        reused: false,
       };
     } catch (e) {
       req.log.error(e, 'SonicPesa initiate failed');
@@ -455,12 +560,23 @@ export async function registerRoutes(
         error: unreachable
           ? 'Seva ya malipo haipatikani kwa sasa. Jaribu tena baada ya dakika moja.'
           : 'Imeshindikana kuanzisha malipo. Jaribu tena baada ya dakika moja.',
+        retry_safe: false,
+        cooldown_seconds: 120,
       });
     }
   });
 
   /** Poll SonicPesa order — completes premium when payment succeeds. */
-  app.post<{ Body: { device_id?: string; order_id?: string; user_name?: string; phone?: string } }>(
+  app.post<{
+    Body: {
+      device_id?: string;
+      order_id?: string;
+      user_name?: string;
+      phone?: string;
+      plan_key?: string;
+      amount?: number;
+    };
+  }>(
     '/api/v1/public/payments/sonicpesa/status',
     async (req, reply) => {
       if (!sonicpesaConfigured(env)) {
@@ -468,118 +584,210 @@ export async function registerRoutes(
       }
 
       try {
-      const deviceId = (req.body?.device_id ?? '').trim();
-      const orderId = (req.body?.order_id ?? '').trim();
-      if (!deviceId || !orderId) {
-        return reply.code(400).send({ error: 'device_id and order_id are required' });
-      }
-
-      const txRow = await pool.query(
-        `SELECT t.id, t.status, t.amount, t.plan_key, t.phone, t.metadata, u.device_id
-         FROM transactions t
-         LEFT JOIN users u ON u.id = t.user_id
-         WHERE t.provider = 'sonicpesa' AND t.provider_ref = $1
-         LIMIT 1`,
-        [orderId],
-      );
-      if (!txRow.rowCount) return reply.code(404).send({ error: 'payment session not found' });
-      const tx = txRow.rows[0] as {
-        status: string;
-        amount: number;
-        plan_key: string | null;
-        phone: string | null;
-        device_id: string | null;
-      };
-      if (tx.device_id && tx.device_id !== deviceId) {
-        return reply.code(403).send({ error: 'device mismatch' });
-      }
-      if (tx.status === 'completed') {
-        const prem = await pool.query(`SELECT premium_until FROM users WHERE device_id = $1`, [deviceId]);
-        return {
-          ok: true,
-          payment_status: 'SUCCESS',
-          completed: true,
-          premium_until: prem.rows[0]?.premium_until
-            ? new Date(prem.rows[0].premium_until as Date).toISOString()
-            : null,
-        };
-      }
-
-      const remote = await sonicpesaOrderStatus(env, orderId);
-      if (!remote.ok) {
-        const unreachable =
-          remote.error?.toLowerCase().includes('unreachable') ||
-          remote.error?.toLowerCase().includes('timed out');
-        if (tx.status === 'completed') {
-          const prem = await pool.query(`SELECT premium_until FROM users WHERE device_id = $1`, [deviceId]);
-          return {
-            ok: true,
-            payment_status: 'SUCCESS',
-            completed: true,
-            premium_until: prem.rows[0]?.premium_until
-              ? new Date(prem.rows[0].premium_until as Date).toISOString()
-              : null,
-          };
-        }
-        return reply.code(unreachable ? 503 : 502).send({
-          error: 'Imeshindikana kuangalia hali ya malipo. Jaribu tena.',
-        });
-      }
-
-      const paymentStatus = normalizePaymentStatus(remote.payment_status ?? remote.status ?? 'PENDING');
-
-      if (isSonicpesaSuccess(paymentStatus)) {
         const body = req.body ?? {};
+        const deviceId = (body.device_id ?? '').trim();
+        const orderId = (body.order_id ?? '').trim();
+        if (!deviceId || !orderId) {
+          return reply.code(400).send({ error: 'device_id and order_id are required' });
+        }
+
+        let txRow = await pool.query(
+          `SELECT t.id, t.status, t.amount, t.plan_key, t.phone, t.metadata, u.device_id
+           FROM transactions t
+           LEFT JOIN users u ON u.id = t.user_id
+           WHERE t.provider = 'sonicpesa' AND t.provider_ref = $1
+           LIMIT 1`,
+          [orderId],
+        );
+
+        // Recover orphan orders (DB persist failed after SonicPesa create_order).
+        if (!txRow.rowCount) {
+          let planKey = (body.plan_key ?? '').trim();
+          const phoneRaw = (body.phone ?? '').trim();
+          const localPhone = toLocalTzPhone(phoneRaw) ?? phoneRaw;
+          let amount = Number(body.amount ?? 0);
+
+          if (planKey && amount <= 0) {
+            const planRow = await pool.query(
+              `SELECT price FROM pricing_plans WHERE plan_key = $1`,
+              [planKey],
+            );
+            if (planRow.rowCount) {
+              amount = Math.round(Number((planRow.rows[0] as { price: number }).price));
+            }
+          }
+
+          if (!planKey || amount <= 0) {
+            const remoteProbe = await sonicpesaOrderStatus(env, orderId);
+            if (
+              remoteProbe.ok &&
+              isSonicpesaSuccess(
+                normalizePaymentStatus(remoteProbe.payment_status ?? remoteProbe.status),
+              )
+            ) {
+              const remoteAmount = Number(remoteProbe.amount ?? 0);
+              if (remoteAmount > 0) amount = Math.round(remoteAmount);
+              if (!planKey) planKey = 'gold';
+            }
+          }
+
+          if (!planKey || amount <= 0) {
+            return reply.code(404).send({ error: 'payment session not found' });
+          }
+
+          try {
+            await withDbRetry(() =>
+              upsertPendingSonicpesaTransaction(pool, {
+                deviceId,
+                userName: body.user_name?.trim() || 'Viewer',
+                phone: localPhone,
+                amount,
+                planKey,
+                orderId,
+                method: mobileMoneyMethodLabel(detectTzMobileNetwork(localPhone)),
+                metadata: { source: 'sonicpesa-status-recovery' },
+              }),
+            );
+          } catch (e) {
+            req.log.error(e, 'status recovery: failed to upsert pending tx');
+            return reply.code(404).send({ error: 'payment session not found' });
+          }
+
+          txRow = await pool.query(
+            `SELECT t.id, t.status, t.amount, t.plan_key, t.phone, t.metadata, u.device_id
+             FROM transactions t
+             LEFT JOIN users u ON u.id = t.user_id
+             WHERE t.provider = 'sonicpesa' AND t.provider_ref = $1
+             LIMIT 1`,
+            [orderId],
+          );
+          if (!txRow.rowCount) {
+            return reply.code(404).send({ error: 'payment session not found' });
+          }
+        }
+
+        const tx = txRow.rows[0] as {
+          status: string;
+          amount: number;
+          plan_key: string | null;
+          phone: string | null;
+          device_id: string | null;
+        };
+        if (tx.device_id && tx.device_id !== deviceId) {
+          return reply.code(403).send({ error: 'device mismatch' });
+        }
+
         const grantPhone = (body.phone ?? tx.phone ?? '').trim();
         const localGrantPhone = toLocalTzPhone(grantPhone) ?? grantPhone;
         const payMethod = mobileMoneyMethodLabel(detectTzMobileNetwork(localGrantPhone));
-        try {
-          const granted = await withDbRetry(() =>
-            grantPremiumFromPayment(pool, {
-              deviceId,
-              userName: body.user_name?.trim() || 'Viewer',
-              phone: localGrantPhone,
-              amount: Number(tx.amount),
-              method: payMethod,
-              planKey: tx.plan_key ?? '',
-              provider: 'sonicpesa',
-              providerRef: orderId,
-              metadata: { sonicpesa_status: paymentStatus, reference: remote.reference },
-            }),
+        const planKey = (body.plan_key ?? tx.plan_key ?? '').trim();
+
+        if (tx.status === 'completed') {
+          try {
+            const granted = await withDbRetry(() =>
+              grantPremiumFromPayment(pool, {
+                deviceId,
+                userName: body.user_name?.trim() || 'Viewer',
+                phone: localGrantPhone,
+                amount: Number(tx.amount),
+                method: payMethod,
+                planKey,
+                provider: 'sonicpesa',
+                providerRef: orderId,
+                metadata: { source: 'sonicpesa-status-completed-repair' },
+              }),
+            );
+            if (granted.repaired) await notifyClientsAfterPremiumGrant();
+            return {
+              ok: true,
+              payment_status: 'SUCCESS',
+              completed: true,
+              premium_until: granted.premium_until,
+            };
+          } catch (e) {
+            req.log.error(e, 'completed tx premium repair failed');
+            const prem = await pool.query(`SELECT premium_until FROM users WHERE device_id = $1`, [deviceId]);
+            return {
+              ok: true,
+              payment_status: 'SUCCESS',
+              completed: true,
+              premium_until: prem.rows[0]?.premium_until
+                ? new Date(prem.rows[0].premium_until as Date).toISOString()
+                : null,
+            };
+          }
+        }
+
+        const remote = await sonicpesaOrderStatus(env, orderId);
+        if (!remote.ok) {
+          // Keep the session pending on provider blips — never tell the user to pay again
+          // while money may already have been taken.
+          return {
+            ok: true,
+            payment_status: 'PENDING',
+            completed: false,
+            pending: true,
+            message: 'Seva inaendelea kuchakata malipo…',
+            provider_unreachable: true,
+          };
+        }
+
+        const paymentStatus = normalizePaymentStatus(remote.payment_status ?? remote.status ?? 'PENDING');
+
+        if (isSonicpesaSuccess(paymentStatus)) {
+          try {
+            const granted = await withDbRetry(() =>
+              grantPremiumFromPayment(pool, {
+                deviceId,
+                userName: body.user_name?.trim() || 'Viewer',
+                phone: localGrantPhone,
+                amount: Number(tx.amount) || Number(remote.amount ?? 0),
+                method: payMethod,
+                planKey: planKey || tx.plan_key || '',
+                provider: 'sonicpesa',
+                providerRef: orderId,
+                metadata: { sonicpesa_status: paymentStatus, reference: remote.reference },
+              }),
+            );
+            await notifyClientsAfterPremiumGrant();
+            return {
+              ok: true,
+              payment_status: paymentStatus,
+              completed: true,
+              premium_until: granted.premium_until,
+            };
+          } catch (e) {
+            req.log.error(e, 'grantPremiumFromPayment failed after SonicPesa success');
+            return reply.code(500).send({
+              error: 'Payment received but premium activation failed. Contact support.',
+              payment_received: true,
+              order_id: orderId,
+              retry_safe: false,
+            });
+          }
+        }
+
+        if (isSonicpesaFailure(paymentStatus)) {
+          await pool.query(
+            `UPDATE transactions SET status = 'failed', updated_at = now(), metadata = metadata || $2::jsonb
+             WHERE provider = 'sonicpesa' AND provider_ref = $1 AND status = 'pending'`,
+            [orderId, JSON.stringify({ sonicpesa_status: paymentStatus })],
           );
           return {
             ok: true,
             payment_status: paymentStatus,
-            completed: true,
-            premium_until: granted.premium_until,
+            completed: false,
+            failed: true,
+            message: 'Malipo hayajakamilika. Unaweza kujaribu tena.',
           };
-        } catch (e) {
-          req.log.error(e, 'grantPremiumFromPayment failed after SonicPesa success');
-          return reply.code(500).send({ error: 'Payment received but premium activation failed. Contact support.' });
         }
-      }
 
-      if (isSonicpesaFailure(paymentStatus)) {
-        await pool.query(
-          `UPDATE transactions SET status = 'failed', updated_at = now(), metadata = metadata || $2::jsonb
-           WHERE provider = 'sonicpesa' AND provider_ref = $1`,
-          [orderId, JSON.stringify({ sonicpesa_status: paymentStatus })],
-        );
         return {
           ok: true,
           payment_status: paymentStatus,
           completed: false,
-          failed: true,
-          message: 'Malipo hayajakamilika. Jaribu tena.',
+          pending: true,
         };
-      }
-
-      return {
-        ok: true,
-        payment_status: paymentStatus,
-        completed: false,
-        pending: true,
-      };
       } catch (e) {
         req.log.error(e, 'SonicPesa status check failed');
         return reply.code(500).send({
@@ -599,6 +807,9 @@ export async function registerRoutes(
     const status = normalizePaymentStatus(b.status ?? b.payment_status);
     const event = String(b.event ?? '').trim().toLowerCase();
     const transid = String(b.transid ?? b.transaction_id ?? '').trim();
+    const webhookPhone = String(
+      b.buyer_phone ?? b.buyerPhone ?? b.phone ?? b.customer_phone ?? b.msisdn ?? '',
+    ).trim();
 
     if (env.SONICPESA_WEBHOOK_SECRET) {
       const headerSecret = String(
@@ -613,7 +824,7 @@ export async function registerRoutes(
       return reply.code(400).send({ error: 'order_id is required' });
     }
 
-    const txRow = await pool.query(
+    let txRow = await pool.query(
       `SELECT t.status, t.amount, t.plan_key, t.phone, t.metadata, u.device_id, u.name
        FROM transactions t
        LEFT JOIN users u ON u.id = t.user_id
@@ -621,6 +832,61 @@ export async function registerRoutes(
        LIMIT 1`,
       [orderId],
     );
+
+    const completedEvent = event === 'payment.completed' || event === 'payment.success';
+    const success = completedEvent || isSonicpesaSuccess(status);
+    const failed = isSonicpesaFailure(status);
+
+    // Orphan recovery: paid webhook for an order we never stored (initiate DB failure).
+    if (!txRow.rowCount && success) {
+      let buyerPhone = webhookPhone;
+      let amount = Number(b.amount ?? 0);
+      try {
+        const remote = await sonicpesaOrderStatus(env, orderId);
+        if (remote.ok) {
+          if (!buyerPhone && remote.buyer_phone) buyerPhone = remote.buyer_phone;
+          if (!(amount > 0) && remote.amount != null) amount = Number(remote.amount);
+        }
+      } catch (e) {
+        req.log.warn(e, 'SonicPesa webhook: order_status lookup failed for orphan');
+      }
+
+      const deviceId = buyerPhone ? await findDeviceIdByPhone(pool, buyerPhone) : null;
+      if (!deviceId || !(amount > 0)) {
+        req.log.warn(
+          { orderId, event, hasPhone: Boolean(buyerPhone), amount },
+          'SonicPesa webhook: unknown order_id and cannot recover device',
+        );
+        return { ok: true, ignored: true, reason: 'order_not_found' };
+      }
+
+      const localPhone = toLocalTzPhone(buyerPhone) ?? buyerPhone;
+      try {
+        await withDbRetry(() =>
+          upsertPendingSonicpesaTransaction(pool, {
+            deviceId,
+            userName: 'Viewer',
+            phone: localPhone,
+            amount: Math.round(amount),
+            planKey: 'gold',
+            orderId,
+            method: mobileMoneyMethodLabel(detectTzMobileNetwork(localPhone)),
+            metadata: { source: 'sonicpesa-webhook-orphan', sonicpesa_event: event },
+          }),
+        );
+        txRow = await pool.query(
+          `SELECT t.status, t.amount, t.plan_key, t.phone, t.metadata, u.device_id, u.name
+           FROM transactions t
+           LEFT JOIN users u ON u.id = t.user_id
+           WHERE t.provider = 'sonicpesa' AND t.provider_ref = $1
+           LIMIT 1`,
+          [orderId],
+        );
+      } catch (e) {
+        req.log.error(e, 'SonicPesa webhook: orphan pending upsert failed');
+        return reply.code(500).send({ error: 'orphan recovery failed, will retry' });
+      }
+    }
 
     if (!txRow.rowCount) {
       req.log.warn({ orderId, event }, 'SonicPesa webhook: unknown order_id');
@@ -639,11 +905,29 @@ export async function registerRoutes(
 
     const meta = tx.metadata ?? {};
     const deviceId = String(tx.device_id ?? meta.device_id ?? '').trim();
-    const completedEvent = event === 'payment.completed' || event === 'payment.success';
-    const success = completedEvent || isSonicpesaSuccess(status);
-    const failed = isSonicpesaFailure(status);
 
     if (tx.status === 'completed') {
+      // Ensure premium is still applied (repairs stuck completed rows).
+      if (success && deviceId) {
+        try {
+          const granted = await withDbRetry(() =>
+            grantPremiumFromPayment(pool, {
+              deviceId,
+              userName: String(tx.name ?? 'Viewer').trim() || 'Viewer',
+              phone: tx.phone ?? '',
+              amount: Number(tx.amount),
+              method: mobileMoneyMethodLabel(detectTzMobileNetwork(tx.phone ?? '')),
+              planKey: tx.plan_key ?? '',
+              provider: 'sonicpesa',
+              providerRef: orderId,
+              metadata: { source: 'sonicpesa-webhook-repair' },
+            }),
+          );
+          if (granted.repaired) await notifyClientsAfterPremiumGrant();
+        } catch (e) {
+          req.log.error(e, 'SonicPesa webhook: completed repair failed');
+        }
+      }
       return { ok: true, already_completed: true, order_id: orderId };
     }
 
@@ -673,6 +957,7 @@ export async function registerRoutes(
             },
           }),
         );
+        await notifyClientsAfterPremiumGrant();
       } catch (e) {
         req.log.error(e, 'SonicPesa webhook: grantPremiumFromPayment failed after retries');
         // Non-2xx so SonicPesa retries the webhook later instead of silently dropping the payment.
@@ -684,7 +969,7 @@ export async function registerRoutes(
     if (failed) {
       await pool.query(
         `UPDATE transactions SET status = 'failed', updated_at = now(), metadata = metadata || $2::jsonb
-         WHERE provider = 'sonicpesa' AND provider_ref = $1`,
+         WHERE provider = 'sonicpesa' AND provider_ref = $1 AND status = 'pending'`,
         [
           orderId,
           JSON.stringify({
