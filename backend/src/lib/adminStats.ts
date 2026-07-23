@@ -37,8 +37,23 @@ export async function fetchAdminStatsOverview(pool: DbPool): Promise<AdminStatsO
        (SELECT COUNT(*)::int FROM users) AS users,
        (SELECT COUNT(*)::int FROM users WHERE ${premiumUserSql}) AS premium_users,
        (SELECT COUNT(*)::int FROM channels WHERE status = 'active') AS active_channels,
-       COALESCE((SELECT SUM(amount) FROM transactions WHERE status = 'completed'), 0)::float8 AS revenue,
-       (SELECT COUNT(*)::int FROM transactions WHERE status = 'completed') AS completed_transactions`,
+       COALESCE((
+         SELECT SUM(amount) FROM transactions
+         WHERE status = 'completed'
+           AND COALESCE(completed_at, created_at) >=
+             (date_trunc('day', now() AT TIME ZONE 'Africa/Dar_es_Salaam') AT TIME ZONE 'Africa/Dar_es_Salaam')
+           AND COALESCE(completed_at, created_at) <
+             (date_trunc('day', now() AT TIME ZONE 'Africa/Dar_es_Salaam') AT TIME ZONE 'Africa/Dar_es_Salaam'
+              + interval '1 day')
+       ), 0)::float8 AS revenue,
+       (SELECT COUNT(*)::int FROM transactions
+        WHERE status = 'completed'
+          AND COALESCE(completed_at, created_at) >=
+            (date_trunc('day', now() AT TIME ZONE 'Africa/Dar_es_Salaam') AT TIME ZONE 'Africa/Dar_es_Salaam')
+          AND COALESCE(completed_at, created_at) <
+            (date_trunc('day', now() AT TIME ZONE 'Africa/Dar_es_Salaam') AT TIME ZONE 'Africa/Dar_es_Salaam'
+             + interval '1 day')
+       ) AS completed_transactions`,
   );
   const t = totalsRes.rows[0] as {
     users: number;

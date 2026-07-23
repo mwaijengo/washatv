@@ -1515,16 +1515,33 @@ export async function registerRoutes(
   });
 
   app.get('/api/v1/admin/revenue/summary', { preHandler: adminPre }, async () => {
+    // Daily total in Tanzania time (Africa/Dar_es_Salaam) — resets at 00:00 EAT.
     const r = await pool.query(
       `SELECT
-         COALESCE(SUM(amount) FILTER (WHERE status = 'completed'), 0) AS total_revenue,
-         COUNT(*) FILTER (WHERE status = 'completed') AS completed_transactions
+         COALESCE(SUM(amount) FILTER (
+           WHERE status = 'completed'
+             AND COALESCE(completed_at, created_at) >=
+               (date_trunc('day', now() AT TIME ZONE 'Africa/Dar_es_Salaam') AT TIME ZONE 'Africa/Dar_es_Salaam')
+             AND COALESCE(completed_at, created_at) <
+               (date_trunc('day', now() AT TIME ZONE 'Africa/Dar_es_Salaam') AT TIME ZONE 'Africa/Dar_es_Salaam'
+                + interval '1 day')
+         ), 0) AS total_revenue,
+         COUNT(*) FILTER (
+           WHERE status = 'completed'
+             AND COALESCE(completed_at, created_at) >=
+               (date_trunc('day', now() AT TIME ZONE 'Africa/Dar_es_Salaam') AT TIME ZONE 'Africa/Dar_es_Salaam')
+             AND COALESCE(completed_at, created_at) <
+               (date_trunc('day', now() AT TIME ZONE 'Africa/Dar_es_Salaam') AT TIME ZONE 'Africa/Dar_es_Salaam'
+                + interval '1 day')
+         ) AS completed_transactions
        FROM transactions`,
     );
     return {
       revenue: Number(r.rows[0]?.total_revenue ?? 0),
       completed_transactions: Number(r.rows[0]?.completed_transactions ?? 0),
       currency: 'TZS',
+      timezone: 'Africa/Dar_es_Salaam',
+      period: 'today',
     };
   });
 

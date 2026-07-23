@@ -722,7 +722,7 @@ class _AdminScaffoldState extends State<AdminScaffold> {
           method: _s(j['method'], fallback: 'N/A'),
           status: _s(j['status'], fallback: 'completed'),
           transactionId: _s(j['provider_ref'], fallback: _s(j['id'])),
-          createdAt: _dt(j['created_at']) ?? DateTime.now(),
+          createdAt: _dt(j['completed_at']) ?? _dt(j['created_at']) ?? DateTime.now(),
           planKey: _s(j['plan_key']).isEmpty ? null : _s(j['plan_key']),
         );
       }).toList();
@@ -811,6 +811,20 @@ class _AdminScaffoldState extends State<AdminScaffold> {
 
   bool _sameDay(DateTime a, DateTime b) => a.year == b.year && a.month == b.month && a.day == b.day;
 
+  /// Calendar day in Tanzania (EAT, UTC+3) — matches backend Africa/Dar_es_Salaam cutoff at 00:00.
+  bool _isTodayTanzania(DateTime dt) {
+    final tzNow = DateTime.now().toUtc().add(const Duration(hours: 3));
+    final tzDt = dt.toUtc().add(const Duration(hours: 3));
+    return tzNow.year == tzDt.year && tzNow.month == tzDt.month && tzNow.day == tzDt.day;
+  }
+
+  /// Today's completed collections only (Tanzania day). Never use lifetime API totals for this card.
+  double _todayRevenueTzs() {
+    return _payments
+        .where((p) => p.status == 'completed' && _isTodayTanzania(p.createdAt))
+        .fold<double>(0, (a, p) => a + p.amount);
+  }
+
   AdminDashboardStats? _statsFromLocalLists() {
     if (_users.isEmpty && _payments.isEmpty && _channels.isEmpty) return null;
     final buckets = _lastSevenMonths();
@@ -855,7 +869,7 @@ class _AdminScaffoldState extends State<AdminScaffold> {
       premiumUsers: premium,
       freeUsers: (total - premium).clamp(0, total),
       activeChannels: _channels.where((c) => c.status == 'active').length,
-      revenue: _payments.where((p) => p.status == 'completed').fold<double>(0, (a, p) => a + p.amount),
+      revenue: _todayRevenueTzs(),
       monthLabels: buckets.labels,
       newUsersPerMonth: newUsers,
       premiumPurchasesPerMonth: premiumBuys,
@@ -1308,10 +1322,9 @@ class _AdminScaffoldState extends State<AdminScaffold> {
     final freeUsers = stats?.freeUsers ??
         (loadingStats ? null : ((totalUsers ?? 0) - (premiumUsers ?? 0)).clamp(0, totalUsers ?? 0));
     final activeChannels = stats?.activeChannels ?? (loadingStats ? null : _channels.where((c) => c.status == 'active').length);
-    final revenue = stats?.revenue ??
-        (loadingStats
-            ? null
-            : _payments.where((p) => p.status == 'completed').fold<double>(0, (a, b) => a + b.amount));
+    // Always derive from local payments for Tanzania "today" — production API may still
+    // return lifetime totals until the backend redeploys.
+    final revenue = loadingStats && _payments.isEmpty ? null : _todayRevenueTzs();
     final recentUsers = _users.take(5).toList();
     final recentPayments =
         _payments.where((p) => p.status == 'completed').take(5).toList();
@@ -1341,7 +1354,7 @@ class _AdminScaffoldState extends State<AdminScaffold> {
                 _statCard(label: 'Premium', value: loadingStats ? '…' : '${premiumUsers ?? 0}', icon: Icons.workspace_premium_rounded, iconBg: const Color(0x33F59E0B), iconColor: const Color(0xFFFBBF24)),
                 _statCard(label: 'Free', value: loadingStats ? '…' : '${freeUsers ?? 0}', icon: Icons.person_outline_rounded, iconBg: const Color(0x3394A3B8), iconColor: const Color(0xFFCBD5E1)),
                 _statCard(label: 'Channels', value: loadingStats ? '…' : '${activeChannels ?? 0}', icon: Icons.satellite_alt_rounded, iconBg: const Color(0x3310B981), iconColor: const Color(0xFF34D399)),
-                _statCard(label: 'Revenue', value: loadingStats ? '…' : fmtTzs(revenue ?? 0), icon: Icons.attach_money_rounded, iconBg: const Color(0x33A855F7), iconColor: const Color(0xFFC084FC)),
+                _statCard(label: "Today's Revenue", value: loadingStats ? '…' : fmtTzs(revenue ?? 0), icon: Icons.attach_money_rounded, iconBg: const Color(0x33A855F7), iconColor: const Color(0xFFC084FC)),
               ],
             );
           },
