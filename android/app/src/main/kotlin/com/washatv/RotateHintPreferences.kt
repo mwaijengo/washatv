@@ -3,7 +3,7 @@ package com.washatv
 import android.content.Context
 
 internal object RotateHintPreferences {
-    private const val PREFS_NAME = "eamax_player_prefs"
+    private const val PREFS_NAME = "washa_player_prefs"
     private const val KEY_NEVER_SHOW = "never_show_rotate_hint"
 
     fun neverShowHint(context: Context): Boolean =

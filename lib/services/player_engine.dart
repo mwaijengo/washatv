@@ -1,5 +1,5 @@
 import '../player/flutter_playback_mode.dart';
-import 'remote_config_service.dart';
+import 'player_config_service.dart';
 
 /// Server-driven player engines (admin Control Center → config bundle → app).
 class PlayerEngine {
@@ -49,7 +49,7 @@ class PlayerEngine {
   }) {
     final channel = _optionalEngine(channelEngine);
     if (channel != null) return channel;
-    return normalize(globalEngine ?? RemoteConfigService.playerConfig.preferredEngine);
+    return normalize(globalEngine ?? PlayerConfigService.playerConfig.preferredEngine);
   }
 
   static String? _optionalEngine(String? raw) {
@@ -60,14 +60,14 @@ class PlayerEngine {
   }
 
   static String resolveFromChannelData(Map<String, dynamic>? channelData) {
-    if (channelData == null) return normalize(RemoteConfigService.playerConfig.preferredEngine);
+    if (channelData == null) return normalize(PlayerConfigService.playerConfig.preferredEngine);
     final effective = channelData['effectiveEngine'] ?? channelData['effective_engine'];
     final override = channelData['playbackEngine'] ??
         channelData['playback_engine'] ??
         effective;
     return resolve(
       channelEngine: override?.toString(),
-      globalEngine: RemoteConfigService.playerConfig.preferredEngine,
+      globalEngine: PlayerConfigService.playerConfig.preferredEngine,
     );
   }
 

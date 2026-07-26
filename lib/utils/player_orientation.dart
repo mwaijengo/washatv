@@ -4,6 +4,13 @@ import 'package:flutter/services.dart';
 class PlayerOrientation {
   PlayerOrientation._();
 
+  static const _allOrientations = [
+    DeviceOrientation.portraitUp,
+    DeviceOrientation.portraitDown,
+    DeviceOrientation.landscapeLeft,
+    DeviceOrientation.landscapeRight,
+  ];
+
   /// Home shell stays portrait; requires MainActivity `fullSensor` in the manifest.
   static Future<void> lockHomePortrait() async {
     await SystemChrome.setPreferredOrientations([
@@ -11,16 +18,13 @@ class PlayerOrientation {
     ]);
   }
 
-  /// Landscape fullscreen playback — immersive UI, no portrait band.
+  /// Full-screen player: allow rotation + hide system bars.
   static Future<void> enterFullscreenPlayer() async {
     await SystemChrome.setEnabledSystemUIMode(
       SystemUiMode.immersiveSticky,
       overlays: [],
     );
-    await SystemChrome.setPreferredOrientations([
-      DeviceOrientation.landscapeLeft,
-      DeviceOrientation.landscapeRight,
-    ]);
+    await SystemChrome.setPreferredOrientations(_allOrientations);
   }
 
   static Future<void> exitFullscreenPlayer() async {

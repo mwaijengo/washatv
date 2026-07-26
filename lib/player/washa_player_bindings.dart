@@ -1,5 +1,5 @@
 /// Optional control surface filled by [FullscreenVideoPage] when embedded.
-class EaMaxPlayerBindings {
+class WashaPlayerBindings {
   Future<void> Function()? togglePlay;
   Future<void> Function(double fraction)? seek;
   bool Function()? isPlaying;

@@ -78,11 +78,12 @@ class WashaPlayerOverlay(
             PlaybackState.BUFFERING -> {
                 if (webViewMode) {
                     if (firstFrameShown) {
+                        // Rebuffering after first play — show only thin bar, keep video visible.
                         loadingOverlay.visibility = View.GONE
                         bufferingBar.visibility = View.VISIBLE
                     } else {
-                        loadingOverlay.visibility = View.VISIBLE
-                        bufferingBar.visibility = View.GONE
+                        // Initial WebView load — keep full overlay, show spinning bar.
+                        bufferingBar.visibility = View.VISIBLE
                     }
                 } else {
                     showBufferingIndicator()
@@ -127,8 +128,8 @@ class WashaPlayerOverlay(
             loadingOverlay.visibility = View.GONE
             bufferingBar.visibility = View.VISIBLE
         } else if (webViewMode) {
-            loadingOverlay.visibility = View.VISIBLE
-            bufferingBar.visibility = View.GONE
+            // WebView initial load — spinner stays until PLAYING; no full overlay on rebuffer.
+            bufferingBar.visibility = View.VISIBLE
         } else {
             bufferingBar.visibility = View.GONE
             loadingOverlay.visibility = View.VISIBLE

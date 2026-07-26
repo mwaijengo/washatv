@@ -13,27 +13,25 @@ class PaymentConfig {
     var digits = raw.replaceAll(RegExp(r'\D'), '');
     if (digits.isEmpty) return null;
 
-    if (digits.startsWith('255') && digits.length >= 12) {
-      digits = digits.substring(3, 12);
+    while (digits.startsWith('255')) {
+      digits = digits.substring(3);
+    }
+    while (digits.startsWith('0')) {
+      digits = digits.substring(1);
     }
 
-    if (digits.startsWith('0') && digits.length >= 10) {
-      digits = digits.substring(0, 10);
-    } else if (digits.length == 9 && RegExp(r'^[67]').hasMatch(digits)) {
-      digits = '0$digits';
+    if (digits.length != 9 || !RegExp(r'^[67]\d{8}$').hasMatch(digits)) {
+      return null;
     }
-
-    if (!tzLocalPhone.hasMatch(digits)) return null;
-    return digits;
+    return '0$digits';
   }
 
   static bool isValidTzLocalPhone(String raw) => normalizeTzLocalPhone(raw) != null;
 
-  /// At least two name parts (jina kamili).
+  /// Valid name check (accepts any non-empty name of at least 2 characters).
   static bool isValidFullName(String raw) {
     final t = raw.trim();
-    if (t.length < 4) return false;
-    return RegExp(r'\s+').hasMatch(t);
+    return t.length >= 2;
   }
 
   static bool isLocalApiHost(String baseUrl) {
@@ -63,13 +61,13 @@ class PaymentConfig {
     if (halotelPrefixes.contains(prefix) && prefix != '069') {
       return TzMobileNetwork.halotel;
     }
-    if (const {'065', '067', '071', '073'}.contains(prefix)) {
+    if (const {'065', '067', '071', '073', '077'}.contains(prefix)) {
       return TzMobileNetwork.tigo;
     }
-    if (const {'068', '069'}.contains(prefix)) {
+    if (const {'068', '069', '078'}.contains(prefix)) {
       return TzMobileNetwork.airtel;
     }
-    if (const {'074', '075', '076', '077', '078'}.contains(prefix)) {
+    if (const {'074', '075', '076'}.contains(prefix)) {
       return TzMobileNetwork.mpesa;
     }
     if (phone.startsWith('06')) return TzMobileNetwork.halotel;

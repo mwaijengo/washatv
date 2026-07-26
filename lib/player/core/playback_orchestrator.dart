@@ -3,11 +3,12 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
+
 import '../../models/channel_playback.dart';
 import '../../models/remote_player_config.dart';
 import '../../services/native_android_player.dart';
+import '../../services/player_config_service.dart';
 import '../../services/player_engine.dart';
-import '../../services/remote_config_service.dart';
 import '../analytics/playback_analytics.dart';
 import 'playback_session.dart';
 import '../../screens/fullscreen_video_page.dart';
@@ -27,7 +28,10 @@ class PlaybackOrchestrator {
 
   static final PlaybackOrchestrator instance = PlaybackOrchestrator._();
 
-  RemotePlayerConfig get _globalPolicy => RemoteConfigService.playerConfig;
+  RemotePlayerConfig get _globalPolicy => PlayerConfigService.playerConfig;
+
+  /// Supasoka resolves playback via [resolveChannelPlayback] — v2 bundle API not wired here.
+  Future<PlaybackSession?> resolveSession(int channelId) async => null;
 
   /// Opens playback for a resolved session.
   Future<void> openSession({

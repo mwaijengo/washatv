@@ -631,26 +631,32 @@ class _WashaAppState extends State<WashaApp> with WidgetsBindingObserver {
       return;
     }
 
-    // Resume an open order instead of starting a second charge.
+    // Resume an open order instead of starting a second charge ONLY IF allowNewCharge is false and phone/plan match.
     final pending = await storage.loadPendingPayment();
-    if (pending != null && pending.orderId.isNotEmpty) {
-      if (pending.planKey.isNotEmpty) {
-        for (final p in userPlans) {
-          if (p.id == pending.planKey) {
-            selectedPlan = p;
-            break;
+    if (pending != null && pending.orderId.isNotEmpty && !_paymentAllowNewCharge) {
+      if (pending.phone.isNotEmpty && pending.phone != trimmedPhone) {
+        await storage.clearPendingPayment();
+      } else if (pending.planKey.isNotEmpty && pending.planKey != selectedPlan.id) {
+        await storage.clearPendingPayment();
+      } else {
+        if (pending.planKey.isNotEmpty) {
+          for (final p in userPlans) {
+            if (p.id == pending.planKey) {
+              selectedPlan = p;
+              break;
+            }
           }
         }
+        await _resumeSonicpesaPayment(
+          orderId: pending.orderId,
+          phone: pending.phone.isNotEmpty ? pending.phone : trimmedPhone,
+          name: pending.name.isNotEmpty ? pending.name : trimmedName,
+        );
+        return;
       }
-      await _resumeSonicpesaPayment(
-        orderId: pending.orderId,
-        phone: pending.phone.isNotEmpty ? pending.phone : trimmedPhone,
-        name: pending.name.isNotEmpty ? pending.name : trimmedName,
-      );
-      return;
     }
 
-    await _runSonicpesaPayment(phone: trimmedPhone, name: trimmedName);
+    await _runSonicpesaPayment(phone: trimmedPhone, name: trimmedName, forceNew: _paymentAllowNewCharge);
   }
 
   int _planPriceAmount(Plan plan) {
@@ -976,10 +982,16 @@ class _WashaAppState extends State<WashaApp> with WidgetsBindingObserver {
       return;
     }
 
-    // Keep the pending order — timeout must NOT clear it or invite a second charge.
+    await storage.clearPendingPayment();
+    if (mounted) {
+      setState(() {
+        paymentOrderId = null;
+        _paymentAllowNewCharge = true;
+      });
+    }
     throw SonicpesaPaymentException(
-      'Muda wa kusubiri umeisha. Ikiwa umethibitisha PIN, bonyeza Angalia hali — usianzishe malipo mapya.',
-      retrySafe: false,
+      'Muda wa kusubiri umeisha. Bonyeza Anza malipo mapya kutuma ombi upya kwenye simu yako.',
+      retrySafe: true,
       orderId: orderId,
     );
   }
@@ -1170,21 +1182,21 @@ class _WashaAppState extends State<WashaApp> with WidgetsBindingObserver {
         ? paymentOrderId!.trim()
         : pending?.orderId;
 
-    // Default: resume / check existing order. Never create a second charge while one is open.
-    if (existingOrder != null && existingOrder.isNotEmpty && !_paymentAllowNewCharge) {
+    // Default: resume / check existing order ONLY IF new charge is disallowed.
+    if (existingOrder != null && existingOrder.isNotEmpty && !_paymentAllowNewCharge && pending != null) {
       await _resumeSonicpesaPayment(
         orderId: existingOrder,
-        phone: pending?.phone.isNotEmpty == true ? pending!.phone : phone,
-        name: pending?.name.isNotEmpty == true ? pending!.name : name,
+        phone: pending.phone.isNotEmpty == true ? pending.phone : phone,
+        name: pending.name.isNotEmpty == true ? pending.name : name,
       );
       return;
     }
 
-    // Confirmed failure (or no open order) — safe to start a fresh STK push.
+    // Confirmed failure (or no open order or user allowed new charge) — safe to start a fresh STK push.
     await _runSonicpesaPayment(
       phone: phone,
       name: name,
-      forceNew: _paymentAllowNewCharge,
+      forceNew: true,
     );
   }
 

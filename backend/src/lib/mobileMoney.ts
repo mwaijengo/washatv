@@ -2,20 +2,21 @@
 export type TzMobileNetwork = 'mpesa' | 'airtel' | 'tigo' | 'halotel' | 'unknown';
 
 export function detectTzMobileNetwork(localPhone: string): TzMobileNetwork {
-  const digits = localPhone.replace(/\D/g, '');
-  let local = digits;
-  if (local.startsWith('255') && local.length >= 12) {
-    local = `0${local.slice(3, 12)}`;
-  } else if (local.length === 9 && /^[67]/.test(local)) {
-    local = `0${local}`;
+  let local = localPhone.replace(/\D/g, '');
+  while (local.startsWith('255')) {
+    local = local.slice(3);
   }
-  if (!/^0[67]\d{8}$/.test(local)) return 'unknown';
+  while (local.startsWith('0')) {
+    local = local.slice(1);
+  }
+  if (local.length !== 9 || !/^[67]\d{8}$/.test(local)) return 'unknown';
+  local = `0${local}`;
 
   const prefix = local.slice(0, 3);
   if (['061', '062', '063'].includes(prefix)) return 'halotel';
-  if (['065', '067', '071', '073'].includes(prefix)) return 'tigo';
-  if (['068', '069'].includes(prefix)) return 'airtel';
-  if (['074', '075', '076', '077', '078'].includes(prefix)) return 'mpesa';
+  if (['065', '067', '071', '073', '077'].includes(prefix)) return 'tigo';
+  if (['068', '069', '078'].includes(prefix)) return 'airtel';
+  if (['074', '075', '076'].includes(prefix)) return 'mpesa';
   if (local.startsWith('06')) return 'halotel';
   if (local.startsWith('07')) return 'mpesa';
   return 'unknown';

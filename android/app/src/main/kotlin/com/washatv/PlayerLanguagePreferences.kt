@@ -4,7 +4,7 @@ import android.content.Context
 
 /** User-chosen playback audio language (persists across channels). */
 internal object PlayerLanguagePreferences {
-    private const val PREFS_NAME = "eamax_player_prefs"
+    private const val PREFS_NAME = "washa_player_prefs"
     private const val KEY_AUDIO_LANGUAGE = "preferred_audio_language"
 
     fun get(context: Context): String? {

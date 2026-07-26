@@ -42,7 +42,7 @@ import com.washatv.player.WashaPlayerOverlay
 class WashaNativePlayerActivity : AppCompatActivity() {
 
     companion object {
-        private const val TAG = "EaMaxNativePlayer"
+        private const val TAG = "WashaNativePlayer"
     }
 
     private lateinit var playerManager: PlayerManager
@@ -61,7 +61,6 @@ class WashaNativePlayerActivity : AppCompatActivity() {
     /** After landscape once, do not show rotate hint again this session. */
     private var hasBeenLandscapeThisSession = false
     private var playbackReady = false
-    private var webViewAttached = false
     private lateinit var playerViewRef: PlayerView
     private lateinit var playerTopTools: LinearLayout
 
@@ -83,8 +82,9 @@ class WashaNativePlayerActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        // Open directly in landscape — no portrait embed / expand step (avoids blank WebView handoff).
-        requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+        // FULL_USER honors system rotation lock (often traps player in portrait). FULL_SENSOR + manifest
+        // fullSensor tracks physical rotation for proper landscape fullscreen playback.
+        requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_FULL_SENSOR
         applyImmersiveFullscreen()
 
         setContentView(R.layout.activity_native_player)
@@ -145,7 +145,6 @@ class WashaNativePlayerActivity : AppCompatActivity() {
             rotateHintDismissedThisSession = true
             hideRotateHintOverlay()
         }
-        hideRotateHintOverlay()
         playerTopTools = findViewById(R.id.player_top_tools)
         findViewById<ImageButton>(R.id.btn_player_language).setOnClickListener {
             showAudioLanguageDialog()
@@ -172,7 +171,9 @@ class WashaNativePlayerActivity : AppCompatActivity() {
                     playerOverlay.onEngineStateChanged(state)
                     if (playerManager.isWebViewPlayback()) {
                         when (state) {
-                            PlaybackState.PLAYING -> { /* WebView attached once in syncPlaybackSurface */ }
+                            PlaybackState.PLAYING -> {
+                                attachWebViewIfNeeded(webContainer, playerView)
+                            }
                             PlaybackState.ENDED -> showChannelUnavailableAndFinish()
                             else -> { }
                         }
@@ -200,6 +201,7 @@ class WashaNativePlayerActivity : AppCompatActivity() {
         playbackReady = true
         syncPlaybackSurface()
         showPlayerTopTools()
+        maybeShowRotateHint()
     }
 
     private fun showPlayerTopTools() {
@@ -222,6 +224,7 @@ class WashaNativePlayerActivity : AppCompatActivity() {
             exoBoundToView = false
             attachWebViewIfNeeded(webContainer, playerView)
             if (!webAlreadyPlaying) {
+                playerManager.setQuality(selectedOkoaQuality, fromUser = false)
                 playerManager.play()
             }
         } else if (playerManager.isExoPlayback()) {
@@ -391,10 +394,9 @@ class WashaNativePlayerActivity : AppCompatActivity() {
     }
 
     private fun hideRotateHintOverlay() {
-        if (!::rotateHintOverlay.isInitialized) return
         phoneHintAnimator?.cancel()
         phoneHintAnimator = null
-        if (::rotateHintPhone.isInitialized) rotateHintPhone.rotation = 0f
+        rotateHintPhone.rotation = 0f
         rotateHintOverlay.visibility = View.GONE
     }
 
@@ -416,22 +418,19 @@ class WashaNativePlayerActivity : AppCompatActivity() {
         }
         webContainer.visibility = View.VISIBLE
         playerView.visibility = View.GONE
-        w.visibility = View.INVISIBLE
-        if (w.parent === webContainer) {
-            webViewAttached = true
-            return
+        w.visibility = View.VISIBLE
+        if (w.parent !== webContainer) {
+            (w.parent as? android.view.ViewGroup)?.removeView(w)
+            webContainer.removeAllViews()
+            webContainer.addView(
+                w,
+                FrameLayout.LayoutParams(
+                    FrameLayout.LayoutParams.MATCH_PARENT,
+                    FrameLayout.LayoutParams.MATCH_PARENT,
+                ),
+            )
         }
-        (w.parent as? android.view.ViewGroup)?.removeView(w)
-        webContainer.removeAllViews()
-        webContainer.addView(
-            w,
-            FrameLayout.LayoutParams(
-                FrameLayout.LayoutParams.MATCH_PARENT,
-                FrameLayout.LayoutParams.MATCH_PARENT,
-            ),
-        )
-        webViewAttached = true
-        Log.d(TAG, "WebView mounted to player container")
+        Log.d(TAG, "WebView added to player container")
     }
 
     private fun bindExoToPlayerViewIfNeeded(playerView: PlayerView, strictNull: Boolean) {
@@ -461,7 +460,6 @@ class WashaNativePlayerActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         phoneHintAnimator?.cancel()
-        webViewAttached = false
         if (::playerOverlay.isInitialized) {
             playerOverlay.detach()
         }

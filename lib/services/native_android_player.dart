@@ -6,7 +6,7 @@ import 'package:flutter/services.dart';
 import '../models/channel_playback.dart';
 import '../models/remote_player_config.dart';
 
-/// Opens the Kotlin [PlayerManager] stack on Android (see `android/.../com/washatv/player/`).
+/// Opens the Kotlin native player on Android (see `android/.../com/washatv/player/`).
 class NativeAndroidPlayer {
   NativeAndroidPlayer._();
 

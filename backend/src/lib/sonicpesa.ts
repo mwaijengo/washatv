@@ -45,17 +45,16 @@ export function normalizeTzPhone(raw: string): string | null {
   let digits = raw.replace(/\D/g, '');
   if (!digits) return null;
 
-  if (digits.startsWith('255') && digits.length >= 12) {
-    digits = digits.slice(3, 12);
-  } else if (digits.startsWith('0') && digits.length >= 10) {
-    digits = digits.slice(0, 10).slice(1);
-  } else if (digits.length === 9 && /^[67]/.test(digits)) {
-    // 612345678 → 255612345678
-  } else {
-    return null;
+  while (digits.startsWith('255')) {
+    digits = digits.slice(3);
+  }
+  while (digits.startsWith('0')) {
+    digits = digits.slice(1);
   }
 
-  if (!/^[67]\d{8}$/.test(digits)) return null;
+  if (digits.length !== 9 || !/^[67]\d{8}$/.test(digits)) {
+    return null;
+  }
   return `255${digits}`;
 }
 

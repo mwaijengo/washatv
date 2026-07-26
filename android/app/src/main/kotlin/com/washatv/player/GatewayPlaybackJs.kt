@@ -2,36 +2,6 @@ package com.washatv.player
 
 /** JS bridges for quality / audio on PHP gateway pages (Shaka / hls.js). */
 object GatewayPlaybackJs {
-
-    /** Hides gateway page chrome / spinners — black fullscreen video only. */
-    fun hidePageChromeScript(): String = """
-        (function(){
-          try {
-            if (window.__eaMaxChromeHidden) return true;
-            window.__eaMaxChromeHidden = true;
-            var css = [
-              'html,body{margin:0!important;padding:0!important;background:#000!important;',
-              'overflow:hidden!important;width:100%!important;height:100%!important;}',
-              'video{position:fixed!important;left:0!important;top:0!important;',
-              'width:100vw!important;height:100vh!important;object-fit:contain!important;',
-              'background:#000!important;z-index:2147483646!important;}',
-              '.shaka-spinner-container,.shaka-loading-spinner,.shaka-controls-container,',
-              '.vjs-loading-spinner,.loading,.loader,.spinner,.preloader,',
-              '[class*="loading"],[class*="splash"],[class*="placeholder"],',
-              '[id*="loading"],[id*="splash"]{display:none!important;opacity:0!important;}'
-            ].join('');
-            var s = document.getElementById('__eaMaxHideStyle');
-            if (!s) {
-              s = document.createElement('style');
-              s.id = '__eaMaxHideStyle';
-              (document.head || document.documentElement).appendChild(s);
-            }
-            s.textContent = css;
-          } catch (e) {}
-          return true;
-        })();
-    """.trimIndent()
-
     fun eaMaxOkoaQualityApiScript(): String {
         return """
             (function() {
@@ -198,13 +168,13 @@ object GatewayPlaybackJs {
                 var manifestMax = 0;
                 var allH = allManifestHeights();
                 if (allH.length) manifestMax = allH[allH.length - 1];
-                var goal = maxH;
-                if (manifestMax > 0 && manifestMax < goal - 48) goal = manifestMax;
                 if (window.__eaMaxUserQualityLocked) {
+                  var goal = maxH;
+                  if (manifestMax > 0 && manifestMax < goal - 48) goal = manifestMax;
                   return activeH >= goal - 48;
                 }
                 var target = targetHeightFor(maxH);
-                if (target <= 0) return activeH >= goal - 48;
+                if (target <= 0) return false;
                 return activeH >= target - 48;
               }
               function tryShakaUiResolution(maxH) {
@@ -243,7 +213,6 @@ object GatewayPlaybackJs {
                 return scanDoc(document);
               }
               function tryHls(maxH) {
-                var userLocked = !!window.__eaMaxUserQualityLocked;
                 var found = false;
                 var tryOne = function(hls) {
                   if (!hls || !hls.levels || !hls.levels.length) return;
@@ -255,15 +224,12 @@ object GatewayPlaybackJs {
                     if (typeof hls.autoLevelEnabled !== 'undefined') hls.autoLevelEnabled = true;
                     return;
                   }
-                  if (typeof hls.autoLevelEnabled !== 'undefined') {
-                    hls.autoLevelEnabled = !userLocked;
-                  }
+                  if (typeof hls.autoLevelEnabled !== 'undefined') hls.autoLevelEnabled = false;
                   var idx = pickLevel(hls.levels, maxH);
                   if (idx >= 0) {
-                    if (userLocked || hls.currentLevel !== idx) {
-                      hls.currentLevel = idx;
-                      if (typeof hls.loadLevel === 'function') hls.loadLevel(idx);
-                    }
+                    if (hls.currentLevel === idx) return;
+                    hls.currentLevel = idx;
+                    if (typeof hls.loadLevel === 'function') hls.loadLevel(idx);
                   }
                 };
                 try { if (window.hls) tryOne(window.hls); } catch (e0) {}
@@ -281,7 +247,9 @@ object GatewayPlaybackJs {
                 var candidates = collectShakaPlayers();
                 if (!candidates.length) return false;
                 var prefLang = window.__eaMaxPreferredAudioLang || '';
-                var userLocked = !!window.__eaMaxUserQualityLocked;
+                var currentH = activeVideoHeight();
+                var isUpgrade = maxH > 0 && currentH > 0 && maxH > currentH + 48;
+                var useAbr = isUpgrade || window.__eaMaxUserQualityLocked || maxH <= 0;
                 var applied = false;
                 for (var i = 0; i < candidates.length; i++) {
                   var pl = candidates[i];
@@ -302,18 +270,35 @@ object GatewayPlaybackJs {
                     var cap = maxBitrateForHeight(maxH);
                     var maxW = widthForHeight(maxH);
                     pl.__eaMaxOkoaMaxH = maxH;
-                    pl.configure({
-                      abr: { enabled: false },
-                      restrictions: {
-                        minHeight: 0, maxHeight: maxH,
-                        minWidth: 0, maxWidth: maxW || Infinity,
-                        maxBandwidth: cap
-                      }
-                    });
+                    if (useAbr) {
+                      pl.configure({
+                        abr: {
+                          enabled: true,
+                          restrictions: {
+                            minHeight: 0, maxHeight: maxH,
+                            minWidth: 0, maxWidth: maxW || Infinity,
+                            maxBandwidth: cap
+                          },
+                          bandwidthUpgradeTarget: 0.7,
+                          switchInterval: 3
+                        }
+                      });
+                    } else {
+                      pl.configure({
+                        abr: { enabled: false },
+                        restrictions: {
+                          minHeight: 0, maxHeight: maxH,
+                          minWidth: 0, maxWidth: maxW || Infinity,
+                          maxBandwidth: cap
+                        }
+                      });
+                    }
                     var tracks = variantTracksFor(pl);
                     var best = pickBestVariant(tracks, maxH, prefLang);
                     if (best) {
-                      pl.selectVariantTrack(best, true, 0);
+                      if (!best.active || (best.height || 0) > currentH + 48) {
+                        pl.selectVariantTrack(best, false, 0);
+                      }
                       applied = true;
                       if (prefLang && typeof pl.selectAudioLanguage === 'function') {
                         var langs = pl.getAudioLanguages() || [];
@@ -327,7 +312,7 @@ object GatewayPlaybackJs {
                     }
                   } catch (e3) {}
                 }
-                if (userLocked) {
+                if (isUpgrade || window.__eaMaxUserQualityLocked) {
                   tryShakaUiResolution(maxH);
                 }
                 return applied;
@@ -361,23 +346,15 @@ object GatewayPlaybackJs {
                     maxH !== 360) {
                   return false;
                 }
-                var playerCount = collectShakaPlayers().length;
-                var manifestHeights = allManifestHeights();
-                if (playerCount > 0 && manifestHeights.length === 0 &&
-                    !window.__eaMaxUserQualityLocked) {
-                  return false;
-                }
                 tryHls(maxH);
                 tryShaka(maxH);
                 var activeH = activeVideoHeight();
                 var targetH = targetHeightFor(maxH);
-                manifestHeights = allManifestHeights();
+                var manifestHeights = allManifestHeights();
                 var applied = qualityMet(maxH, activeH);
                 try {
                   if (typeof ShakaPlayerBridge !== 'undefined' &&
-                      ShakaPlayerBridge.onQualityProbe &&
-                      (window.__eaMaxUserQualityLocked || manifestHeights.length > 0 ||
-                       activeH > 0 || playerCount === 0)) {
+                      ShakaPlayerBridge.onQualityProbe) {
                     ShakaPlayerBridge.onQualityProbe(JSON.stringify({
                       wanted: String(mode),
                       maxH: maxH,
@@ -387,95 +364,12 @@ object GatewayPlaybackJs {
                       manifestHeights: manifestHeights,
                       applied: applied,
                       userLocked: !!window.__eaMaxUserQualityLocked,
-                      players: playerCount
+                      players: collectShakaPlayers().length
                     }));
                   }
                 } catch (e) {}
                 return applied;
               }
-              window.__eaMaxManifestReady = function() {
-                return allManifestHeights().length > 0;
-              };
-              window.__eaMaxVideoFrameReady = function() {
-                function hasDecodedFrames(v) {
-                  if (!v || v.videoWidth <= 0 || v.videoHeight <= 0) return false;
-                  if (v.readyState < 2) return false;
-                  try {
-                    var q = v.getVideoPlaybackQuality && v.getVideoPlaybackQuality();
-                    if (q && q.totalVideoFrames > 0) return true;
-                  } catch (e) {}
-                  if (v.webkitDecodedFrameCount > 0) return true;
-                  return !v.paused && v.currentTime > 0;
-                }
-                function videos() {
-                  var out = [], seen = [];
-                  function add(v) {
-                    if (!v || seen.indexOf(v) >= 0) return;
-                    seen.push(v);
-                    out.push(v);
-                  }
-                  function scan(doc) {
-                    if (!doc) return;
-                    try {
-                      var list = doc.querySelectorAll('video');
-                      for (var i = 0; i < list.length; i++) add(list[i]);
-                    } catch (e) {}
-                    try {
-                      var iframes = doc.querySelectorAll('iframe');
-                      for (var j = 0; j < iframes.length; j++) {
-                        try {
-                          var d = iframes[j].contentDocument ||
-                            (iframes[j].contentWindow && iframes[j].contentWindow.document);
-                          if (d) scan(d);
-                        } catch (e) {}
-                      }
-                    } catch (e) {}
-                  }
-                  scan(document);
-                  collectShakaPlayers().forEach(function(pl) {
-                    try {
-                      if (pl.getMediaElement) add(pl.getMediaElement());
-                    } catch (e) {}
-                  });
-                  return out;
-                }
-                var vids = videos();
-                for (var k = 0; k < vids.length; k++) {
-                  if (hasDecodedFrames(vids[k])) return true;
-                }
-                return false;
-              };
-              window.__eaMaxVideoTime = function() {
-                function timeIn(doc) {
-                  try {
-                    var list = doc.querySelectorAll('video');
-                    var best = -1;
-                    for (var i = 0; i < list.length; i++) {
-                      var t = list[i].currentTime || 0;
-                      if (t > best) best = t;
-                    }
-                    return best;
-                  } catch (e) { return -1; }
-                }
-                var best = timeIn(document);
-                collectShakaPlayers().forEach(function(pl) {
-                  try {
-                    var v = pl.getMediaElement && pl.getMediaElement();
-                    if (v) {
-                      var t = v.currentTime || 0;
-                      if (t > best) best = t;
-                    }
-                  } catch (e) {}
-                });
-                return best;
-              };
-              window.__eaMaxPlaybackReady = function() {
-                if (activeVideoHeight() > 0) return true;
-                if (window.__eaMaxVideoFrameReady && window.__eaMaxVideoFrameReady()) return true;
-                return collectShakaPlayers().some(function(pl) {
-                  try { return pl.isInProgress && pl.isInProgress(); } catch (e) { return false; }
-                });
-              };
               window.__eaMaxOkoaApplyStartup360 = function() {
                 if (window.__eaMaxUserQualityLocked || window.__eaMaxOkoaUserInitiated) return true;
                 if (window.__eaMaxOkoaLastApplied === '360') return true;
@@ -525,11 +419,11 @@ object GatewayPlaybackJs {
                     window.__eaMaxOkoaLastApplied = window.__eaMaxOkoaLastMode;
                     clearInterval(window.__eaMaxOkoaRetryId);
                     window.__eaMaxOkoaRetryId = null;
-                  } else if (++tries >= 12) {
+                  } else if (++tries >= 30) {
                     clearInterval(window.__eaMaxOkoaRetryId);
                     window.__eaMaxOkoaRetryId = null;
                   }
-                }, 350);
+                }, 500);
                 return true;
               };
               true;
@@ -803,10 +697,6 @@ object GatewayPlaybackJs {
               function reportAudioProbe(wanted, applied) {
                 try {
                   var probe = collectAudioProbe();
-                  if (probe.players > 0 && !probe.shakaLangs.length &&
-                      !probe.hlsLangs.length && !probe.variantLangs.length && !applied) {
-                    return;
-                  }
                   probe.wanted = wanted;
                   probe.applied = !!applied;
                   if (typeof ShakaPlayerBridge !== 'undefined' &&
@@ -817,11 +707,6 @@ object GatewayPlaybackJs {
               }
               function applyAudioLanguage(raw) {
                 var lang = normalizeLang(raw);
-                var probe = collectAudioProbe();
-                if (probe.players > 0 && !probe.shakaLangs.length &&
-                    !probe.hlsLangs.length && !probe.variantLangs.length) {
-                  return false;
-                }
                 window.__eaMaxPreferredAudioLang = lang;
                 tryShaka(lang);
                 tryHls(lang);

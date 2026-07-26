@@ -5,10 +5,8 @@ import 'package:flutter/material.dart';
 import '../models/channel.dart';
 import '../player/wash_channel_playback.dart';
 import '../services/native_android_player.dart';
-import '../services/remote_config_service.dart';
-import '../services/storage_service.dart';
+import '../services/player_playback_service.dart';
 import '../utils/player_orientation.dart';
-import 'fullscreen_video_page.dart';
 
 typedef PlayerBackHandler = bool Function();
 
@@ -34,12 +32,8 @@ class PlayerScreen extends StatefulWidget {
 }
 
 class _PlayerScreenState extends State<PlayerScreen> {
-  final _storage = StorageService();
-
   bool _fullscreenRouteOpen = false;
   bool _playbackShellActive = false;
-  bool _dataSaverEnabled = true;
-  final String _preferredLanguage = 'sw';
   int _openGeneration = 0;
 
   Channel get _current => widget.channel ?? widget.channels.first;
@@ -48,7 +42,11 @@ class _PlayerScreenState extends State<PlayerScreen> {
   void initState() {
     super.initState();
     widget.onBackHandlerChanged?.call(_handlePlayerBack);
-    unawaited(_bootstrapPlayback());
+    // Defer until after first frame — onFullscreenChanged triggers parent setState.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      unawaited(_bootstrapPlayback());
+    });
   }
 
   @override
@@ -68,28 +66,15 @@ class _PlayerScreenState extends State<PlayerScreen> {
 
   void _invalidatePlaybackSession() => _openGeneration++;
 
-  Future<void> _loadSettings() async {
-    final enabled = await _storage.getDataSaverEnabled();
-    if (mounted) setState(() => _dataSaverEnabled = enabled);
-  }
-
   Future<void> _bootstrapPlayback() async {
-    await _loadSettings();
     if (!mounted) return;
     unawaited(_openLandscapePlayback());
-  }
-
-  String get _defaultQuality => _dataSaverEnabled ? '360p' : 'auto';
-
-  Map<String, String> _headersFor(Channel c) {
-    final data = channelDataFor(c);
-    return mergedPlaybackHeaders(url: c.streamUrl, channelData: data);
   }
 
   Future<void> _restorePortraitShell() async {
     if (!_playbackShellActive) return;
     _playbackShellActive = false;
-    widget.onFullscreenChanged?.call(false);
+    _notifyFullscreenChanged(false);
     await PlayerOrientation.lockHomePortrait();
   }
 
@@ -119,6 +104,15 @@ class _PlayerScreenState extends State<PlayerScreen> {
     unawaited(_openLandscapePlayback());
   }
 
+  void _notifyFullscreenChanged(bool value) {
+    final cb = widget.onFullscreenChanged;
+    if (cb == null) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      cb(value);
+    });
+  }
+
   Future<void> _openLandscapePlayback() async {
     if (!mounted) return;
     final c = _current;
@@ -128,12 +122,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
     }
 
     final generation = ++_openGeneration;
-
-    final data = channelDataFor(c);
-    final ck = extractClearKeyPayload(data);
-    final headers = _headersFor(c);
-    final drm = normalizedDrmType(data, ck, c.streamUrl);
-    final token = extractPlaybackToken(data);
+    final channelData = channelDataFor(c);
 
     try {
       if (!_sessionAlive(generation)) return;
@@ -141,57 +130,32 @@ class _PlayerScreenState extends State<PlayerScreen> {
       if (NativeAndroidPlayer.supported) {
         // Native activity owns landscape + immersive UI — rotating Flutter first
         // causes EGL churn and slow startup on Huawei / HiSilicon devices.
-        widget.onFullscreenChanged?.call(true);
+        _notifyFullscreenChanged(true);
         _playbackShellActive = true;
-        await NativeAndroidPlayer.open(
-          url: c.streamUrl,
-          channelId: c.id,
-          channelName: c.name,
-          licenseUrl: '',
-          token: token,
-          drmType: drm,
-          clearKeyHex: ck,
-          headers: headers.isEmpty ? null : headers,
-          audioLanguage: _preferredLanguage,
-          playerPolicy: RemoteConfigService.playerConfig,
-        );
-        return;
+      } else {
+        _notifyFullscreenChanged(true);
+        await PlayerOrientation.enterFullscreenPlayer();
+        if (!_sessionAlive(generation)) {
+          await _restorePortraitShell();
+          return;
+        }
+        _playbackShellActive = true;
+        if (mounted) setState(() => _fullscreenRouteOpen = true);
       }
 
-      widget.onFullscreenChanged?.call(true);
-      await PlayerOrientation.enterFullscreenPlayer();
-      if (!_sessionAlive(generation)) {
-        await _restorePortraitShell();
-        return;
-      }
-      _playbackShellActive = true;
+      if (!_sessionAlive(generation) || !mounted) return;
 
-      if (!_sessionAlive(generation)) return;
-
-      if (!mounted) return;
-      setState(() => _fullscreenRouteOpen = true);
-
-      await Navigator.of(context).push<void>(
-        PageRouteBuilder<void>(
-          opaque: true,
-          fullscreenDialog: true,
-          pageBuilder: (_, __, ___) => FullscreenVideoPage(
-            videoUrl: c.streamUrl,
-            channelName: c.name,
-            channelId: c.id,
-            httpHeaders: headers,
-            drmType: drm,
-            clearKeyRaw: ck,
-            playbackToken: token,
-            playbackMode: resolveFlutterPlaybackMode(c.streamUrl, drm: c.drm),
-            audioLanguage: _preferredLanguage,
-            defaultQuality: _defaultQuality,
-          ),
-          transitionsBuilder: (_, animation, _, child) => FadeTransition(
-            opacity: CurvedAnimation(parent: animation, curve: Curves.easeOut),
-            child: child,
-          ),
-        ),
+      await PlayerPlaybackService.open(
+        context: context,
+        url: c.streamUrl,
+        channelId: c.id,
+        channelName: c.name,
+        channelData: channelData,
+        extractClearKey: clearKeyPayloadFromData,
+        normalizeDrm: normalizedDrmType,
+        extractToken: playbackTokenFromData,
+        extractHeaders: (data) => extractPlaybackHeaders(data, c.streamUrl),
+        extractAudioLanguage: playbackAudioLanguageFromData,
       );
     } finally {
       await _restorePortraitShell();

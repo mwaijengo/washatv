@@ -23,12 +23,15 @@ import androidx.media3.exoplayer.source.MediaSource
 import androidx.media3.exoplayer.source.ProgressiveMediaSource
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.exoplayer.trackselection.DefaultTrackSelector
+import androidx.media3.exoplayer.upstream.DefaultLoadErrorHandlingPolicy
+import androidx.media3.exoplayer.upstream.LoadErrorHandlingPolicy
 import com.washatv.domain.model.StreamSession
 import com.washatv.domain.model.DrmType
 import com.washatv.domain.model.StreamQuality
 import com.washatv.domain.model.PlaybackState
 import org.json.JSONObject
 import org.json.JSONArray
+import java.io.IOException
 import java.util.UUID
 
 /**
@@ -239,6 +242,13 @@ class ExoPlayerEngine(
                 putAll(sessionHeaders)
                 Log.d(TAG, "  Added ${sessionHeaders.size} session headers")
             }
+
+            // Tokenized CDN URLs must use JWT `url` as Referer/Origin (Azam/Nagra).
+            CdnTokenHeaders.refererOriginForUrl(streamSession.mpdUrl)?.let { (referer, origin) ->
+                put("Referer", referer)
+                put("Origin", origin)
+                Log.d(TAG, "  Applied CDN token Referer/Origin")
+            }
             
             // Priority 3: Add standard browser-like headers (lowest priority, won't override)
             putIfAbsent("Accept", "*/*")
@@ -247,21 +257,18 @@ class ExoPlayerEngine(
                 if (preferredAudioLanguage == "en") "en-US,en;q=0.9,sw;q=0.8"
                 else "sw-TZ,sw;q=0.9,en;q=0.8",
             )
-            putIfAbsent("Accept-Encoding", "gzip, deflate")
             putIfAbsent("Connection", "keep-alive")
             
             // Priority 4: Add default User-Agent if not present
-            putIfAbsent("User-Agent", "ExoPlayerLib/2.18.0 (Linux;Android 11) ReactNativeVideo/3.0")
+            putIfAbsent(
+                "User-Agent",
+                "Mozilla/5.0 (Linux; Android 13; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36",
+            )
             
             // Priority 5: Add authorization token if present and not already set
             if (streamSession.token.isNotEmpty() && !containsKey("Authorization")) {
                 put("Authorization", "Bearer ${streamSession.token}")
             }
-            
-            // Priority 6: Add default Referer and Origin for compatibility (if not set)
-            // These are important for CORS and some DRM systems
-            // putIfAbsent("Referer", "http://167.235.61.143:8080/")
-            // putIfAbsent("Origin", "http://167.235.61.143:8080/")
         }
         
         Log.d(TAG, "📋 Final headers count: ${headers.size}")
@@ -427,6 +434,18 @@ class ExoPlayerEngine(
         headers: Map<String, String>
     ): MediaSource {
         val dashFactory = DashMediaSource.Factory(dataSourceFactory)
+            .setLoadErrorHandlingPolicy(
+                object : DefaultLoadErrorHandlingPolicy() {
+                    override fun getRetryDelayMsFor(loadErrorInfo: LoadErrorHandlingPolicy.LoadErrorInfo): Long {
+                        if (loadErrorInfo.errorCount >= 6) return C.TIME_UNSET
+                        val cause = loadErrorInfo.exception
+                        if (cause !is IOException) return C.TIME_UNSET
+                        return minOf(1000L shl (loadErrorInfo.errorCount - 1), 8000L)
+                    }
+
+                    override fun getMinimumLoadableRetryCount(dataType: Int): Int = 6
+                },
+            )
 
         // Add DRM session manager if needed
         if (streamSession.drmType != DrmType.NONE) {

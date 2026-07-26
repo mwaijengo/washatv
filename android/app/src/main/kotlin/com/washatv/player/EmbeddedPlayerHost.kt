@@ -64,7 +64,6 @@ object EmbeddedPlayerHost {
                 if (gen != generation) return@WebViewEngine
                 eventsChannel?.invokeMethod("onError", null)
             },
-            embeddedInPlatformView = false,
         )
         webViewEngine?.initialize(session)
 

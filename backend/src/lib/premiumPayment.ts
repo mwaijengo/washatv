@@ -298,7 +298,7 @@ export async function upsertPendingSonicpesaTransaction(
 export async function findOpenSonicpesaOrderForDevice(
   pool: DbPool,
   deviceId: string,
-  maxAgeMinutes = 60,
+  maxAgeMinutes = 3,
 ): Promise<OpenSonicpesaOrder | null> {
   const id = deviceId.trim();
   if (!id) return null;
@@ -358,14 +358,14 @@ export async function findDeviceIdByPhone(pool: DbPool, phoneRaw: string): Promi
 function toLocalDigits(raw: string): string | null {
   let digits = raw.replace(/\D/g, '');
   if (!digits) return null;
-  if (digits.startsWith('255') && digits.length >= 12) {
-    digits = `0${digits.slice(3, 12)}`;
-  } else if (digits.length === 9 && /^[67]/.test(digits)) {
-    digits = `0${digits}`;
-  } else if (digits.startsWith('0') && digits.length >= 10) {
-    digits = digits.slice(0, 10);
-  } else {
+  while (digits.startsWith('255')) {
+    digits = digits.slice(3);
+  }
+  while (digits.startsWith('0')) {
+    digits = digits.slice(1);
+  }
+  if (digits.length !== 9 || !/^[67]\d{8}$/.test(digits)) {
     return null;
   }
-  return /^0[67]\d{8}$/.test(digits) ? digits : null;
+  return `0${digits}`;
 }

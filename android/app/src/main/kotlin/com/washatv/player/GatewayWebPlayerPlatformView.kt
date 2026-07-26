@@ -2,12 +2,10 @@ package com.washatv.player
 
 import android.content.Context
 import android.view.View
-import android.view.ViewGroup
-import android.widget.FrameLayout
+import android.webkit.WebView
 import com.washatv.domain.model.StreamSession
 import com.washatv.domain.model.DrmData
 import com.washatv.domain.model.DrmType
-import com.washatv.domain.model.PlaybackState
 import com.washatv.domain.model.PlayerMode
 import io.flutter.plugin.common.BinaryMessenger
 import io.flutter.plugin.common.MethodChannel
@@ -24,7 +22,6 @@ class GatewayWebPlayerPlatformView(
 
     private val appContext: Context = context.applicationContext
     private val webViewEngine: WebViewEngine
-    private val container = FrameLayout(context)
     private val channel = MethodChannel(messenger, "com.washatv/gateway_web_player")
 
     init {
@@ -43,48 +40,27 @@ class GatewayWebPlayerPlatformView(
             headers = parseHeaders(headersJson),
         )
 
-        val embedded = args["embedded"] as? Boolean ?: true
-
         webViewEngine = WebViewEngine(
             context = context,
-            onPlaybackStateChanged = { state ->
-                if (state == PlaybackState.PLAYING) {
-                    channel.invokeMethod("onPlaying", mapOf("viewId" to viewId))
-                }
-            },
+            onPlaybackStateChanged = {},
             onError = {
                 channel.invokeMethod("onError", mapOf("viewId" to viewId))
             },
-            embeddedInPlatformView = embedded,
         )
         webViewEngine.initialize(session)
-        webViewEngine.getWebView()?.let { wv ->
-            (wv.parent as? ViewGroup)?.removeView(wv)
-            container.addView(
-                wv,
-                FrameLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT,
-                    ViewGroup.LayoutParams.MATCH_PARENT,
-                ),
-            )
-        }
         GatewayWebPlayerRegistry.register(viewId, this)
     }
 
-    fun pauseForHandoff() {
-        webViewEngine.pauseForHandoff()
-    }
-
-    fun resumeAfterHandoff() {
-        webViewEngine.resumeAfterHandoff()
-    }
-
-    override fun getView(): View = container
+    override fun getView(): View = webViewEngine.getWebView() ?: View(appContext)
 
     override fun dispose() {
         GatewayWebPlayerRegistry.unregister(viewId)
         webViewEngine.release()
     }
+
+    fun pauseForHandoff() = webViewEngine.pauseForHandoff()
+
+    fun resumeAfterHandoff() = webViewEngine.resumeAfterHandoff()
 
     private fun parseHeaders(json: String): Map<String, String> {
         if (json.isEmpty()) return emptyMap()

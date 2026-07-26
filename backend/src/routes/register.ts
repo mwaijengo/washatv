@@ -415,7 +415,7 @@ export async function registerRoutes(
       // while money may already have been deducted on the first push.
       if (!forceNew) {
         const open = await findOpenSonicpesaOrderForDevice(pool, deviceId);
-        if (open) {
+        if (open && (!open.phone || open.phone === localPhone) && (!open.planKey || open.planKey === planKey)) {
           const remote = await sonicpesaOrderStatus(env, open.orderId);
           const remoteStatus = remote.ok
             ? normalizePaymentStatus(remote.payment_status ?? remote.status ?? 'PENDING')
