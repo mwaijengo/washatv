@@ -98,6 +98,9 @@ class _AdminScaffoldState extends State<AdminScaffold> {
   final _rand = Random();
   final _globalSearch = TextEditingController();
   final _userSearch = TextEditingController();
+  Timer? _userSearchDebounce;
+  /// Authoritative DB count (may exceed loaded list length when filtered).
+  int _usersTotal = 0;
   /// Same Railway API as the viewer app unless overridden with `--dart-define=WASHA_API_BASE_URL=...`.
   String get _apiBase => widget.auth.apiBase;
   bool get _hasAdminSession => widget.auth.hasSession;
@@ -117,6 +120,18 @@ class _AdminScaffoldState extends State<AdminScaffold> {
   /// Field initializers run on first read — survives hot reload when `initState` does not re-run.
   late final TextEditingController _settingsSiteName = TextEditingController(text: _settings.siteName);
   late final TextEditingController _settingsWhatsapp = TextEditingController(text: _settings.whatsappNumber);
+  late final TextEditingController _settingsMinBuild = TextEditingController(text: '0');
+  late final TextEditingController _settingsMinVersion = TextEditingController();
+  late final TextEditingController _settingsLatestVersion = TextEditingController();
+  late final TextEditingController _settingsLatestBuild = TextEditingController(text: '0');
+  late final TextEditingController _settingsPlayStoreUrl = TextEditingController(
+    text: 'https://play.google.com/store/apps/details?id=com.washatv',
+  );
+  late final TextEditingController _settingsUpdateTitle = TextEditingController(text: 'Sasisha WASHA TV');
+  late final TextEditingController _settingsUpdateMessage = TextEditingController(
+    text:
+        'Toleo jipya linahitajika ili kuendelea kutumia app. Pakua kutoka Play Store kisha fungua tena.',
+  );
   AdminPageId _page = AdminPageId.dashboard;
   String? _slideQuery = '';
   String? _slideFilter = 'all';
@@ -372,7 +387,17 @@ class _AdminScaffoldState extends State<AdminScaffold> {
       );
       final bootstrapFuture = http.get(bootstrapUri, headers: _publicBootstrapHeaders).timeout(const Duration(seconds: 15));
       final adminFuture = _hasAdminSession
-          ? http.get(Uri.parse('$_apiBase/api/v1/admin/sync'), headers: _adminHeaders()).timeout(const Duration(seconds: 20))
+          ? http
+              .get(
+                Uri.parse('$_apiBase/api/v1/admin/sync').replace(
+                  queryParameters: {
+                    'limit': '5000',
+                    if (_userSearch.text.trim().isNotEmpty) 'q': _userSearch.text.trim(),
+                  },
+                ),
+                headers: _adminHeaders(),
+              )
+              .timeout(const Duration(seconds: 30))
           : null;
 
       late final http.Response bootstrapRes;
@@ -473,6 +498,7 @@ class _AdminScaffoldState extends State<AdminScaffold> {
           } else if (maint is num) {
             _settings.maintenanceMode = maint != 0;
           }
+          _applyForceUpdateSettingsFromMap(settings);
         }
         if (adminSyncMap != null) {
           _applyAdminSyncPayload(adminSyncMap);
@@ -572,7 +598,8 @@ class _AdminScaffoldState extends State<AdminScaffold> {
   DateTime? _dt(Object? value) {
     final s = value?.toString();
     if (s == null || s.isEmpty) return null;
-    return DateTime.tryParse(s);
+    final parsed = DateTime.tryParse(s);
+    return parsed?.toLocal();
   }
 
   List<double> _numList(Object? raw) {
@@ -655,7 +682,15 @@ class _AdminScaffoldState extends State<AdminScaffold> {
   Future<Map<String, dynamic>?> _fetchLegacyAdminBundle() async {
     try {
       final results = await Future.wait([
-        http.get(Uri.parse('$_apiBase/api/v1/admin/users'), headers: _adminHeaders()).timeout(const Duration(seconds: 15)),
+        http.get(
+          Uri.parse('$_apiBase/api/v1/admin/users').replace(
+            queryParameters: {
+              'limit': '5000',
+              if (_userSearch.text.trim().isNotEmpty) 'q': _userSearch.text.trim(),
+            },
+          ),
+          headers: _adminHeaders(),
+        ).timeout(const Duration(seconds: 20)),
         http.get(Uri.parse('$_apiBase/api/v1/admin/channels'), headers: _adminHeaders()).timeout(const Duration(seconds: 15)),
         http.get(Uri.parse('$_apiBase/api/v1/admin/slides'), headers: _adminHeaders()).timeout(const Duration(seconds: 15)),
         http.get(Uri.parse('$_apiBase/api/v1/admin/transactions'), headers: _adminHeaders()).timeout(const Duration(seconds: 15)),
@@ -672,7 +707,9 @@ class _AdminScaffoldState extends State<AdminScaffold> {
       }
       final bundle = <String, dynamic>{};
       if (results[0].statusCode >= 200 && results[0].statusCode < 300) {
-        bundle['users'] = (jsonDecode(results[0].body) as Map)['users'];
+        final usersMap = jsonDecode(results[0].body) as Map;
+        bundle['users'] = usersMap['users'];
+        bundle['users_total'] = usersMap['total'];
       }
       if (results[1].statusCode >= 200 && results[1].statusCode < 300) {
         bundle['channels'] = (jsonDecode(results[1].body) as Map)['channels'];
@@ -704,6 +741,14 @@ class _AdminScaffoldState extends State<AdminScaffold> {
   void _applyAdminSyncPayload(Map<String, dynamic> adminMap) {
     final rawUsers = adminMap['users'];
     if (rawUsers is List) _users = _parseUsersJson(rawUsers);
+    final totalRaw = adminMap['users_total'] ?? adminMap['total'];
+    if (totalRaw is num) {
+      _usersTotal = totalRaw.toInt();
+    } else if (totalRaw is String) {
+      _usersTotal = int.tryParse(totalRaw) ?? _users.length;
+    } else {
+      _usersTotal = _users.length;
+    }
 
     final rawChannels = adminMap['channels'];
     if (rawChannels is List) _channels = _parseAdminChannelsJson(rawChannels);
@@ -921,9 +966,17 @@ class _AdminScaffoldState extends State<AdminScaffold> {
     _statsRefreshTimer?.cancel();
     _settingsSiteName.dispose();
     _settingsWhatsapp.dispose();
+    _settingsMinBuild.dispose();
+    _settingsMinVersion.dispose();
+    _settingsLatestVersion.dispose();
+    _settingsLatestBuild.dispose();
+    _settingsPlayStoreUrl.dispose();
+    _settingsUpdateTitle.dispose();
+    _settingsUpdateMessage.dispose();
     _pricingCtrls?.dispose();
     _pricingCtrls = null;
     _globalSearch.dispose();
+    _userSearchDebounce?.cancel();
     _userSearch.dispose();
     super.dispose();
   }
@@ -1813,8 +1866,18 @@ class _AdminScaffoldState extends State<AdminScaffold> {
   }
 
   // --- Users ---
+  void _onUserSearchChanged(String _) {
+    setState(() {});
+    _userSearchDebounce?.cancel();
+    _userSearchDebounce = Timer(const Duration(milliseconds: 350), () {
+      if (!mounted || !_hasAdminSession) return;
+      unawaited(_hydrateFromBackend());
+    });
+  }
+
   Widget _pageUsers() {
     final q = _userSearch.text.toLowerCase();
+    // Server already filters when q is set; keep a light local filter as fallback.
     final filtered = _users.where((u) {
       if (q.isEmpty) return true;
       final blob = '${u.name} ${u.phone} ${u.displayDeviceId} ${u.status} ${u.subscription} ${u.id}'.toLowerCase();
@@ -1825,6 +1888,7 @@ class _AdminScaffoldState extends State<AdminScaffold> {
         if (c != 0) return c;
         return b.id.compareTo(a.id);
       });
+    final totalLabel = _usersTotal > 0 ? _usersTotal : _users.length;
     return LayoutBuilder(
       builder: (context, constraints) {
         final wideHeader = constraints.maxWidth >= 560;
@@ -1841,7 +1905,7 @@ class _AdminScaffoldState extends State<AdminScaffold> {
                       children: [
                         const Text('Users', style: TextStyle(fontSize: 24, fontWeight: FontWeight.w800)),
                         Text(
-                          '${_users.length} total · Device ID = kitambulisho cha Wasifu kwenye app',
+                          '$totalLabel total · Device ID = kitambulisho cha Wasifu kwenye app',
                           style: const TextStyle(fontSize: 12, color: AdminColors.textSecondary, height: 1.35),
                         ),
                       ],
@@ -1851,7 +1915,7 @@ class _AdminScaffoldState extends State<AdminScaffold> {
                     width: min(280, constraints.maxWidth * 0.42),
                     child: TextField(
                       controller: _userSearch,
-                      onChanged: (_) => setState(() {}),
+                      onChanged: _onUserSearchChanged,
                       style: const TextStyle(fontSize: 12),
                       decoration: InputDecoration(
                         hintText: 'Tafuta jina, simu, device ID...',
@@ -1867,13 +1931,13 @@ class _AdminScaffoldState extends State<AdminScaffold> {
             else ...[
               const Text('Users', style: TextStyle(fontSize: 24, fontWeight: FontWeight.w800)),
               Text(
-                '${_users.length} total · Device ID = Wasifu',
+                '$totalLabel total · Device ID = Wasifu',
                 style: const TextStyle(fontSize: 12, color: AdminColors.textSecondary, height: 1.35),
               ),
               const SizedBox(height: 10),
               TextField(
                 controller: _userSearch,
-                onChanged: (_) => setState(() {}),
+                onChanged: _onUserSearchChanged,
                 style: const TextStyle(fontSize: 12),
                 decoration: InputDecoration(
                   hintText: 'Tafuta jina, simu, device ID...',
@@ -2036,9 +2100,12 @@ class _AdminScaffoldState extends State<AdminScaffold> {
                       if (turningOff) {
                         await _revokeAllPremiumAccess(u, confirm: false);
                       } else {
-                        setState(() => u.subscription = next);
+                        // Backend materializes premium_until (never forever-null).
                         await _syncUserToBackend(u, {'subscription': next});
-                        _showToast('Mfumo: premium', _ToastType.success);
+                        if (mounted) {
+                          setState(() {});
+                          _showToast('Mfumo: premium (${_fmtAccessDate(u.premiumUntil ?? DateTime.now().add(const Duration(days: 30)))})', _ToastType.success);
+                        }
                       }
                     } catch (e) {
                       _showToast('Imeshindwa: $e', _ToastType.error);
@@ -4199,6 +4266,49 @@ class _AdminScaffoldState extends State<AdminScaffold> {
     );
   }
 
+  void _applyForceUpdateSettingsFromMap(Map<String, dynamic> settings) {
+    bool asBool(Object? v) {
+      if (v is bool) return v;
+      if (v is num) return v != 0;
+      final s = v?.toString().trim().toLowerCase() ?? '';
+      return s == 'true' || s == '1' || s == 'yes' || s == 'on';
+    }
+
+    int asInt(Object? v) {
+      if (v is int) return v;
+      if (v is num) return v.toInt();
+      return int.tryParse(v?.toString().trim() ?? '') ?? 0;
+    }
+
+    String asStr(Object? v, [String fallback = '']) {
+      final s = v?.toString().trim() ?? '';
+      return s.isEmpty ? fallback : s;
+    }
+
+    _settings.forceUpdateEnabled = asBool(settings['force_update_enabled']);
+    _settings.minAndroidBuild = asInt(settings['min_android_build']);
+    _settings.minAndroidVersion = asStr(settings['min_android_version']);
+    _settings.latestAndroidVersion = asStr(settings['latest_android_version']);
+    _settings.latestAndroidBuild = asInt(settings['latest_android_build']);
+    _settings.playStoreUrl = asStr(
+      settings['play_store_url'],
+      'https://play.google.com/store/apps/details?id=com.washatv',
+    );
+    _settings.updateTitle = asStr(settings['update_title'], 'Sasisha WASHA TV');
+    _settings.updateMessage = asStr(
+      settings['update_message'],
+      'Toleo jipya linahitajika ili kuendelea kutumia app. Pakua kutoka Play Store kisha fungua tena.',
+    );
+
+    _settingsMinBuild.text = '${_settings.minAndroidBuild}';
+    _settingsMinVersion.text = _settings.minAndroidVersion;
+    _settingsLatestVersion.text = _settings.latestAndroidVersion;
+    _settingsLatestBuild.text = '${_settings.latestAndroidBuild}';
+    _settingsPlayStoreUrl.text = _settings.playStoreUrl;
+    _settingsUpdateTitle.text = _settings.updateTitle;
+    _settingsUpdateMessage.text = _settings.updateMessage;
+  }
+
   // --- Settings ---
   Widget _pageSettings() {
     return Align(
@@ -4253,6 +4363,109 @@ class _AdminScaffoldState extends State<AdminScaffold> {
                 'Nambari hii itaonekana kwenye Wasifu katika app ya mtumiaji na kutumika kuthibitisha WhatsApp.',
                 style: TextStyle(fontSize: 11, height: 1.35, color: AdminColors.textSecondary),
               ),
+              const SizedBox(height: 22),
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.all(16),
+                decoration: BoxDecoration(
+                  color: const Color(0x22FB7185),
+                  borderRadius: BorderRadius.circular(14),
+                  border: Border.all(color: const Color(0x33FB7185)),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Row(
+                      children: [
+                        Icon(Icons.system_update_alt_rounded, color: Color(0xFFFB7185)),
+                        SizedBox(width: 10),
+                        Expanded(
+                          child: Text(
+                            'Lazima ku update app',
+                            style: TextStyle(fontSize: 15, fontWeight: FontWeight.w800),
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 8),
+                    const Text(
+                      'Washa mtumiaji asiyesasisha hawezi kuona channels wala kulipa — atalazimishwa kwenda Play Store kwanza. '
+                      'Baada ya kuchapisha APK mpya, weka Build ya chini = versionCode mpya (sasa 10 kwa 1.0.9+10).',
+                      style: TextStyle(fontSize: 11.5, height: 1.4, color: AdminColors.textSecondary),
+                    ),
+                    SwitchListTile(
+                      contentPadding: EdgeInsets.zero,
+                      value: _settings.forceUpdateEnabled,
+                      onChanged: (v) => setState(() => _settings.forceUpdateEnabled = v),
+                      title: const Text('Lazima ku update app', style: TextStyle(fontSize: 13)),
+                      activeThumbColor: const Color(0xFFFB7185),
+                    ),
+                    TextField(
+                      controller: _settingsMinBuild,
+                      keyboardType: TextInputType.number,
+                      onChanged: (v) => _settings.minAndroidBuild = int.tryParse(v.trim()) ?? 0,
+                      decoration: _inputDeco().copyWith(
+                        labelText: 'Build ya chini (versionCode)',
+                        hintText: '10',
+                        prefixIcon: const Icon(Icons.numbers_rounded, size: 20),
+                      ),
+                    ),
+                    const SizedBox(height: 10),
+                    TextField(
+                      controller: _settingsMinVersion,
+                      onChanged: (v) => _settings.minAndroidVersion = v.trim(),
+                      decoration: _inputDeco().copyWith(
+                        labelText: 'Toleo la chini',
+                        hintText: '1.0.9',
+                        prefixIcon: const Icon(Icons.new_releases_outlined, size: 20),
+                      ),
+                    ),
+                    const SizedBox(height: 10),
+                    TextField(
+                      controller: _settingsLatestVersion,
+                      onChanged: (v) => _settings.latestAndroidVersion = v.trim(),
+                      decoration: _inputDeco().copyWith(
+                        labelText: 'Toleo jipya',
+                        hintText: '1.0.9',
+                        prefixIcon: const Icon(Icons.upgrade_rounded, size: 20),
+                      ),
+                    ),
+                    const SizedBox(height: 10),
+                    TextField(
+                      controller: _settingsLatestBuild,
+                      keyboardType: TextInputType.number,
+                      onChanged: (v) => _settings.latestAndroidBuild = int.tryParse(v.trim()) ?? 0,
+                      decoration: _inputDeco().copyWith(
+                        labelText: 'Build jipya (hiari)',
+                        hintText: '10',
+                        prefixIcon: const Icon(Icons.build_circle_outlined, size: 20),
+                      ),
+                    ),
+                    const SizedBox(height: 10),
+                    TextField(
+                      controller: _settingsPlayStoreUrl,
+                      onChanged: (v) => _settings.playStoreUrl = v.trim(),
+                      decoration: _inputDeco().copyWith(
+                        labelText: 'Play Store URL',
+                        prefixIcon: const Icon(Icons.shop_rounded, size: 20),
+                      ),
+                    ),
+                    const SizedBox(height: 10),
+                    TextField(
+                      controller: _settingsUpdateTitle,
+                      onChanged: (v) => _settings.updateTitle = v.trim(),
+                      decoration: _inputDeco().copyWith(labelText: 'Kichwa cha ujumbe'),
+                    ),
+                    const SizedBox(height: 10),
+                    TextField(
+                      controller: _settingsUpdateMessage,
+                      maxLines: 3,
+                      onChanged: (v) => _settings.updateMessage = v.trim(),
+                      decoration: _inputDeco().copyWith(labelText: 'Ujumbe kwa mtumiaji'),
+                    ),
+                  ],
+                ),
+              ),
               const SizedBox(height: 16),
               _btnPrimary(
                 label: 'Hifadhi mipangilio',
@@ -4260,6 +4473,17 @@ class _AdminScaffoldState extends State<AdminScaffold> {
                 onTap: () async {
                   final wa = _settingsWhatsapp.text.trim();
                   _settings.whatsappNumber = wa;
+                  _settings.minAndroidBuild = int.tryParse(_settingsMinBuild.text.trim()) ?? 0;
+                  _settings.minAndroidVersion = _settingsMinVersion.text.trim();
+                  _settings.latestAndroidVersion = _settingsLatestVersion.text.trim();
+                  _settings.latestAndroidBuild = int.tryParse(_settingsLatestBuild.text.trim()) ?? 0;
+                  _settings.playStoreUrl = _settingsPlayStoreUrl.text.trim().isEmpty
+                      ? 'https://play.google.com/store/apps/details?id=com.washatv'
+                      : _settingsPlayStoreUrl.text.trim();
+                  _settings.updateTitle = _settingsUpdateTitle.text.trim().isEmpty
+                      ? 'Sasisha WASHA TV'
+                      : _settingsUpdateTitle.text.trim();
+                  _settings.updateMessage = _settingsUpdateMessage.text.trim();
                   final sp = await SharedPreferences.getInstance();
                   await sp.setString(StorageService.supportWhatsappPrefsKey, wa);
                   if (_hasAdminSession) {
@@ -4273,6 +4497,14 @@ class _AdminScaffoldState extends State<AdminScaffold> {
                               'subscription_enabled': _settings.subscriptionEnabled,
                               'maintenance_mode': _settings.maintenanceMode,
                               'whatsapp_number': wa,
+                              'force_update_enabled': _settings.forceUpdateEnabled,
+                              'min_android_build': _settings.minAndroidBuild,
+                              'min_android_version': _settings.minAndroidVersion,
+                              'latest_android_version': _settings.latestAndroidVersion,
+                              'latest_android_build': _settings.latestAndroidBuild,
+                              'play_store_url': _settings.playStoreUrl,
+                              'update_title': _settings.updateTitle,
+                              'update_message': _settings.updateMessage,
                             }),
                           )
                           .timeout(const Duration(seconds: 12));

@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/widgets.dart';
+import 'package:just_audio_media_kit/just_audio_media_kit.dart';
 import 'package:media_kit/media_kit.dart';
 
 import 'app.dart';
@@ -12,6 +13,8 @@ import 'services/push_notification_service.dart';
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   MediaKit.ensureInitialized();
+  // just_audio has no built-in Linux/Windows backend — media_kit bridges it.
+  JustAudioMediaKit.ensureInitialized();
   registerWebviewPlatform();
   runApp(const WashaApp());
   unawaited(_initializePushNotifications());

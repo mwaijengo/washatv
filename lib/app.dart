@@ -5,15 +5,18 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import 'models/app_update_status.dart';
 import 'models/channel.dart';
 import 'models/hero_slide.dart';
 import 'models/plan.dart';
 import 'models/viewer_profile.dart';
 import 'screens/categories_screen.dart';
+import 'screens/force_update_screen.dart';
 import 'screens/home_screen.dart';
 import 'screens/player_screen.dart';
 import 'screens/profile_screen.dart';
 import 'screens/subscription_screen.dart';
+import 'services/app_identity.dart';
 import 'services/pricing_catalog.dart';
 import 'services/public_api_service.dart';
 import 'services/push_notification_service.dart';
@@ -78,6 +81,7 @@ class _WashaAppState extends State<WashaApp> with WidgetsBindingObserver {
   String? bootstrapSyncSignature;
   bool subscriptionEnabled = true;
   bool maintenanceMode = false;
+  AppUpdateStatus appUpdate = AppUpdateStatus.empty;
   String siteName = 'WASHA TV';
   bool syncInFlight = false;
   bool metaPollInFlight = false;
@@ -161,12 +165,13 @@ class _WashaAppState extends State<WashaApp> with WidgetsBindingObserver {
 
   void _startLiveSyncAfterBoot() {
     if (!mounted || bootLoading) return;
+    if (appUpdate.updateRequired) return;
     unawaited(_pollConfigMeta());
     unawaited(_syncViewerProfileFromServer());
     unawaited(_syncPushTopics());
     unawaited(_recoverPendingPayment(silent: true));
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted || bootLoading) return;
+      if (!mounted || bootLoading || appUpdate.updateRequired) return;
       unawaited(
         maybeShowWashaNotificationPermissionDialog(
           context,
@@ -191,6 +196,7 @@ class _WashaAppState extends State<WashaApp> with WidgetsBindingObserver {
   }
 
   Future<void> _init() async {
+    await AppIdentity.ensureLoaded();
     var name = await storage.getName();
     var subEndLocal = await storage.getSubscriptionEnd();
     final dev = await storage.ensureDeviceIdPersisted();
@@ -203,6 +209,10 @@ class _WashaAppState extends State<WashaApp> with WidgetsBindingObserver {
     var fetchedSubscriptionEnabled = true;
     var fetchedMaintenanceMode = false;
     var fetchedSiteName = 'WASHA TV';
+    var fetchedAppUpdate = AppUpdateStatus.empty.copyWith(
+      currentVersion: AppIdentity.version,
+      currentBuild: AppIdentity.build,
+    );
     String? fetchErr;
     String? lastFailure;
 
@@ -219,6 +229,7 @@ class _WashaAppState extends State<WashaApp> with WidgetsBindingObserver {
         fetchedSubscriptionEnabled = remote.subscriptionEnabled;
         fetchedMaintenanceMode = remote.maintenanceMode;
         fetchedSiteName = remote.siteName;
+        fetchedAppUpdate = remote.appUpdate;
         var remotePlans = remote.plans;
         if (remotePlans.isEmpty) {
           try {
@@ -243,7 +254,20 @@ class _WashaAppState extends State<WashaApp> with WidgetsBindingObserver {
           await persistPricingSnapshotFromPlans(fetchedPlans);
         }
         try {
-          await api.syncViewer(deviceId: dev, name: name.isEmpty ? null : name);
+          // Always register device in admin users table — retry so transient failures
+          // do not leave viewers invisible to admins.
+          var synced = false;
+          for (var syncAttempt = 0; syncAttempt < 3 && !synced; syncAttempt++) {
+            try {
+              await api.syncViewer(deviceId: dev, name: name.isEmpty ? null : name);
+              synced = true;
+            } catch (e) {
+              debugPrint('WASHA users/sync attempt ${syncAttempt + 1}/3: $e');
+              if (syncAttempt < 2) {
+                await Future<void>.delayed(Duration(milliseconds: 400 * (syncAttempt + 1)));
+              }
+            }
+          }
           final profile = await api.fetchViewerProfile(dev);
           if (profile != null) {
             if (!isGenericViewerName(profile.name)) {
@@ -251,7 +275,8 @@ class _WashaAppState extends State<WashaApp> with WidgetsBindingObserver {
               await storage.setName(name);
             }
             final serverEnd = profile.premiumActive ? profile.premiumUntil : null;
-            subEndLocal = subService.mergeEndDates(subEndLocal, serverEnd);
+            // Trust server after profile sync so revoke/expiry clears local unlocks.
+            subEndLocal = subService.mergeEndDates(subEndLocal, serverEnd, preferRemote: true);
             await storage.setSubscriptionEnd(subEndLocal);
             _premiumPlanLabel = profile.planName ?? profile.planKey ?? '';
             _premiumAccessSource = profile.accessSource;
@@ -282,8 +307,13 @@ class _WashaAppState extends State<WashaApp> with WidgetsBindingObserver {
         fetchedSubscriptionEnabled = cached.subscriptionEnabled;
         fetchedMaintenanceMode = cached.maintenanceMode;
         fetchedSiteName = cached.siteName;
+        fetchedAppUpdate = cached.appUpdate;
         fetchErr = null;
         lastFailure = null;
+        // Still register this device for admin even when catalog came from cache.
+        try {
+          await api.syncViewer(deviceId: dev, name: name.isEmpty ? null : name);
+        } catch (_) {}
       } else {
         fetchErr = kIsWeb
             ? 'Chrome haipatikani data kutoka seva (CORS, URL isiyo sahihi, au seva imezima). '
@@ -303,6 +333,7 @@ class _WashaAppState extends State<WashaApp> with WidgetsBindingObserver {
       supportWhatsapp = fetchedWa;
       subscriptionEnabled = fetchedSubscriptionEnabled;
       maintenanceMode = fetchedMaintenanceMode;
+      appUpdate = fetchedAppUpdate;
       siteName = fetchedSiteName;
       bootstrapError = fetchErr;
       bootstrapFailureDetail = fetchErr != null ? lastFailure : null;
@@ -386,7 +417,8 @@ class _WashaAppState extends State<WashaApp> with WidgetsBindingObserver {
   void _applyViewerProfile(ViewerProfile profile) {
     final wasPremium = premium;
     final serverEnd = profile.premiumActive ? profile.premiumUntil : null;
-    final nextEnd = subService.mergeEndDates(subEnd, serverEnd);
+    // Server is authoritative: never keep a local invent-end after revoke/expiry.
+    final nextEnd = subService.mergeEndDates(subEnd, serverEnd, preferRemote: true);
 
     Plan nextPlan = selectedPlan;
     final key = profile.planKey?.trim();
@@ -470,6 +502,7 @@ class _WashaAppState extends State<WashaApp> with WidgetsBindingObserver {
         bootstrapSyncSignature = remote.syncSignature;
         subscriptionEnabled = remote.subscriptionEnabled;
         maintenanceMode = remote.maintenanceMode;
+        appUpdate = remote.appUpdate;
         siteName = remote.siteName;
         userPlans = nextPlans;
         channels = remote.channels;
@@ -700,7 +733,13 @@ class _WashaAppState extends State<WashaApp> with WidgetsBindingObserver {
         planKey: selectedPlan.id,
       );
 
-      await _applyPremiumUnlock();
+      final unlocked = await _applyPremiumUnlock();
+      if (!unlocked) {
+        throw SonicpesaPaymentException(
+          'Malipo yamepokelewa lakini premium haijaanzishwa. Bonyeza Angalia hali.',
+          retrySafe: false,
+        );
+      }
       try {
         await api.syncViewer(deviceId: deviceId, name: name, phone: phone);
         await _syncFromServer(silent: true);
@@ -723,12 +762,13 @@ class _WashaAppState extends State<WashaApp> with WidgetsBindingObserver {
     }
   }
 
-  /// Resolves premium expiry from status payload + server (retries), then plan duration.
-  Future<DateTime> _resolvePremiumEndAfterPayment({DateTime? fromStatus}) async {
-    DateTime? end = fromStatus;
-    for (var attempt = 0; attempt < 6; attempt++) {
+  /// Resolves premium expiry from status payload + server. Never invents a local end date —
+  /// a fake unlock hid failed server grants and left accounts free in admin.
+  Future<DateTime?> _resolvePremiumEndAfterPayment({DateTime? fromStatus}) async {
+    DateTime? end = fromStatus != null && subService.isPremium(fromStatus) ? fromStatus : null;
+    for (var attempt = 0; attempt < 8; attempt++) {
       if (attempt > 0) {
-        await Future.delayed(Duration(milliseconds: 350 * attempt));
+        await Future.delayed(Duration(milliseconds: 400 * attempt));
       }
       try {
         final server = await api.fetchPremiumUntil(deviceId);
@@ -737,13 +777,16 @@ class _WashaAppState extends State<WashaApp> with WidgetsBindingObserver {
       if (end != null && subService.isPremium(end)) return end;
     }
     if (end != null && subService.isPremium(end)) return end;
-    return subService.calculateEndDate(selectedPlan);
+    return null;
   }
 
-  Future<void> _applyPremiumUnlock({DateTime? statusUntil}) async {
+  Future<bool> _applyPremiumUnlock({DateTime? statusUntil}) async {
     final end = await _resolvePremiumEndAfterPayment(fromStatus: statusUntil);
+    if (end == null || !subService.isPremium(end)) {
+      return false;
+    }
     await storage.setSubscriptionEnd(end);
-    if (!mounted) return;
+    if (!mounted) return true;
     setState(() {
       subEnd = end;
       _premiumPlanLabel = selectedPlan.name;
@@ -752,6 +795,7 @@ class _WashaAppState extends State<WashaApp> with WidgetsBindingObserver {
     _schedulePremiumExpiryCheck();
     unawaited(_syncPushTopics());
     unawaited(storage.clearPendingPayment());
+    return true;
   }
 
   void _showPremiumUnlockedSnack() {
@@ -854,7 +898,21 @@ class _WashaAppState extends State<WashaApp> with WidgetsBindingObserver {
       if (!mounted) return;
 
       if (init.completed) {
-        await _applyPremiumUnlock(statusUntil: init.premiumUntil);
+        final unlocked = await _applyPremiumUnlock(statusUntil: init.premiumUntil);
+        if (!unlocked) {
+          // Payment succeeded on provider but grant not visible yet — keep polling this order.
+          setState(() {
+            paymentOrderId = init.orderId;
+            paymentPhase = SonicpesaPaymentPhase.waitingOnPhone;
+            paymentStatusLine = 'Malipo yamepokelewa — inafungua channels…';
+          });
+          await _pollUntilDone(
+            orderId: init.orderId,
+            phone: phone,
+            name: name,
+          );
+          return;
+        }
         try {
           await api.syncViewer(deviceId: deviceId, name: name, phone: phone);
           await _syncFromServer(silent: true);
@@ -982,17 +1040,18 @@ class _WashaAppState extends State<WashaApp> with WidgetsBindingObserver {
       return;
     }
 
-    await storage.clearPendingPayment();
+    // Keep pending order so resume/webhook can still unlock — do not push a second STK yet.
     if (mounted) {
       setState(() {
-        paymentOrderId = null;
-        _paymentAllowNewCharge = true;
+        _paymentAllowNewCharge = false;
+        _paymentCooldownUntil = DateTime.now().add(const Duration(minutes: 5));
       });
     }
     throw SonicpesaPaymentException(
-      'Muda wa kusubiri umeisha. Bonyeza Anza malipo mapya kutuma ombi upya kwenye simu yako.',
-      retrySafe: true,
+      'Bado tunasubiri uthibitisho. Bonyeza Angalia hali — usianze malipo mapya bado.',
+      retrySafe: false,
       orderId: orderId,
+      cooldownSeconds: 300,
     );
   }
 
@@ -1031,7 +1090,13 @@ class _WashaAppState extends State<WashaApp> with WidgetsBindingObserver {
     }
 
     if (status.completed) {
-      await _applyPremiumUnlock(statusUntil: status.premiumUntil);
+      final unlocked = await _applyPremiumUnlock(statusUntil: status.premiumUntil);
+      if (!unlocked) {
+        if (mounted) {
+          setState(() => paymentStatusLine = 'Malipo yamepokelewa — inafungua channels…');
+        }
+        return _completePaymentIfPremiumReady();
+      }
       try {
         await api.syncViewer(deviceId: deviceId, name: name, phone: phone);
         await _syncFromServer(silent: true);
@@ -1086,7 +1151,8 @@ class _WashaAppState extends State<WashaApp> with WidgetsBindingObserver {
     try {
       final serverEnd = await api.fetchPremiumUntil(deviceId);
       if (serverEnd != null && subService.isPremium(serverEnd)) {
-        await _applyPremiumUnlock(statusUntil: serverEnd);
+        final unlocked = await _applyPremiumUnlock(statusUntil: serverEnd);
+        if (!unlocked) return false;
         try {
           await _syncViewerProfileFromServer();
         } catch (_) {}
@@ -1215,7 +1281,12 @@ class _WashaAppState extends State<WashaApp> with WidgetsBindingObserver {
         child: Scaffold(
         body: bootLoading
             ? const Center(child: CircularProgressIndicator())
-            : maintenanceMode
+            : appUpdate.updateRequired
+                ? ForceUpdateScreen(
+                    status: appUpdate,
+                    onRecheck: _recheckAppUpdate,
+                  )
+                : maintenanceMode
                 ? _maintenanceScreen()
                 : Stack(
                 children: [
@@ -1471,6 +1542,20 @@ class _WashaAppState extends State<WashaApp> with WidgetsBindingObserver {
           onPay: activateSubscription,
         );
     }
+  }
+
+  Future<void> _recheckAppUpdate() async {
+    final status = await api.fetchAppUpdateStatus();
+    if (status != null && mounted) {
+      setState(() => appUpdate = status);
+      if (!status.updateRequired) {
+        // Pull full catalog again after update is cleared.
+        await _syncFromServer(silent: false, forceFull: true);
+      }
+      return;
+    }
+    // Fallback: full bootstrap recheck.
+    await _init();
   }
 
   Widget _maintenanceScreen() {

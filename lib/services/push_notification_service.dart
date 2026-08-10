@@ -92,8 +92,14 @@ class PushNotificationService {
 
   static PublicApiService? _api;
 
+  /// FCM is only wired for Android today ([DefaultFirebaseOptions]).
+  static bool get _fcmSupported {
+    if (kIsWeb) return false;
+    return defaultTargetPlatform == TargetPlatform.android;
+  }
+
   static Future<void> initialize({PublicApiService? api}) async {
-    if (kIsWeb) return;
+    if (!_fcmSupported) return;
 
     _api = api;
 
@@ -152,7 +158,7 @@ class PushNotificationService {
     required bool isPremium,
     PublicApiService? api,
   }) async {
-    if (kIsWeb) return;
+    if (!_fcmSupported) return;
     final id = deviceId.trim();
     if (id.isEmpty) return;
 
@@ -183,7 +189,7 @@ class PushNotificationService {
     required bool isPremium,
     required String deviceId,
   }) async {
-    if (kIsWeb) return;
+    if (!_fcmSupported) return;
     final messaging = FirebaseMessaging.instance;
 
     await messaging.subscribeToTopic(kSupasokaTopicAllUsers);
@@ -200,7 +206,7 @@ class PushNotificationService {
   }
 
   static Future<void> _onTokenRefreshed(String token) async {
-    if (kIsWeb || token.isEmpty) return;
+    if (!_fcmSupported || token.isEmpty) return;
     final prefs = await SharedPreferences.getInstance();
     final deviceId = prefs.getString(_prefsPushDeviceId) ?? '';
     final isPremium = prefs.getBool(_prefsPushPremium) ?? false;
@@ -236,7 +242,7 @@ class PushNotificationService {
   }
 
   static Future<bool> shouldShowPermissionPrompt() async {
-    if (kIsWeb) return false;
+    if (!_fcmSupported) return false;
     final settings = await FirebaseMessaging.instance.getNotificationSettings();
     final allowed = settings.authorizationStatus == AuthorizationStatus.authorized ||
         settings.authorizationStatus == AuthorizationStatus.provisional;
@@ -250,7 +256,7 @@ class PushNotificationService {
     String? deviceId,
     bool isPremium = false,
   }) async {
-    if (kIsWeb) return false;
+    if (!_fcmSupported) return false;
     final prefs = await SharedPreferences.getInstance();
     await prefs.setBool(_prefsNotifPrompted, true);
     if (defaultTargetPlatform == TargetPlatform.android) {
@@ -279,18 +285,18 @@ class PushNotificationService {
   }
 
   static Future<void> messagingSubscribeAllUsersOnly() async {
-    if (kIsWeb) return;
+    if (!_fcmSupported) return;
     await FirebaseMessaging.instance.subscribeToTopic(kSupasokaTopicAllUsers);
   }
 
   static Future<void> markPermissionPromptSeen() async {
-    if (kIsWeb) return;
+    if (!_fcmSupported) return;
     final prefs = await SharedPreferences.getInstance();
     await prefs.setBool(_prefsNotifPrompted, true);
   }
 
   static Future<void> syncAudienceTopics({required bool isPremium}) async {
-    if (kIsWeb) return;
+    if (!_fcmSupported) return;
     final prefs = await SharedPreferences.getInstance();
     final deviceId = prefs.getString(_prefsPushDeviceId) ?? '';
     if (deviceId.isEmpty) {
@@ -302,7 +308,7 @@ class PushNotificationService {
 
   /// Per-device topic for targeted admin pushes (`user_{deviceId}` — same rule as Supasoka).
   static Future<void> syncDirectUserTopic(String deviceId) async {
-    if (kIsWeb) return;
+    if (!_fcmSupported) return;
     final raw = deviceId.trim();
     if (raw.isEmpty) return;
     final topic = 'user_${raw.replaceAll(RegExp(r'[^a-zA-Z0-9\-_.~%]'), '_')}';

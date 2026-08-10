@@ -59,39 +59,104 @@ type PgClient = {
   query: (text: string, params?: unknown[]) => Promise<{ rowCount: number | null; rows: unknown[] }>;
 };
 
-async function resolvePlanDurationDays(client: PgClient, planKey: string): Promise<number> {
-  let durationDays = 30;
-  if (!planKey) return durationDays;
-  const planRow = await client.query(
-    `SELECT duration_days FROM pricing_plans WHERE plan_key = $1 AND enabled = true`,
-    [planKey],
-  );
-  if (planRow.rowCount) {
-    durationDays = Number((planRow.rows[0] as { duration_days: number }).duration_days) || durationDays;
+/**
+ * Resolve plan duration. Prefer exact plan_key (even if currently disabled — paid plans
+ * must still grant the duration the customer bought). Fall back to amount→plan, then 30.
+ */
+async function resolvePlanDurationDays(
+  client: PgClient,
+  planKey: string,
+  amount?: number,
+): Promise<{ durationDays: number; resolvedPlanKey: string }> {
+  const key = planKey.trim();
+  if (key) {
+    const planRow = await client.query(
+      `SELECT plan_key, duration_days FROM pricing_plans WHERE plan_key = $1 LIMIT 1`,
+      [key],
+    );
+    if (planRow.rowCount) {
+      const row = planRow.rows[0] as { plan_key: string; duration_days: number };
+      const days = Number(row.duration_days);
+      if (Number.isFinite(days) && days > 0) {
+        return { durationDays: days, resolvedPlanKey: row.plan_key };
+      }
+    }
   }
-  return durationDays;
+
+  const amt = Math.round(Number(amount ?? 0));
+  if (amt > 0) {
+    // Exact price match first — closest-by-ABS can map platinum → gold and under-grant.
+    const exact = await client.query(
+      `SELECT plan_key, duration_days FROM pricing_plans WHERE ROUND(price::numeric) = $1
+       ORDER BY enabled DESC, plan_key ASC LIMIT 1`,
+      [amt],
+    );
+    if (exact.rowCount) {
+      const row = exact.rows[0] as { plan_key: string; duration_days: number };
+      const days = Number(row.duration_days);
+      if (Number.isFinite(days) && days > 0) {
+        return { durationDays: days, resolvedPlanKey: row.plan_key };
+      }
+    }
+  }
+
+  return { durationDays: 30, resolvedPlanKey: key || 'gold' };
 }
 
-/** Extend/activate premium for a user; safe to call repeatedly. */
+/** Extend/activate premium for a user; safe to call repeatedly. Uses DB clock only. */
 async function applyPremiumWindow(
   client: PgClient,
   userId: string,
   planKey: string,
+  amount?: number,
 ): Promise<Date | null> {
-  const durationDays = await resolvePlanDurationDays(client, planKey);
-  const premiumUntil = new Date(Date.now() + durationDays * 24 * 60 * 60 * 1000);
+  const { durationDays } = await resolvePlanDurationDays(client, planKey, amount);
   const prem = await client.query(
     `UPDATE users SET
        subscription = 'premium',
        premium_until = CASE
-         WHEN premium_until IS NOT NULL AND premium_until > now() THEN premium_until + ($2 || ' days')::interval
-         ELSE $3::timestamptz
+         WHEN premium_until IS NOT NULL AND premium_until > now()
+           THEN premium_until + ($2 || ' days')::interval
+         ELSE now() + ($2 || ' days')::interval
        END
      WHERE id = $1
      RETURNING premium_until`,
-    [userId, String(durationDays), premiumUntil],
+    [userId, String(durationDays)],
   );
   return (prem.rows[0] as { premium_until: Date | null } | undefined)?.premium_until ?? null;
+}
+
+/** True when a completed payment never wrote a real premium_until (stuck / legacy rows). */
+function needsPremiumRepair(premiumUntil: Date | null | undefined): boolean {
+  return premiumUntil == null;
+}
+
+/**
+ * Map paid amount → plan_key (closest enabled plan price). Used for orphan webhook/status recovery
+ * when plan_key was never persisted.
+ */
+export async function resolvePlanKeyByAmount(pool: DbPool, amount: number): Promise<string | null> {
+  const amt = Math.round(Number(amount));
+  if (!(amt > 0)) return null;
+  // Prefer exact price match so under/over-grant from nearest-neighbor never happens.
+  const exact = await pool.query(
+    `SELECT plan_key FROM pricing_plans WHERE ROUND(price::numeric) = $1
+     ORDER BY enabled DESC, plan_key ASC LIMIT 1`,
+    [amt],
+  );
+  if (exact.rowCount) {
+    return String((exact.rows[0] as { plan_key: string }).plan_key ?? '').trim() || null;
+  }
+  // Allow tiny rounding drift only (±100 TZS), never jump to a totally different plan.
+  const near = await pool.query(
+    `SELECT plan_key, price FROM pricing_plans
+     WHERE ABS(ROUND(price::numeric) - $1) <= 100
+     ORDER BY ABS(ROUND(price::numeric) - $1) ASC, enabled DESC, price ASC
+     LIMIT 1`,
+    [amt],
+  );
+  if (!near.rowCount) return null;
+  return String((near.rows[0] as { plan_key: string }).plan_key ?? '').trim() || null;
 }
 
 /**
@@ -165,6 +230,7 @@ export async function grantPremiumFromPayment(pool: DbPool, input: GrantPremiumI
         client,
         String(claimedRow.user_id),
         planKey || claimedRow.plan_key || '',
+        amount,
       );
       await client.query('COMMIT');
       return {
@@ -194,13 +260,16 @@ export async function grantPremiumFromPayment(pool: DbPool, input: GrantPremiumI
       | { premium_until: Date | null; subscription: string }
       | undefined;
     const until = userRow?.premium_until ?? null;
-    const subscription = userRow?.subscription ?? 'free';
 
-    if (until == null && subscription !== 'premium') {
+    // Repair whenever the paid tx exists but premium_until was never written
+    // (free+null, or legacy subscription='premium' with null until). Do NOT re-extend
+    // after a legitimate expiry — that would resurrect old completed orders forever.
+    if (needsPremiumRepair(until)) {
       const repairedUntil = await applyPremiumWindow(
         client,
         row.user_id,
         planKey || row.plan_key || '',
+        amount,
       );
       await client.query('COMMIT');
       return {
@@ -298,7 +367,8 @@ export async function upsertPendingSonicpesaTransaction(
 export async function findOpenSonicpesaOrderForDevice(
   pool: DbPool,
   deviceId: string,
-  maxAgeMinutes = 3,
+  /** STK/USSD can sit open longer than 3 minutes — reuse until confirmed fail/success. */
+  maxAgeMinutes = 30,
 ): Promise<OpenSonicpesaOrder | null> {
   const id = deviceId.trim();
   if (!id) return null;
@@ -337,7 +407,7 @@ export async function findOpenSonicpesaOrderForDevice(
   };
 }
 
-/** Find viewer by Tanzanian phone (local 0… or 255…). */
+/** Find viewer by Tanzanian phone (local 0… or 255…). Prefer most recently active device. */
 export async function findDeviceIdByPhone(pool: DbPool, phoneRaw: string): Promise<string | null> {
   const local = toLocalDigits(phoneRaw);
   if (!local) return null;
@@ -345,8 +415,7 @@ export async function findDeviceIdByPhone(pool: DbPool, phoneRaw: string): Promi
   const r = await pool.query(
     `SELECT device_id FROM users
      WHERE regexp_replace(COALESCE(phone, ''), '\\D', '', 'g') IN ($1, $2, $3)
-     ORDER BY CASE WHEN subscription = 'premium' THEN 0 ELSE 1 END,
-              COALESCE(premium_until, created_at) DESC NULLS LAST
+     ORDER BY COALESCE(fcm_updated_at, created_at) DESC NULLS LAST
      LIMIT 1`,
     [local, intl, local.slice(1)],
   );

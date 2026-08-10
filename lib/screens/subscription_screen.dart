@@ -656,12 +656,13 @@ class _FunguaZoteAudioGuidePanelState extends State<_FunguaZoteAudioGuidePanel> 
       } else {
         await _player.setAsset(_kAsset);
       }
-      if (mounted) {
-        setState(() {
-          _ready = true;
-          _loadErr = null;
-        });
-      }
+      if (!mounted) return;
+      setState(() {
+        _ready = true;
+        _loadErr = null;
+      });
+      // Auto-play spoken guide when the payment / subscription screen opens.
+      await _player.play();
     } catch (_) {
       if (mounted) {
         setState(
@@ -675,8 +676,14 @@ class _FunguaZoteAudioGuidePanelState extends State<_FunguaZoteAudioGuidePanel> 
   @override
   void dispose() {
     _stateSub?.cancel();
-    _player.dispose();
+    unawaited(_disposePlayer());
     super.dispose();
+  }
+
+  Future<void> _disposePlayer() async {
+    try {
+      await _player.dispose();
+    } catch (_) {}
   }
 
   String _fmt(Duration d) {
@@ -1144,8 +1151,11 @@ class _PremiumAccountStatusPanel extends StatelessWidget {
           _statusTile(
             icon: Icons.event_rounded,
             label: 'Inaisha',
-            value: '${endDate!.day}/${endDate!.month}/${endDate!.year} '
-                '${endDate!.hour.toString().padLeft(2, '0')}:${endDate!.minute.toString().padLeft(2, '0')}',
+            value: (() {
+              final local = endDate!.toLocal();
+              return '${local.day}/${local.month}/${local.year} '
+                  '${local.hour.toString().padLeft(2, '0')}:${local.minute.toString().padLeft(2, '0')}';
+            })(),
             accent: const Color(0xFFFBBF24),
           ),
         ],

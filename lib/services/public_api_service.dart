@@ -6,10 +6,12 @@ import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../admin/admin_currency.dart';
+import '../models/app_update_status.dart';
 import '../models/channel.dart';
 import '../models/hero_slide.dart';
 import '../models/plan.dart';
 import '../models/viewer_profile.dart';
+import 'app_identity.dart';
 import 'payment_config.dart';
 import 'pricing_catalog.dart';
 
@@ -66,6 +68,7 @@ class PublicBootstrapData {
     this.subscriptionEnabled = true,
     this.maintenanceMode = false,
     this.siteName = 'WASHA TV',
+    this.appUpdate = AppUpdateStatus.empty,
   });
 
   final int version;
@@ -77,8 +80,10 @@ class PublicBootstrapData {
   final bool subscriptionEnabled;
   final bool maintenanceMode;
   final String siteName;
+  final AppUpdateStatus appUpdate;
 
   String get syncSignature => '$version:$configSyncedAt';
+  bool get updateRequired => appUpdate.updateRequired;
 }
 
 /// Avoid proxy caching stale JSON on mobile/desktop. On **web**, omit these headers so the
@@ -360,16 +365,22 @@ class PublicApiService {
   /// Uses server [`since` query](bootstrap) support: returns `null` when config is unchanged (HTTP 304),
   /// so the viewer app can poll in one round-trip without re-downloading JSON.
   Future<PublicBootstrapData?> fetchBootstrapSince(int sinceConfigVersion) async {
+    await AppIdentity.ensureLoaded();
     final uri = Uri.parse('$baseUrl/api/v1/public/bootstrap').replace(
       queryParameters: <String, String>{
         'since': '$sinceConfigVersion',
         '_': '${DateTime.now().millisecondsSinceEpoch}',
+        ...AppIdentity.queryParams(),
       },
     );
     Object? lastError;
     for (var attempt = 0; attempt < 4; attempt++) {
       try {
-        final res = await http.get(uri, headers: _publicGetHeaders).timeout(const Duration(seconds: 25));
+        final headers = <String, String>{
+          ..._publicGetHeaders,
+          if (!kIsWeb) ...AppIdentity.headers(),
+        };
+        final res = await http.get(uri, headers: headers).timeout(const Duration(seconds: 25));
         if (res.statusCode == 304) return null;
         if (res.statusCode < 200 || res.statusCode >= 300) {
           throw Exception('Bootstrap failed: ${res.statusCode}');
@@ -385,6 +396,34 @@ class PublicApiService {
       }
     }
     throw lastError ?? Exception('Bootstrap failed');
+  }
+
+  /// Lightweight force-update recheck after user returns from Play Store.
+  Future<AppUpdateStatus?> fetchAppUpdateStatus() async {
+    await AppIdentity.ensureLoaded();
+    final uri = Uri.parse('$baseUrl/api/v1/public/app-update').replace(
+      queryParameters: {
+        '_': '${DateTime.now().millisecondsSinceEpoch}',
+        ...AppIdentity.queryParams(),
+      },
+    );
+    try {
+      final headers = <String, String>{
+        ..._publicGetHeaders,
+        if (!kIsWeb) ...AppIdentity.headers(),
+      };
+      final res = await http.get(uri, headers: headers).timeout(_lightweightPollTimeout);
+      if (res.statusCode < 200 || res.statusCode >= 300) return null;
+      final map = jsonDecode(res.body) as Map<String, dynamic>;
+      return AppUpdateStatus.fromJson(
+        map,
+        currentVersion: AppIdentity.version,
+        currentBuild: AppIdentity.build,
+      );
+    } catch (e) {
+      _throttledApiLog('app-update', e);
+      return null;
+    }
   }
 
   /// Enabled plans from DB only (`GET /api/v1/public/plans`). Use when bootstrap `plans` parses empty but the API is up.
@@ -477,6 +516,22 @@ class PublicApiService {
       siteName: (settings['site_name'] as String?)?.trim().isNotEmpty == true
           ? (settings['site_name'] as String).trim()
           : 'WASHA TV',
+      appUpdate: AppUpdateStatus.fromJson(
+        (map['appUpdate'] as Map?)?.cast<String, dynamic>() ??
+            <String, dynamic>{
+              'updateRequired': map['updateRequired'] == true,
+              'force_update_enabled': settings['force_update_enabled'],
+              'min_android_build': settings['min_android_build'],
+              'min_android_version': settings['min_android_version'],
+              'latest_android_version': settings['latest_android_version'],
+              'latest_android_build': settings['latest_android_build'],
+              'play_store_url': settings['play_store_url'],
+              'update_title': settings['update_title'],
+              'update_message': settings['update_message'],
+            },
+        currentVersion: AppIdentity.version,
+        currentBuild: AppIdentity.build,
+      ),
     );
   }
 
@@ -488,7 +543,17 @@ class PublicApiService {
           'subscription_enabled': d.subscriptionEnabled,
           'maintenance_mode': d.maintenanceMode,
           'site_name': d.siteName,
+          'force_update_enabled': d.appUpdate.forceUpdateEnabled,
+          'min_android_build': d.appUpdate.minBuild,
+          'min_android_version': d.appUpdate.minVersion,
+          'latest_android_version': d.appUpdate.latestVersion,
+          'latest_android_build': d.appUpdate.latestBuild,
+          'play_store_url': d.appUpdate.playStoreUrl,
+          'update_title': d.appUpdate.updateTitle,
+          'update_message': d.appUpdate.updateMessage,
         },
+        'appUpdate': d.appUpdate.toJson(),
+        'updateRequired': d.appUpdate.updateRequired,
         'plans': d.plans
             .map(
               (p) => {

@@ -1,10 +1,8 @@
 import type { DbPool } from '../db/pool.js';
+import { PREMIUM_ACTIVE_SQL } from './premiumAccess.js';
 
-/** Matches viewer premium logic in register.ts public/user-premium. */
-const premiumUserSql = `(
-  (subscription = 'premium' AND (premium_until IS NULL OR premium_until > now()))
-  OR (admin_access_until IS NOT NULL AND admin_access_until > now())
-)`;
+/** Matches viewer premium logic — requires a real future expiry (never NULL = forever). */
+const premiumUserSql = PREMIUM_ACTIVE_SQL;
 
 export type AdminStatsOverview = {
   totals: {
@@ -196,8 +194,8 @@ export async function fetchAdminSubscriptions(pool: DbPool) {
      WHERE u.subscription = 'premium'
         OR u.premium_until IS NOT NULL
         OR latest.plan_key IS NOT NULL
-     ORDER BY COALESCE(u.premium_until, u.created_at) DESC NULLS LAST
-     LIMIT 300`,
+     ORDER BY COALESCE(u.premium_until, u.admin_access_until, u.created_at) DESC NULLS LAST
+     LIMIT 2000`,
   );
   return r.rows.map((row) => {
     const x = row as {

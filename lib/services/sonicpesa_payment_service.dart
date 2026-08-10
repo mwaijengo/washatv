@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'package:http/http.dart' as http;
 
 import 'payment_config.dart';
+import 'app_identity.dart';
 
 /// SonicPesa payment flow via Washa API (keys stay on server).
 class SonicpesaPaymentService {
@@ -23,17 +24,23 @@ class SonicpesaPaymentService {
     required String planKey,
     bool forceNew = false,
   }) async {
+    await AppIdentity.ensureLoaded();
     final localPhone = PaymentConfig.normalizeTzLocalPhone(phone) ?? phone.trim();
     final res = await http
         .post(
           Uri.parse('$baseUrl/api/v1/public/payments/sonicpesa/initiate'),
-          headers: const {'Content-Type': 'application/json', 'Accept': 'application/json'},
+          headers: {
+            'Content-Type': 'application/json',
+            'Accept': 'application/json',
+            ...AppIdentity.headers(),
+          },
           body: jsonEncode({
             'device_id': deviceId,
             'user_name': userName,
             'phone': localPhone,
             'plan_key': planKey,
             if (forceNew) 'force_new': true,
+            ...AppIdentity.bodyFields(),
           }),
         )
         .timeout(const Duration(seconds: 35));
@@ -42,6 +49,14 @@ class SonicpesaPaymentService {
     final orderIdFromBody = (map['order_id'] as String?)?.trim() ?? '';
     final retrySafe = map['retry_safe'] != false;
     final cooldownSeconds = (map['cooldown_seconds'] as num?)?.toInt();
+
+    if (res.statusCode == 426 || map['updateRequired'] == true) {
+      throw SonicpesaPaymentException(
+        'Toleo jipya la app linahitajika. Sasisha WASHA TV kwenye Play Store kisha jaribu tena.',
+        statusCode: 426,
+        retrySafe: false,
+      );
+    }
 
     // DB persist may fail after SonicPesa creates the order — still continue with order_id.
     if ((res.statusCode == 502 || res.statusCode == 500) && orderIdFromBody.isNotEmpty) {

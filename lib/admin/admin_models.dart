@@ -28,15 +28,11 @@ class AdminUser {
 
   bool get adminAccessActive => adminAccessUntil != null && adminAccessUntil!.isAfter(DateTime.now());
 
-  /// Matches viewer API premium logic (subscription + dates).
+  /// Matches viewer API premium logic (real future expiry only — never NULL forever).
   bool get effectivePremium {
     final now = DateTime.now();
     if (adminAccessActive) return true;
     if (premiumUntil != null && premiumUntil!.isAfter(now)) return true;
-    if (subscription == 'premium') {
-      // Legacy rows without premium_until — treat as active.
-      return premiumUntil == null;
-    }
     return false;
   }
 
@@ -245,4 +241,15 @@ class AdminSettings {
   bool maintenanceMode = false;
   /// E.164-style or local digits; shown on user Profile → WhatsApp.
   String whatsappNumber = '';
+
+  /// Force Play Store update (Supasoka-style).
+  bool forceUpdateEnabled = false;
+  int minAndroidBuild = 0;
+  String minAndroidVersion = '';
+  String latestAndroidVersion = '';
+  int latestAndroidBuild = 0;
+  String playStoreUrl = 'https://play.google.com/store/apps/details?id=com.washatv';
+  String updateTitle = 'Sasisha WASHA TV';
+  String updateMessage =
+      'Toleo jipya linahitajika ili kuendelea kutumia app. Pakua kutoka Play Store kisha fungua tena.';
 }

@@ -12,7 +12,9 @@ class SubscriptionService {
   }
 
   /// Prefer the later expiry when merging local payment with server grants.
-  DateTime? mergeEndDates(DateTime? local, DateTime? remote) {
+  /// When [preferRemote] is true, the server value wins entirely (including null to clear).
+  DateTime? mergeEndDates(DateTime? local, DateTime? remote, {bool preferRemote = false}) {
+    if (preferRemote) return remote;
     if (local == null) return remote;
     if (remote == null) return local;
     return local.isAfter(remote) ? local : remote;
@@ -32,6 +34,7 @@ class SubscriptionService {
     if (s.isEmpty) return null;
     final asInt = int.tryParse(s);
     if (asInt != null && asInt > 1e11) return DateTime.fromMillisecondsSinceEpoch(asInt);
-    return DateTime.tryParse(s);
+    final parsed = DateTime.tryParse(s);
+    return parsed?.toLocal();
   }
 }

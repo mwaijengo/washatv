@@ -3,7 +3,8 @@ import type { Env } from '../config/env.js';
 const DEFAULT_BASE = 'https://api.sonicpesa.com';
 const SONICPESA_TIMEOUT_MS = 28_000;
 
-const API_ENVELOPE_STATUSES = new Set(['success', 'error', 'failed', 'failure', 'ok']);
+/** Outer transport/API envelope only — never treat payment terminal states as "not a status". */
+const API_TRANSPORT_OK = new Set(['ok']);
 
 export type SonicpesaCreateOrderInput = {
   buyer_email: string;
@@ -102,49 +103,119 @@ export function isSonicpesaFailure(status: string): boolean {
     s === 'EXPIRED' ||
     s === 'DECLINED' ||
     s === 'TIMEOUT' ||
-    s === 'TIMEDOUT'
+    s === 'TIMEDOUT' ||
+    s === 'ERROR'
   );
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
 }
 
 /** SonicPesa wraps order fields in `data` (and sometimes `order_status_data`). */
 function unwrapSonicpesaBody(raw: Record<string, unknown>): Record<string, unknown> {
-  const data = raw.data;
-  const fromData =
-    data && typeof data === 'object' && !Array.isArray(data)
-      ? (data as Record<string, unknown>)
-      : null;
-  const osd = fromData?.order_status_data ?? raw.order_status_data;
-  const fromOsd =
-    osd && typeof osd === 'object' && !Array.isArray(osd) ? (osd as Record<string, unknown>) : null;
-  return { ...raw, ...(fromData ?? {}), ...(fromOsd ?? {}) };
+  const fromData = asRecord(raw.data);
+  const osd = asRecord(fromData?.order_status_data ?? raw.order_status_data);
+  return { ...raw, ...(fromData ?? {}), ...(osd ?? {}) };
 }
 
+/**
+ * API-level rejection (bad key, validation) — NOT payment FAILED/SUCCESS.
+ * Payment terminal states must flow through readPaymentStatus / isSonicpesaSuccess.
+ */
 function sonicpesaApiError(raw: Record<string, unknown>, httpStatus: number): string | undefined {
-  const topStatus = String(raw.status ?? '').trim().toLowerCase();
-  if (topStatus === 'error' || topStatus === 'failed' || topStatus === 'failure') {
-    return String(raw.message ?? raw.error ?? 'SonicPesa rejected the request').trim();
+  if (httpStatus >= 400) {
+    return String(raw.error ?? raw.message ?? `SonicPesa HTTP ${httpStatus}`).trim();
   }
-  if (!httpStatus || httpStatus < 400) return undefined;
-  return String(raw.error ?? raw.message ?? `SonicPesa HTTP ${httpStatus}`).trim();
+
+  const topStatus = String(raw.status ?? '').trim().toLowerCase();
+  if (topStatus !== 'error') return undefined;
+
+  // Outer envelope { status: "error", message } with no order payload.
+  const data = asRecord(raw.data);
+  const hasOrderContext = Boolean(
+    raw.order_id ||
+      raw.orderId ||
+      raw.payment_status ||
+      raw.order_status ||
+      (data && (data.order_id || data.orderId || data.payment_status || data.status)),
+  );
+  if (hasOrderContext) return undefined;
+
+  return String(raw.message ?? raw.error ?? 'SonicPesa rejected the request').trim();
 }
 
 function readOrderId(body: Record<string, unknown>): string {
   return String(body.order_id ?? body.orderId ?? body.id ?? '').trim();
 }
 
-function readPaymentStatus(body: Record<string, unknown>): string {
-  const statusField = body.status;
-  const statusStr = typeof statusField === 'string' ? statusField.trim().toLowerCase() : '';
-  const statusIsPayment =
-    statusStr.length > 0 && !API_ENVELOPE_STATUSES.has(statusStr);
-  return normalizePaymentStatus(
-    body.payment_status ??
-      body.order_status ??
-      body.transaction_status ??
-      body.txn_status ??
-      (statusIsPayment ? statusField : undefined) ??
-      'PENDING',
+function firstNonEmpty(...values: unknown[]): string | undefined {
+  for (const v of values) {
+    if (v == null) continue;
+    const s = String(v).trim();
+    if (s) return s;
+  }
+  return undefined;
+}
+
+/**
+ * Extract payment status from SonicPesa create_order / order_status payloads.
+ *
+ * Critical: SonicPesa uses `status: "success"` for BOTH the API envelope and a paid order.
+ * Older code treated any "success"/"failed" as envelope-only and defaulted to PENDING, so
+ * successful payments never upgraded accounts when the webhook was missing.
+ */
+export function readPaymentStatus(raw: Record<string, unknown>): string {
+  const fromData = asRecord(raw.data);
+  const fromOsd = asRecord(fromData?.order_status_data ?? raw.order_status_data);
+  const body = unwrapSonicpesaBody(raw);
+
+  const explicit = firstNonEmpty(
+    body.payment_status,
+    body.order_status,
+    body.transaction_status,
+    body.txn_status,
+    fromOsd?.payment_status,
+    fromOsd?.order_status,
+    fromData?.payment_status,
+    fromData?.order_status,
   );
+  if (explicit) return normalizePaymentStatus(explicit);
+
+  // Nested data.status is the payment state (pending/success/failed), even when the word
+  // matches the outer API envelope.
+  const nestedStatus = firstNonEmpty(fromOsd?.status, fromData?.status);
+  if (nestedStatus) {
+    const n = normalizePaymentStatus(nestedStatus);
+    if (n !== 'OK') return n;
+  }
+
+  const top = firstNonEmpty(raw.status);
+  if (top) {
+    const lower = top.toLowerCase();
+    if (API_TRANSPORT_OK.has(lower)) return 'PENDING';
+
+    const hasOrderContext = Boolean(
+      body.order_id ||
+        body.orderId ||
+        body.amount != null ||
+        body.reference ||
+        body.buyer_phone ||
+        body.buyerPhone ||
+        fromData,
+    );
+
+    // Ambiguous top-level "success" with no order fields → transport OK, still pending.
+    if ((lower === 'success' || lower === 'error') && !hasOrderContext) {
+      return 'PENDING';
+    }
+
+    return normalizePaymentStatus(top);
+  }
+
+  return 'PENDING';
 }
 
 function readBuyerPhone(body: Record<string, unknown>): string {
@@ -197,7 +268,7 @@ export async function sonicpesaCreateOrder(env: Env, input: SonicpesaCreateOrder
 
   const body = unwrapSonicpesaBody(raw);
   const orderId = readOrderId(body);
-  const paymentStatus = readPaymentStatus(body);
+  const paymentStatus = readPaymentStatus(raw);
   const wrappedError = sonicpesaApiError(raw, 0);
 
   return {
@@ -232,7 +303,7 @@ export async function sonicpesaOrderStatus(env: Env, orderId: string): Promise<S
   }
 
   const body = unwrapSonicpesaBody(raw);
-  const paymentStatus = readPaymentStatus(body);
+  const paymentStatus = readPaymentStatus(raw);
   return {
     ok: true,
     order_id: readOrderId(body) || orderId,

@@ -7,9 +7,14 @@ import {
   findDeviceIdByPhone,
   findOpenSonicpesaOrderForDevice,
   grantPremiumFromPayment,
+  resolvePlanKeyByAmount,
   upsertPendingSonicpesaTransaction,
   withDbRetry,
 } from '../lib/premiumPayment.js';
+import {
+  normalizeAllPremiumWindows,
+  normalizeUserPremiumWindows,
+} from '../lib/premiumAccess.js';
 import {
   detectTzMobileNetwork,
   mobileMoneyMethodLabel,
@@ -27,8 +32,65 @@ import {
 } from '../lib/sonicpesa.js';
 import { forwardNotificationToSupasoka } from '../lib/supasokaNotifyBridge.js';
 import { fetchAdminStatsOverview, fetchAdminSubscriptions } from '../lib/adminStats.js';
+import {
+  buildAppUpdatePayload,
+  fetchAppUpdateSettings,
+  readClientAppIdentity,
+  stripCatalogForForcedUpdate,
+} from '../lib/appUpdatePolicy.js';
 import bcrypt from 'bcrypt';
 import { nanoid } from 'nanoid';
+
+/** Repair completed SonicPesa payments that never wrote premium_until (stuck accounts). */
+async function repairStuckCompletedPayments(
+  pool: DbPool,
+  deviceId: string,
+  log: { warn: (e: unknown, msg: string) => void },
+): Promise<string | null> {
+  const id = deviceId.trim();
+  if (!id) return null;
+  try {
+    const stuck = await pool.query(
+      `SELECT t.provider_ref, t.amount, t.plan_key, t.phone, u.name
+       FROM transactions t
+       JOIN users u ON u.id = t.user_id
+       WHERE u.device_id = $1
+         AND t.provider = 'sonicpesa'
+         AND t.status = 'completed'
+         AND t.amount > 0
+         AND u.premium_until IS NULL
+         AND (u.admin_access_until IS NULL OR u.admin_access_until <= now())
+       ORDER BY COALESCE(t.completed_at, t.created_at) DESC
+       LIMIT 1`,
+      [id],
+    );
+    if (!stuck.rowCount) return null;
+    const row = stuck.rows[0] as {
+      provider_ref: string;
+      amount: number;
+      plan_key: string | null;
+      phone: string | null;
+      name: string | null;
+    };
+    const granted = await withDbRetry(() =>
+      grantPremiumFromPayment(pool, {
+        deviceId: id,
+        userName: String(row.name ?? 'Viewer').trim() || 'Viewer',
+        phone: row.phone ?? '',
+        amount: Number(row.amount),
+        method: mobileMoneyMethodLabel(detectTzMobileNetwork(row.phone ?? '')),
+        planKey: row.plan_key ?? '',
+        provider: 'sonicpesa',
+        providerRef: String(row.provider_ref),
+        metadata: { source: 'stuck-completed-repair' },
+      }),
+    );
+    return granted.premium_until;
+  } catch (e) {
+    log.warn(e, 'stuck completed payment repair failed');
+    return null;
+  }
+}
 
 export async function registerRoutes(
   app: FastifyInstance,
@@ -66,29 +128,35 @@ export async function registerRoutes(
   app.get<{ Params: { device_id: string } }>('/api/v1/public/user-premium/:device_id', async (req, reply) => {
     const deviceId = (req.params.device_id ?? '').trim();
     if (!deviceId) return reply.code(400).send({ error: 'device_id is required' });
+
+    const repairedUntil = await repairStuckCompletedPayments(pool, deviceId, req.log);
+    if (repairedUntil) await notifyClientsAfterPremiumGrant();
+
     const r = await pool.query(
-      `SELECT subscription, premium_until, admin_access_until FROM users WHERE device_id = $1 LIMIT 1`,
+      `SELECT id, subscription, premium_until, admin_access_until FROM users WHERE device_id = $1 LIMIT 1`,
       [deviceId],
     );
     if (!r.rowCount) return { ok: true, premiumUntilMs: null };
     const row = r.rows[0] as {
+      id: string;
       subscription: string;
       premium_until: Date | null;
       admin_access_until: Date | null;
     };
+
+    const normalized = await normalizeUserPremiumWindows(pool, row.id);
+    const premiumUntil = normalized?.premium_until ?? row.premium_until;
+    const adminUntil = normalized?.admin_access_until ?? row.admin_access_until;
+
     const now = Date.now();
     const candidates: number[] = [];
-    if (row.premium_until) {
-      const ms = row.premium_until.getTime();
+    if (premiumUntil) {
+      const ms = new Date(premiumUntil).getTime();
       if (ms > now) candidates.push(ms);
     }
-    if (row.admin_access_until) {
-      const ms = row.admin_access_until.getTime();
+    if (adminUntil) {
+      const ms = new Date(adminUntil).getTime();
       if (ms > now) candidates.push(ms);
-    }
-    if (row.subscription === 'premium' && candidates.length === 0) {
-      // Legacy rows before premium_until was tracked — treat as active for 30 days from first sync.
-      candidates.push(now + 30 * 24 * 60 * 60 * 1000);
     }
     const premiumUntilMs = candidates.length > 0 ? Math.max(...candidates) : null;
     reply.header('Cache-Control', 'private, no-store');
@@ -99,6 +167,9 @@ export async function registerRoutes(
   app.get<{ Params: { device_id: string } }>('/api/v1/public/user-profile/:device_id', async (req, reply) => {
     const deviceId = (req.params.device_id ?? '').trim();
     if (!deviceId) return reply.code(400).send({ error: 'device_id is required' });
+
+    const repairedUntil = await repairStuckCompletedPayments(pool, deviceId, req.log);
+    if (repairedUntil) await notifyClientsAfterPremiumGrant();
 
     const r = await pool.query(
       `SELECT
@@ -130,6 +201,7 @@ export async function registerRoutes(
     }
 
     const row = r.rows[0] as {
+      id: string;
       name: string;
       phone: string;
       subscription: string;
@@ -139,12 +211,19 @@ export async function registerRoutes(
       plan_name: string | null;
     };
 
+    const normalized = await normalizeUserPremiumWindows(pool, row.id);
+    if (normalized) {
+      row.subscription = normalized.subscription;
+      row.premium_until = normalized.premium_until;
+      row.admin_access_until = normalized.admin_access_until;
+    }
+
     const now = Date.now();
     const candidates: number[] = [];
-    let accessSource: 'admin' | 'payment' | 'legacy' | 'none' = 'none';
+    let accessSource: 'admin' | 'payment' | 'none' = 'none';
 
-    const adminMs = row.admin_access_until?.getTime() ?? 0;
-    const premMs = row.premium_until?.getTime() ?? 0;
+    const adminMs = row.admin_access_until ? new Date(row.admin_access_until).getTime() : 0;
+    const premMs = row.premium_until ? new Date(row.premium_until).getTime() : 0;
     if (adminMs > now) {
       candidates.push(adminMs);
       accessSource = 'admin';
@@ -152,10 +231,6 @@ export async function registerRoutes(
     if (premMs > now) {
       candidates.push(premMs);
       if (accessSource !== 'admin') accessSource = 'payment';
-    }
-    if (row.subscription === 'premium' && candidates.length === 0) {
-      candidates.push(now + 30 * 24 * 60 * 60 * 1000);
-      accessSource = 'legacy';
     }
 
     const premiumUntilMs = candidates.length > 0 ? Math.max(...candidates) : null;
@@ -183,12 +258,26 @@ export async function registerRoutes(
   app.get('/api/v1/public/bootstrap', async (req, reply) => {
     const since = Number((req.query as { since?: string }).since ?? 0);
     const version = await getConfigVersion(pool);
-    if (since > 0 && since >= version) {
+    const clientId = readClientAppIdentity({
+      query: req.query as Record<string, unknown>,
+      headers: req.headers as Record<string, unknown>,
+    });
+    const updateSettings = await fetchAppUpdateSettings(pool);
+    const appUpdate = buildAppUpdatePayload(updateSettings, clientId);
+
+    // Force-update always wins over 304 — outdated clients must see the gate payload.
+    if (!appUpdate.updateRequired && since > 0 && since >= version) {
       reply.header('Cache-Control', 'private, no-store');
       return reply.code(304).send();
     }
     const [settings, plans, channels, slides] = await Promise.all([
-      pool.query(`SELECT site_name, subscription_enabled, maintenance_mode, whatsapp_number, updated_at FROM app_settings WHERE id = 1`),
+      pool.query(
+        `SELECT site_name, subscription_enabled, maintenance_mode, whatsapp_number,
+                force_update_enabled, min_android_build, min_android_version,
+                latest_android_version, latest_android_build, play_store_url,
+                update_title, update_message, updated_at
+         FROM app_settings WHERE id = 1`,
+      ),
       pool.query(
         `SELECT plan_key, name, original_price, price, discount, duration_days, features, popular, enabled, color_key, updated_at
          FROM pricing_plans ORDER BY plan_key`,
@@ -204,29 +293,57 @@ export async function registerRoutes(
     ]);
     const meta = await getConfigMeta(pool);
     reply.header('Cache-Control', 'private, no-store');
-    return {
+    let payload: Record<string, unknown> = {
       version,
       configSyncedAt: meta.configSyncedAt,
       settings: settings.rows[0],
       plans: plans.rows,
       channels: channels.rows,
       slides: slides.rows,
+      appUpdate,
+      updateRequired: appUpdate.updateRequired,
     };
+    if (appUpdate.updateRequired) {
+      payload = stripCatalogForForcedUpdate(payload);
+    }
+    return payload;
+  });
+
+  /** Lightweight force-update check (pollable without full catalog). */
+  app.get('/api/v1/public/app-update', async (req, reply) => {
+    const clientId = readClientAppIdentity({
+      query: req.query as Record<string, unknown>,
+      headers: req.headers as Record<string, unknown>,
+    });
+    const updateSettings = await fetchAppUpdateSettings(pool);
+    const appUpdate = buildAppUpdatePayload(updateSettings, clientId);
+    reply.header('Cache-Control', 'private, no-store');
+    return { ok: true, ...appUpdate, updateRequired: appUpdate.updateRequired };
   });
 
   app.get('/api/v1/public/config', async (req, reply) => {
     const since = Number((req.query as { since?: string }).since ?? 0);
     const version = await getConfigVersion(pool);
-    if (since > 0 && since >= version) {
+    const clientId = readClientAppIdentity({
+      query: req.query as Record<string, unknown>,
+      headers: req.headers as Record<string, unknown>,
+    });
+    const updateSettings = await fetchAppUpdateSettings(pool);
+    const appUpdate = buildAppUpdatePayload(updateSettings, clientId);
+    if (!appUpdate.updateRequired && since > 0 && since >= version) {
       reply.header('Cache-Control', 'private, no-store');
       return reply.code(304).send();
     }
     const r = await pool.query(
-      `SELECT site_name, subscription_enabled, maintenance_mode, whatsapp_number, updated_at FROM app_settings WHERE id = 1`,
+      `SELECT site_name, subscription_enabled, maintenance_mode, whatsapp_number,
+              force_update_enabled, min_android_build, min_android_version,
+              latest_android_version, latest_android_build, play_store_url,
+              update_title, update_message, updated_at
+       FROM app_settings WHERE id = 1`,
     );
     reply.header('Cache-Control', 'private, no-store');
     reply.header('ETag', `"${version}"`);
-    return { version, settings: r.rows[0] };
+    return { version, settings: r.rows[0], appUpdate, updateRequired: appUpdate.updateRequired };
   });
 
   app.get('/api/v1/public/plans', async () => {
@@ -397,6 +514,28 @@ export async function registerRoutes(
         return reply.code(403).send({ error: 'Subscriptions are disabled' });
       }
 
+      const updateSettings = await fetchAppUpdateSettings(pool);
+      const headerId = readClientAppIdentity({
+        query: req.query as Record<string, unknown>,
+        headers: req.headers as Record<string, unknown>,
+      });
+      const bodyBuild = Number((req.body as { app_build?: unknown })?.app_build);
+      const bodyVersion = String((req.body as { app_version?: unknown })?.app_version ?? '').trim();
+      const identity = {
+        build:
+          headerId.build ??
+          (Number.isFinite(bodyBuild) && bodyBuild > 0 ? Math.trunc(bodyBuild) : undefined),
+        version: headerId.version ?? (bodyVersion || undefined),
+      };
+      const appUpdate = buildAppUpdatePayload(updateSettings, identity);
+      if (appUpdate.updateRequired) {
+        return reply.code(426).send({
+          error: 'App update required',
+          updateRequired: true,
+          appUpdate,
+        });
+      }
+
       const planRow = await pool.query(
         `SELECT plan_key, name, price, duration_days, enabled FROM pricing_plans WHERE plan_key = $1`,
         [planKey],
@@ -437,6 +576,14 @@ export async function registerRoutes(
                 }),
               );
               await notifyClientsAfterPremiumGrant();
+              if (!granted.premium_until) {
+                return reply.code(500).send({
+                  error: 'Payment received but premium activation failed. Contact support.',
+                  payment_received: true,
+                  order_id: open.orderId,
+                  retry_safe: false,
+                });
+              }
               return {
                 ok: true,
                 order_id: open.orderId,
@@ -556,12 +703,13 @@ export async function registerRoutes(
       req.log.error(e, 'SonicPesa initiate failed');
       const msg = e instanceof Error ? e.message : String(e);
       const unreachable = msg.toLowerCase().includes('fetch') || msg.toLowerCase().includes('timeout');
+      // Before create_order, a retry is safe; after an unknown throw we stay conservative.
       return reply.code(unreachable ? 503 : 500).send({
         error: unreachable
           ? 'Seva ya malipo haipatikani kwa sasa. Jaribu tena baada ya dakika moja.'
           : 'Imeshindikana kuanzisha malipo. Jaribu tena baada ya dakika moja.',
-        retry_safe: false,
-        cooldown_seconds: 120,
+        retry_safe: unreachable,
+        cooldown_seconds: unreachable ? 60 : 120,
       });
     }
   });
@@ -627,7 +775,9 @@ export async function registerRoutes(
             ) {
               const remoteAmount = Number(remoteProbe.amount ?? 0);
               if (remoteAmount > 0) amount = Math.round(remoteAmount);
-              if (!planKey) planKey = 'gold';
+              if (!planKey && amount > 0) {
+                planKey = (await resolvePlanKeyByAmount(pool, amount)) ?? 'gold';
+              }
             }
           }
 
@@ -697,7 +847,16 @@ export async function registerRoutes(
                 metadata: { source: 'sonicpesa-status-completed-repair' },
               }),
             );
-            if (granted.repaired) await notifyClientsAfterPremiumGrant();
+            if (granted.repaired || granted.newly_granted) await notifyClientsAfterPremiumGrant();
+            if (!granted.premium_until) {
+              // Money is marked completed but premium window missing — keep client retrying.
+              return reply.code(500).send({
+                error: 'Payment received but premium activation failed. Contact support.',
+                payment_received: true,
+                order_id: orderId,
+                retry_safe: false,
+              });
+            }
             return {
               ok: true,
               payment_status: 'SUCCESS',
@@ -707,13 +866,22 @@ export async function registerRoutes(
           } catch (e) {
             req.log.error(e, 'completed tx premium repair failed');
             const prem = await pool.query(`SELECT premium_until FROM users WHERE device_id = $1`, [deviceId]);
+            const until = prem.rows[0]?.premium_until
+              ? new Date(prem.rows[0].premium_until as Date).toISOString()
+              : null;
+            if (!until) {
+              return reply.code(500).send({
+                error: 'Payment received but premium activation failed. Contact support.',
+                payment_received: true,
+                order_id: orderId,
+                retry_safe: false,
+              });
+            }
             return {
               ok: true,
               payment_status: 'SUCCESS',
               completed: true,
-              premium_until: prem.rows[0]?.premium_until
-                ? new Date(prem.rows[0].premium_until as Date).toISOString()
-                : null,
+              premium_until: until,
             };
           }
         }
@@ -750,6 +918,14 @@ export async function registerRoutes(
               }),
             );
             await notifyClientsAfterPremiumGrant();
+            if (!granted.premium_until) {
+              return reply.code(500).send({
+                error: 'Payment received but premium activation failed. Contact support.',
+                payment_received: true,
+                order_id: orderId,
+                retry_safe: false,
+              });
+            }
             return {
               ok: true,
               payment_status: paymentStatus,
@@ -804,11 +980,28 @@ export async function registerRoutes(
   app.post('/api/v1/webhooks/sonicpesa', async (req, reply) => {
     const b = (req.body ?? {}) as Record<string, unknown>;
     const orderId = String(b.order_id ?? b.orderId ?? '').trim();
-    const status = normalizePaymentStatus(b.status ?? b.payment_status);
-    const event = String(b.event ?? '').trim().toLowerCase();
-    const transid = String(b.transid ?? b.transaction_id ?? '').trim();
+    const nested = b.data && typeof b.data === 'object' && !Array.isArray(b.data)
+      ? (b.data as Record<string, unknown>)
+      : null;
+    const status = normalizePaymentStatus(
+      b.payment_status ??
+        b.order_status ??
+        nested?.payment_status ??
+        nested?.order_status ??
+        nested?.status ??
+        b.status,
+    );
+    const event = String(b.event ?? nested?.event ?? '').trim().toLowerCase();
+    const transid = String(b.transid ?? b.transaction_id ?? nested?.transid ?? '').trim();
     const webhookPhone = String(
-      b.buyer_phone ?? b.buyerPhone ?? b.phone ?? b.customer_phone ?? b.msisdn ?? '',
+      b.buyer_phone ??
+        b.buyerPhone ??
+        b.phone ??
+        b.customer_phone ??
+        b.msisdn ??
+        nested?.buyer_phone ??
+        nested?.phone ??
+        '',
     ).trim();
 
     if (env.SONICPESA_WEBHOOK_SECRET) {
@@ -840,7 +1033,7 @@ export async function registerRoutes(
     // Orphan recovery: paid webhook for an order we never stored (initiate DB failure).
     if (!txRow.rowCount && success) {
       let buyerPhone = webhookPhone;
-      let amount = Number(b.amount ?? 0);
+      let amount = Number(b.amount ?? nested?.amount ?? 0);
       try {
         const remote = await sonicpesaOrderStatus(env, orderId);
         if (remote.ok) {
@@ -857,10 +1050,22 @@ export async function registerRoutes(
           { orderId, event, hasPhone: Boolean(buyerPhone), amount },
           'SonicPesa webhook: unknown order_id and cannot recover device',
         );
-        return { ok: true, ignored: true, reason: 'order_not_found' };
+        // Non-2xx so SonicPesa retries — a later status poll may have created the pending row.
+        return reply.code(500).send({
+          error: 'order_not_found_retry',
+          reason: 'cannot_recover_device_or_amount',
+        });
       }
 
       const localPhone = toLocalTzPhone(buyerPhone) ?? buyerPhone;
+      const planKey = await resolvePlanKeyByAmount(pool, amount);
+      if (!planKey) {
+        req.log.warn({ orderId, amount }, 'SonicPesa webhook: cannot map amount to plan');
+        return reply.code(500).send({
+          error: 'order_not_found_retry',
+          reason: 'cannot_resolve_plan_from_amount',
+        });
+      }
       try {
         await withDbRetry(() =>
           upsertPendingSonicpesaTransaction(pool, {
@@ -868,10 +1073,10 @@ export async function registerRoutes(
             userName: 'Viewer',
             phone: localPhone,
             amount: Math.round(amount),
-            planKey: 'gold',
+            planKey,
             orderId,
             method: mobileMoneyMethodLabel(detectTzMobileNetwork(localPhone)),
-            metadata: { source: 'sonicpesa-webhook-orphan', sonicpesa_event: event },
+            metadata: { source: 'sonicpesa-webhook-orphan', sonicpesa_event: event, resolved_plan: planKey },
           }),
         );
         txRow = await pool.query(
@@ -890,6 +1095,9 @@ export async function registerRoutes(
 
     if (!txRow.rowCount) {
       req.log.warn({ orderId, event }, 'SonicPesa webhook: unknown order_id');
+      if (success) {
+        return reply.code(500).send({ error: 'order_not_found_retry' });
+      }
       return { ok: true, ignored: true, reason: 'order_not_found' };
     }
 
@@ -923,9 +1131,13 @@ export async function registerRoutes(
               metadata: { source: 'sonicpesa-webhook-repair' },
             }),
           );
-          if (granted.repaired) await notifyClientsAfterPremiumGrant();
+          if (granted.repaired || granted.newly_granted) await notifyClientsAfterPremiumGrant();
+          if (!granted.premium_until) {
+            return reply.code(500).send({ error: 'premium grant missing until, will retry' });
+          }
         } catch (e) {
           req.log.error(e, 'SonicPesa webhook: completed repair failed');
+          return reply.code(500).send({ error: 'premium repair failed, will retry' });
         }
       }
       return { ok: true, already_completed: true, order_id: orderId };
@@ -939,7 +1151,7 @@ export async function registerRoutes(
       const localPhone = tx.phone ?? '';
       const payMethod = mobileMoneyMethodLabel(detectTzMobileNetwork(localPhone));
       try {
-        await withDbRetry(() =>
+        const granted = await withDbRetry(() =>
           grantPremiumFromPayment(pool, {
             deviceId,
             userName: String(tx.name ?? 'Viewer').trim() || 'Viewer',
@@ -958,6 +1170,9 @@ export async function registerRoutes(
           }),
         );
         await notifyClientsAfterPremiumGrant();
+        if (!granted.premium_until) {
+          return reply.code(500).send({ error: 'premium grant missing until, will retry' });
+        }
       } catch (e) {
         req.log.error(e, 'SonicPesa webhook: grantPremiumFromPayment failed after retries');
         // Non-2xx so SonicPesa retries the webhook later instead of silently dropping the payment.
@@ -1047,10 +1262,22 @@ export async function registerRoutes(
     version: await getConfigVersion(pool),
   }));
 
-  app.patch<{ Body: Partial<{ site_name: string; subscription_enabled: boolean; maintenance_mode: boolean; whatsapp_number: string }> }>(
-    '/api/v1/admin/settings',
-    { preHandler: adminPre },
-    async (req) => {
+  app.patch<{
+    Body: Partial<{
+      site_name: string;
+      subscription_enabled: boolean;
+      maintenance_mode: boolean;
+      whatsapp_number: string;
+      force_update_enabled: boolean;
+      min_android_build: number;
+      min_android_version: string;
+      latest_android_version: string;
+      latest_android_build: number;
+      play_store_url: string;
+      update_title: string;
+      update_message: string;
+    }>;
+  }>('/api/v1/admin/settings', { preHandler: adminPre }, async (req) => {
       const b = req.body ?? {};
       const client = await pool.connect();
       try {
@@ -1074,6 +1301,38 @@ export async function registerRoutes(
           sets.push(`whatsapp_number = $${i++}`);
           vals.push(b.whatsapp_number);
         }
+        if (b.force_update_enabled !== undefined) {
+          sets.push(`force_update_enabled = $${i++}`);
+          vals.push(Boolean(b.force_update_enabled));
+        }
+        if (b.min_android_build !== undefined) {
+          sets.push(`min_android_build = $${i++}`);
+          vals.push(Math.max(0, Math.trunc(Number(b.min_android_build) || 0)));
+        }
+        if (b.min_android_version !== undefined) {
+          sets.push(`min_android_version = $${i++}`);
+          vals.push(String(b.min_android_version));
+        }
+        if (b.latest_android_version !== undefined) {
+          sets.push(`latest_android_version = $${i++}`);
+          vals.push(String(b.latest_android_version));
+        }
+        if (b.latest_android_build !== undefined) {
+          sets.push(`latest_android_build = $${i++}`);
+          vals.push(Math.max(0, Math.trunc(Number(b.latest_android_build) || 0)));
+        }
+        if (b.play_store_url !== undefined) {
+          sets.push(`play_store_url = $${i++}`);
+          vals.push(String(b.play_store_url));
+        }
+        if (b.update_title !== undefined) {
+          sets.push(`update_title = $${i++}`);
+          vals.push(String(b.update_title));
+        }
+        if (b.update_message !== undefined) {
+          sets.push(`update_message = $${i++}`);
+          vals.push(String(b.update_message));
+        }
         if (!sets.length) {
           await client.query('COMMIT');
           return { ok: true, version: await getConfigVersion(pool) };
@@ -1083,7 +1342,8 @@ export async function registerRoutes(
         const v = await bumpConfigVersion(client);
         await client.query('COMMIT');
         sse.notifyConfigVersion(v);
-        return { ok: true, version: v };
+        const settings = await fetchAppUpdateSettings(pool);
+        return { ok: true, version: v, appUpdate: buildAppUpdatePayload(settings) };
       } catch (e) {
         await client.query('ROLLBACK');
         throw e;
@@ -1092,6 +1352,21 @@ export async function registerRoutes(
       }
     },
   );
+
+  app.get('/api/v1/admin/settings', { preHandler: adminPre }, async () => {
+    const r = await pool.query(
+      `SELECT site_name, subscription_enabled, maintenance_mode, whatsapp_number,
+              force_update_enabled, min_android_build, min_android_version,
+              latest_android_version, latest_android_build, play_store_url,
+              update_title, update_message, updated_at
+       FROM app_settings WHERE id = 1`,
+    );
+    const updateSettings = await fetchAppUpdateSettings(pool);
+    return {
+      settings: r.rows[0],
+      appUpdate: buildAppUpdatePayload(updateSettings),
+    };
+  });
 
   app.put<{ Params: { plan_key: string }; Body: Record<string, unknown> }>(
     '/api/v1/admin/pricing/:plan_key',
@@ -1262,18 +1537,42 @@ export async function registerRoutes(
     }
   });
 
-  app.get('/api/v1/admin/users', { preHandler: adminPre }, async () => {
+  app.get<{ Querystring: { q?: string; limit?: string } }>('/api/v1/admin/users', { preHandler: adminPre }, async (req) => {
+    await normalizeAllPremiumWindows(pool);
+    const q = String(req.query?.q ?? '').trim();
+    const limitRaw = Number(req.query?.limit ?? 5000);
+    const limit = Number.isFinite(limitRaw) ? Math.min(Math.max(Math.trunc(limitRaw), 1), 20000) : 5000;
+    const like = q ? `%${q.replace(/[%_]/g, '')}%` : null;
     const r = await pool.query(
       `SELECT id, name, phone, device_id, status, subscription, premium_until, admin_access_until, created_at
-       FROM users ORDER BY created_at DESC NULLS LAST, id DESC LIMIT 500`,
+       FROM users
+       WHERE ($1::text IS NULL)
+          OR name ILIKE $1
+          OR phone ILIKE $1
+          OR COALESCE(device_id, '') ILIKE $1
+          OR id ILIKE $1
+       ORDER BY created_at DESC NULLS LAST, id DESC
+       LIMIT $2`,
+      [like, limit],
     );
-    return { users: r.rows };
+    const total = await pool.query(`SELECT COUNT(*)::int AS c FROM users`);
+    return {
+      users: r.rows,
+      total: Number((total.rows[0] as { c: number }).c ?? r.rowCount ?? 0),
+      limit,
+    };
   });
 
   /** One round-trip for admin dashboard — parallel DB reads (faster than 7 separate HTTP calls). */
-  app.get('/api/v1/admin/sync', { preHandler: adminPre }, async () => {
+  app.get<{ Querystring: { q?: string; limit?: string } }>('/api/v1/admin/sync', { preHandler: adminPre }, async (req) => {
+    await normalizeAllPremiumWindows(pool);
+    const q = String(req.query?.q ?? '').trim();
+    const limitRaw = Number(req.query?.limit ?? 5000);
+    const limit = Number.isFinite(limitRaw) ? Math.min(Math.max(Math.trunc(limitRaw), 1), 20000) : 5000;
+    const like = q ? `%${q.replace(/[%_]/g, '')}%` : null;
     const [
       usersRes,
+      usersTotalRes,
       channelsRes,
       slidesRes,
       txRes,
@@ -1284,8 +1583,17 @@ export async function registerRoutes(
     ] = await Promise.all([
       pool.query(
         `SELECT id, name, phone, device_id, status, subscription, premium_until, admin_access_until, created_at
-         FROM users ORDER BY created_at DESC NULLS LAST, id DESC LIMIT 500`,
+         FROM users
+         WHERE ($1::text IS NULL)
+            OR name ILIKE $1
+            OR phone ILIKE $1
+            OR COALESCE(device_id, '') ILIKE $1
+            OR id ILIKE $1
+         ORDER BY created_at DESC NULLS LAST, id DESC
+         LIMIT $2`,
+        [like, limit],
       ),
+      pool.query(`SELECT COUNT(*)::int AS c FROM users`),
       pool.query(
         `SELECT id, name, category, premium, live, status, thumbnail, stream_url, viewers, rating, drm, drm_clear_key, sort_order, updated_at
          FROM channels ORDER BY sort_order, name, id`,
@@ -1299,7 +1607,7 @@ export async function registerRoutes(
          FROM transactions t
          LEFT JOIN users u ON u.id = t.user_id
          ORDER BY t.created_at DESC NULLS LAST
-         LIMIT 500`,
+         LIMIT 1000`,
       ),
       pool.query(`SELECT * FROM notifications ORDER BY created_at DESC NULLS LAST LIMIT 100`),
       pool.query(
@@ -1310,6 +1618,7 @@ export async function registerRoutes(
     ]);
     return {
       users: usersRes.rows,
+      users_total: Number((usersTotalRes.rows[0] as { c: number }).c ?? usersRes.rowCount ?? 0),
       channels: channelsRes.rows,
       slides: slidesRes.rows,
       transactions: txRes.rows,
@@ -1365,6 +1674,14 @@ export async function registerRoutes(
           if (b.admin_access_until === undefined) {
             sets.push(`admin_access_until = NULL`);
           }
+        }
+        // Never allow subscription='premium' with a NULL forever window — materialize 30 days
+        // unless the caller also provides premium_until / uses grant-access.
+        if (b.subscription === 'premium' && b.premium_until === undefined) {
+          sets.push(`premium_until = CASE
+            WHEN premium_until IS NOT NULL AND premium_until > now() THEN premium_until
+            ELSE now() + interval '30 days'
+          END`);
         }
       }
       if (b.admin_access_until !== undefined) {
