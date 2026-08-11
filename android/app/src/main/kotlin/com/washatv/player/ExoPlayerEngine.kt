@@ -12,6 +12,7 @@ import androidx.media3.common.Tracks
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.datasource.HttpDataSource
+import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.dash.DashMediaSource
 import androidx.media3.exoplayer.drm.DefaultDrmSessionManager
@@ -96,28 +97,37 @@ class ExoPlayerEngine(
     private val trackSelector = DefaultTrackSelector(context)
     private var currentSession: StreamSession? = null
     private var preferredAudioLanguage = "sw"
-    private var selectedQuality: StreamQuality = StreamQuality.QUALITY_360P
+    private var selectedQuality: StreamQuality = StreamQuality.AUTO
+    /** Prevent re-applying the same override on every live playlist refresh (audible scratch). */
+    private var lastAudioOverrideKey: String? = null
+    private var lastVideoOverrideKey: String? = null
+    private var transientErrorRetries = 0
 
     companion object {
         private const val TAG = "ExoPlayerEngine"
-        
-        // Buffer configuration (optimized for mobile streaming)
-        private const val MIN_BUFFER_MS = 15000  // 15 seconds
-        private const val MAX_BUFFER_MS = 50000  // 50 seconds
-        private const val BUFFER_FOR_PLAYBACK_MS = 2500  // Start playback after 2.5s
-        private const val BUFFER_FOR_PLAYBACK_AFTER_REBUFFER_MS = 5000  // 5s after rebuffer
-        
-        // Timeout configuration
-        private const val CONNECT_TIMEOUT_MS = 30000  // 30 seconds
-        private const val READ_TIMEOUT_MS = 30000     // 30 seconds
+
+        // Tuned for Tanzanian mobile networks — enough cushion to avoid underrun scratch,
+        // but not so large that start latency feels stuck.
+        private const val MIN_BUFFER_MS = 20_000
+        private const val MAX_BUFFER_MS = 50_000
+        private const val BUFFER_FOR_PLAYBACK_MS = 2_000
+        private const val BUFFER_FOR_PLAYBACK_AFTER_REBUFFER_MS = 4_000
+        private const val BACK_BUFFER_MS = 20_000
+
+        private const val CONNECT_TIMEOUT_MS = 12_000
+        private const val READ_TIMEOUT_MS = 20_000
+        private const val MAX_TRANSIENT_RETRIES = 2
     }
 
     fun initialize(streamSession: StreamSession) {
         currentSession = streamSession
         preferredAudioLanguage = normalizeAudioLanguage(streamSession.preferredAudioLanguage)
-        
+        lastAudioOverrideKey = null
+        lastVideoOverrideKey = null
+        transientErrorRetries = 0
+
         Log.d(TAG, "=".repeat(70))
-        Log.d(TAG, "INITIALIZING UNIVERSAL STREAM PLAYER v4.0")
+        Log.d(TAG, "INITIALIZING UNIVERSAL STREAM PLAYER v4.1")
         Log.d(TAG, "URL: ${streamSession.mpdUrl}")
         Log.d(TAG, "DRM Type: ${streamSession.drmType}")
         Log.d(TAG, "License URL: ${streamSession.licenseUrl}")
@@ -126,23 +136,18 @@ class ExoPlayerEngine(
         Log.d(TAG, "=".repeat(70))
 
         try {
-            // Step 1: Prepare headers (including auth & DRM headers)
             val headers = buildHeaders(streamSession)
             Log.d(TAG, "✅ Headers prepared: ${headers.keys.joinToString(", ")}")
 
-            // Step 2: Create data source factory with headers
             val dataSourceFactory = createDataSourceFactory(headers)
             Log.d(TAG, "✅ Data source factory created")
 
-            // Step 3: Detect stream format from URL
             val streamFormat = detectStreamFormat(streamSession.mpdUrl)
             Log.d(TAG, "✅ Detected stream format: $streamFormat")
 
-            // Step 4: Build media item with DRM configuration
             val mediaItem = buildMediaItem(streamSession, headers)
             Log.d(TAG, "✅ Media item built (DRM: ${streamSession.drmType})")
 
-            // Step 5: Create appropriate media source
             val mediaSource = createMediaSource(
                 streamFormat,
                 streamSession,
@@ -152,28 +157,43 @@ class ExoPlayerEngine(
             )
             Log.d(TAG, "✅ Media source created: $streamFormat")
 
-            // Step 6: Build and configure player
+            val loadControl = DefaultLoadControl.Builder()
+                .setBufferDurationsMs(
+                    MIN_BUFFER_MS,
+                    MAX_BUFFER_MS,
+                    BUFFER_FOR_PLAYBACK_MS,
+                    BUFFER_FOR_PLAYBACK_AFTER_REBUFFER_MS,
+                )
+                .setPrioritizeTimeOverSizeThresholds(true)
+                .setBackBuffer(BACK_BUFFER_MS, true)
+                .build()
+
+            trackSelector.parameters = trackSelector.parameters.buildUpon()
+                .setForceHighestSupportedBitrate(false)
+                .setPreferredAudioLanguage(preferredAudioLanguage)
+                .clearOverridesOfType(C.TRACK_TYPE_VIDEO)
+                .clearOverridesOfType(C.TRACK_TYPE_AUDIO)
+                .clearVideoSizeConstraints()
+                .setMaxVideoBitrate(Int.MAX_VALUE)
+                .build()
+
             exoPlayer = ExoPlayer.Builder(context)
                 .setTrackSelector(trackSelector)
+                .setLoadControl(loadControl)
                 .build()
                 .apply {
-                    // Configure track selector for better adaptive streaming
-                    trackSelector?.let { selector ->
-                        selector.parameters = selector.getParameters().buildUpon()
-                            .setForceHighestSupportedBitrate(false)  // Enable adaptive bitrate
-                            .setPreferredAudioLanguage(preferredAudioLanguage)
-                            .build()
-                    }
-                    
                     addListener(PlayerEventListener())
                     setMediaSource(mediaSource)
                     prepare()
-                    // 🔥 FIX: Set playWhenReady to true to avoid black screen
                     playWhenReady = true
-                    Log.d(TAG, "✅ Player prepared with playWhenReady=true")
+                    Log.d(
+                        TAG,
+                        "✅ Player prepared AUTO loadControl=${MIN_BUFFER_MS}-${MAX_BUFFER_MS}ms",
+                    )
                 }
 
-            setQuality(StreamQuality.QUALITY_360P)
+            // Start on AUTO — forced 360p at prepare causes audible scratch / decoder reconfig.
+            selectedQuality = StreamQuality.AUTO
 
         } catch (e: Exception) {
             Log.e(TAG, "❌ Initialization failed", e)
@@ -182,46 +202,25 @@ class ExoPlayerEngine(
     }
 
     /**
-     * Detects the stream format based on URL patterns, extensions, and content hints
+     * Detects the stream format based on URL patterns — IPTV extensionless → HLS (not DASH).
      */
     private fun detectStreamFormat(url: String): StreamFormat {
-        val urlLower = url.lowercase()
-        
-        return when {
-            // DASH/MPD detection
-            urlLower.contains(".mpd") -> StreamFormat.DASH
-            urlLower.contains("dash") && !urlLower.contains(".m3u8") -> StreamFormat.DASH
-            urlLower.contains("/manifest") && !urlLower.contains(".m3u8") -> StreamFormat.DASH
-            urlLower.contains("application/dash+xml") -> StreamFormat.DASH
-            
-            // HLS/M3U8 detection
-            urlLower.contains(".m3u8") -> StreamFormat.HLS
-            urlLower.contains(".m3u") -> StreamFormat.HLS
-            urlLower.contains("hls") -> StreamFormat.HLS
-            urlLower.contains("playlist.m3u") -> StreamFormat.HLS
-            urlLower.contains("application/vnd.apple.mpegurl") -> StreamFormat.HLS
-            urlLower.contains("application/x-mpegurl") -> StreamFormat.HLS
-            
-            // MP4 and other progressive formats
-            urlLower.contains(".mp4") -> StreamFormat.PROGRESSIVE
-            urlLower.contains(".m4v") -> StreamFormat.PROGRESSIVE
-            urlLower.contains(".m4a") -> StreamFormat.PROGRESSIVE
-            urlLower.contains(".webm") -> StreamFormat.PROGRESSIVE
-            urlLower.contains(".mkv") -> StreamFormat.PROGRESSIVE
-            urlLower.contains(".avi") -> StreamFormat.PROGRESSIVE
-            urlLower.contains(".mov") -> StreamFormat.PROGRESSIVE
-            urlLower.contains(".flv") -> StreamFormat.PROGRESSIVE
-            urlLower.contains(".ts") -> StreamFormat.PROGRESSIVE
-            
-            // Relay/proxy detection (should use format specified by upstream)
-            urlLower.contains("/relay/stream") -> StreamFormat.DASH  // Most relay streams are DASH
-            urlLower.contains("/relay/m3u8") -> StreamFormat.HLS
-            urlLower.contains("/api/relay/") -> StreamFormat.DASH
-            
-            // Default to DASH for unknown formats (most adaptive streaming)
-            else -> {
-                Log.w(TAG, "⚠️ Unknown format, defaulting to DASH: $url")
-                StreamFormat.DASH
+        return when (StreamUrlClassifier.detectFormat(url)) {
+            StreamUrlClassifier.Format.DASH -> StreamFormat.DASH
+            StreamUrlClassifier.Format.HLS -> StreamFormat.HLS
+            StreamUrlClassifier.Format.PROGRESSIVE -> StreamFormat.PROGRESSIVE
+            StreamUrlClassifier.Format.GATEWAY, StreamUrlClassifier.Format.UNKNOWN -> {
+                val urlLower = url.lowercase()
+                when {
+                    urlLower.contains(".mpd") || urlLower.contains("/relay/stream") -> StreamFormat.DASH
+                    urlLower.contains(".m3u8") || urlLower.contains("hls") -> StreamFormat.HLS
+                    urlLower.contains(".mp4") || urlLower.contains(".ts") -> StreamFormat.PROGRESSIVE
+                    // Extensionless live IPTV almost always speaks HLS to Exo.
+                    else -> {
+                        Log.w(TAG, "⚠️ Unknown format, defaulting to HLS: $url")
+                        StreamFormat.HLS
+                    }
+                }
             }
         }
     }
@@ -472,7 +471,8 @@ class ExoPlayerEngine(
         headers: Map<String, String>
     ): MediaSource {
         val hlsFactory = HlsMediaSource.Factory(dataSourceFactory)
-            .setAllowChunklessPreparation(false) // ✅ Change to FALSE for better compatibility
+            .setAllowChunklessPreparation(true)
+            .setLoadErrorHandlingPolicy(DefaultLoadErrorHandlingPolicy(4))
 
         // Add DRM session manager if needed (for SAMPLE-AES encryption)
         if (streamSession.drmType != DrmType.NONE) {
@@ -627,64 +627,112 @@ class ExoPlayerEngine(
 
     fun setQuality(quality: StreamQuality) {
         selectedQuality = quality
+        lastVideoOverrideKey = null
         val builder = trackSelector.buildUponParameters()
             .setForceHighestSupportedBitrate(false)
         if (quality == StreamQuality.AUTO) {
             builder.clearVideoSizeConstraints()
                 .setMaxVideoBitrate(Int.MAX_VALUE)
-        } else {
-            val maxBitrate = when (quality) {
-                StreamQuality.QUALITY_240P -> 400_000
-                StreamQuality.QUALITY_360P -> 800_000
-                StreamQuality.QUALITY_480P -> 1_400_000
-                StreamQuality.QUALITY_720P -> 2_500_000
-                StreamQuality.QUALITY_1080P -> 4_000_000
-                else -> Int.MAX_VALUE
-            }
-            builder.setMaxVideoSize(Int.MAX_VALUE, quality.height)
-                .setMaxVideoBitrate(maxBitrate)
-        }
-        trackSelector.setParameters(builder.build())
-        applyVideoTrackOverride(quality)
-        Log.d(TAG, "🎨 Quality set to: $quality")
-    }
-
-    private fun applyVideoTrackOverride(quality: StreamQuality) {
-        if (quality == StreamQuality.AUTO) return
-        val player = exoPlayer ?: return
-        for (group in player.currentTracks.groups) {
-            if (group.type != C.TRACK_TYPE_VIDEO) continue
-            var bestIdx = -1
-            var bestHeight = 0
-            for (i in 0 until group.length) {
-                val h = group.getTrackFormat(i).height
-                if (h > 0 && h <= quality.height && h >= bestHeight) {
-                    bestHeight = h
-                    bestIdx = i
-                }
-            }
-            if (bestIdx >= 0) {
+                .clearOverridesOfType(C.TRACK_TYPE_VIDEO)
+            trackSelector.setParameters(builder.build())
+            // Also clear hard overrides on the live player parameters.
+            exoPlayer?.let { player ->
                 player.trackSelectionParameters = player.trackSelectionParameters
                     .buildUpon()
                     .clearOverridesOfType(C.TRACK_TYPE_VIDEO)
-                    .addOverride(TrackSelectionOverride(group.mediaTrackGroup, bestIdx))
+                    .clearVideoSizeConstraints()
+                    .setMaxVideoBitrate(Int.MAX_VALUE)
+                    .setForceHighestSupportedBitrate(false)
                     .build()
-                Log.d(TAG, "🎨 Video track override: index=$bestIdx height=$bestHeight")
-                return
+            }
+        } else {
+            val maxBitrate = bitrateCapForQuality(quality)
+            builder.setMaxVideoSize(Int.MAX_VALUE, quality.height)
+                .setMaxVideoBitrate(maxBitrate)
+            trackSelector.setParameters(builder.build())
+            applyVideoTrackOverride(quality, force = true)
+        }
+        Log.d(TAG, "🎨 Quality set to: $quality")
+    }
+
+    private fun bitrateCapForQuality(quality: StreamQuality): Int = when (quality) {
+        StreamQuality.QUALITY_240P -> 400_000
+        StreamQuality.QUALITY_360P -> 800_000
+        StreamQuality.QUALITY_480P -> 1_400_000
+        StreamQuality.QUALITY_720P -> 2_500_000
+        StreamQuality.QUALITY_1080P -> 4_000_000
+        else -> Int.MAX_VALUE
+    }
+
+    private fun applyVideoTrackOverride(quality: StreamQuality, force: Boolean = false) {
+        if (quality == StreamQuality.AUTO) return
+        val player = exoPlayer ?: return
+        val maxBitrate = bitrateCapForQuality(quality)
+        var bestIdx = -1
+        var bestHeight = 0
+        var bestBitrate = 0
+        var bestGroup: Tracks.Group? = null
+        for (group in player.currentTracks.groups) {
+            if (group.type != C.TRACK_TYPE_VIDEO) continue
+            for (i in 0 until group.length) {
+                val f = group.getTrackFormat(i)
+                val h = f.height
+                val br = if (f.bitrate > 0) f.bitrate else 0
+                val underCap = when {
+                    h > 0 -> h <= quality.height
+                    br > 0 -> br <= maxBitrate
+                    else -> false
+                }
+                if (!underCap) continue
+                if (h > bestHeight || (h == bestHeight && br >= bestBitrate)) {
+                    bestHeight = h
+                    bestBitrate = br
+                    bestIdx = i
+                    bestGroup = group
+                }
             }
         }
+        if (bestGroup == null || bestIdx < 0) {
+            // Soft constraints only — avoid thrashing with a hard pin when no track matches.
+            player.trackSelectionParameters = player.trackSelectionParameters
+                .buildUpon()
+                .clearOverridesOfType(C.TRACK_TYPE_VIDEO)
+                .setMaxVideoSize(Int.MAX_VALUE, quality.height)
+                .setMaxVideoBitrate(maxBitrate)
+                .setForceHighestSupportedBitrate(false)
+                .build()
+            return
+        }
+        if (!force && bestGroup.isTrackSelected(bestIdx)) {
+            lastVideoOverrideKey = "${quality.name}:$bestHeight:$bestBitrate"
+            return
+        }
+        val nextKey = "${quality.name}:$bestHeight:$bestBitrate"
+        if (!force && lastVideoOverrideKey == nextKey) return
+
+        player.trackSelectionParameters = player.trackSelectionParameters
+            .buildUpon()
+            .clearOverridesOfType(C.TRACK_TYPE_VIDEO)
+            .setMaxVideoSize(Int.MAX_VALUE, quality.height.coerceAtLeast(1))
+            .setMaxVideoBitrate(maxBitrate)
+            .setForceHighestSupportedBitrate(false)
+            .addOverride(TrackSelectionOverride(bestGroup.mediaTrackGroup, bestIdx))
+            .build()
+        lastVideoOverrideKey = nextKey
+        Log.d(TAG, "🎨 Video track override: index=$bestIdx height=$bestHeight bitrate=$bestBitrate")
     }
 
     fun setAudioLanguage(language: String) {
         val lang = normalizeAudioLanguage(language)
         preferredAudioLanguage = lang
+        lastAudioOverrideKey = null
         trackSelector.setParameters(
             trackSelector.buildUponParameters()
                 .setPreferredAudioLanguage(lang)
                 .clearOverridesOfType(C.TRACK_TYPE_AUDIO)
                 .build(),
         )
-        applyAudioTrackOverride(lang)
+        applyAudioTrackOverride(lang, force = true)
         Log.d(TAG, "🔊 Audio language set to: $lang")
     }
 
@@ -704,7 +752,7 @@ class ExoPlayerEngine(
         }
     }
 
-    private fun applyAudioTrackOverride(language: String) {
+    private fun applyAudioTrackOverride(language: String, force: Boolean = false) {
         val player = exoPlayer ?: return
         for (group in player.currentTracks.groups) {
             if (group.type != C.TRACK_TYPE_AUDIO) continue
@@ -713,11 +761,18 @@ class ExoPlayerEngine(
                 if (!matchesAudioLanguage(format.language, language) &&
                     !matchesAudioLanguage(format.label?.toString(), language)
                 ) continue
+                val key = "$language:${format.language}:$i"
+                if (!force && key == lastAudioOverrideKey) return
+                if (!force && group.isTrackSelected(i)) {
+                    lastAudioOverrideKey = key
+                    return
+                }
                 player.trackSelectionParameters = player.trackSelectionParameters
                     .buildUpon()
                     .clearOverridesOfType(C.TRACK_TYPE_AUDIO)
                     .addOverride(TrackSelectionOverride(group.mediaTrackGroup, i))
                     .build()
+                lastAudioOverrideKey = key
                 return
             }
         }
@@ -795,43 +850,52 @@ class ExoPlayerEngine(
 
         override fun onTracksChanged(tracks: Tracks) {
             Log.d(TAG, "🎚️ Tracks changed: ${tracks.groups.size} group(s)")
-            
-            // Log available tracks for debugging
-            tracks.groups.forEachIndexed { index, group ->
-                val trackType = when (group.type) {
-                    C.TRACK_TYPE_VIDEO -> "Video"
-                    C.TRACK_TYPE_AUDIO -> "Audio"
-                    C.TRACK_TYPE_TEXT -> "Text/Subtitle"
-                    else -> "Other"
-                }
-                Log.v(TAG, "  Group $index: type=$trackType, tracks=${group.length}, selected=${group.isSelected}")
-            }
-            
             onTracksChangedCallback(tracks)
-            applyAudioTrackOverride(preferredAudioLanguage)
-            applyVideoTrackOverride(selectedQuality)
+            // Only apply overrides when needed — live HLS refreshes fire this often.
+            applyAudioTrackOverride(preferredAudioLanguage, force = false)
+            if (selectedQuality != StreamQuality.AUTO) {
+                applyVideoTrackOverride(selectedQuality, force = false)
+            }
         }
 
         override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
             Log.e(TAG, "❌ Playback error: ${error.errorCode}", error)
             Log.e(TAG, "  Message: ${error.message}")
             Log.e(TAG, "  Cause: ${error.cause?.message}")
-            Log.e(TAG, "  Stacktrace: ${error.stackTraceToString()}")
-            
+
+            val transient = error.errorCode ==
+                androidx.media3.common.PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED ||
+                error.errorCode ==
+                androidx.media3.common.PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_TIMEOUT ||
+                error.errorCode ==
+                androidx.media3.common.PlaybackException.ERROR_CODE_IO_BAD_HTTP_STATUS
+
+            if (transient && transientErrorRetries < MAX_TRANSIENT_RETRIES) {
+                transientErrorRetries += 1
+                Log.w(TAG, "♻️ Transient error — retry $transientErrorRetries/$MAX_TRANSIENT_RETRIES")
+                try {
+                    exoPlayer?.prepare()
+                    exoPlayer?.playWhenReady = true
+                    return
+                } catch (e: Exception) {
+                    Log.e(TAG, "Retry prepare failed", e)
+                }
+            }
+
             val errorMessage = when (error.errorCode) {
-                androidx.media3.common.PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED -> 
+                androidx.media3.common.PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED ->
                     "Network connection failed. Please check your internet connection."
-                androidx.media3.common.PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_TIMEOUT -> 
+                androidx.media3.common.PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_TIMEOUT ->
                     "Connection timeout. Please try again."
                 androidx.media3.common.PlaybackException.ERROR_CODE_IO_BAD_HTTP_STATUS ->
                     "Server returned an error. Please try again later."
-                androidx.media3.common.PlaybackException.ERROR_CODE_DRM_LICENSE_ACQUISITION_FAILED -> 
+                androidx.media3.common.PlaybackException.ERROR_CODE_DRM_LICENSE_ACQUISITION_FAILED ->
                     "DRM license acquisition failed. Stream may not be authorized."
-                androidx.media3.common.PlaybackException.ERROR_CODE_DRM_PROVISIONING_FAILED -> 
+                androidx.media3.common.PlaybackException.ERROR_CODE_DRM_PROVISIONING_FAILED ->
                     "DRM provisioning failed. Device may not be supported."
                 androidx.media3.common.PlaybackException.ERROR_CODE_DRM_DEVICE_REVOKED ->
                     "DRM device revoked. Please contact support."
-                androidx.media3.common.PlaybackException.ERROR_CODE_DECODER_INIT_FAILED -> 
+                androidx.media3.common.PlaybackException.ERROR_CODE_DECODER_INIT_FAILED ->
                     "Video decoder initialization failed. Format may not be supported."
                 androidx.media3.common.PlaybackException.ERROR_CODE_PARSING_MANIFEST_MALFORMED ->
                     "Invalid stream manifest. Stream may be corrupted."
@@ -839,7 +903,7 @@ class ExoPlayerEngine(
                     "Invalid video container. Format may be corrupted."
                 else -> "Playback error: ${error.message ?: "Unknown error"}"
             }
-            
+
             onError(errorMessage)
         }
     }

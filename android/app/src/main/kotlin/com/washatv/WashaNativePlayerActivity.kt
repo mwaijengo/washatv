@@ -47,7 +47,9 @@ class WashaNativePlayerActivity : AppCompatActivity() {
 
     private lateinit var playerManager: PlayerManager
     private var exoBoundToView = false
-    private var selectedOkoaQuality: StreamQuality = StreamQuality.QUALITY_360P
+    /** AUTO by default — Okoa (data saver) can pin 360p via intent extra. */
+    private var selectedOkoaQuality: StreamQuality = StreamQuality.AUTO
+    private var fatalErrorRetries = 0
     private var preferredAudioLanguage: String = "sw"
     private lateinit var playerOverlay: WashaPlayerOverlay
     private lateinit var loadingOverlay: View
@@ -63,6 +65,7 @@ class WashaNativePlayerActivity : AppCompatActivity() {
     private var playbackReady = false
     private lateinit var playerViewRef: PlayerView
     private lateinit var playerTopTools: LinearLayout
+    private var currentPlaybackSession: com.washatv.domain.model.StreamSession? = null
 
     /** Never expose URLs / HTTP / DRM details to the user (security). */
     private fun showChannelUnavailableAndFinish() {
@@ -162,7 +165,22 @@ class WashaNativePlayerActivity : AppCompatActivity() {
         preferredAudioLanguage =
             PlayerLanguagePreferences.get(this) ?: session.preferredAudioLanguage.ifBlank { "sw" }
 
+        // Okoa bando / data saver from Flutter — only then pin 360p; otherwise AUTO (smoother).
+        val dataSaver = extras.getBoolean("dataSaver", false)
+        val qualityExtra = extras.getString("defaultQuality")?.trim().orEmpty().uppercase()
+        selectedOkoaQuality = when {
+            qualityExtra == "AUTO" -> StreamQuality.AUTO
+            qualityExtra.contains("240") -> StreamQuality.QUALITY_240P
+            qualityExtra.contains("360") -> StreamQuality.QUALITY_360P
+            qualityExtra.contains("480") -> StreamQuality.QUALITY_480P
+            qualityExtra.contains("720") -> StreamQuality.QUALITY_720P
+            qualityExtra.contains("1080") -> StreamQuality.QUALITY_1080P
+            dataSaver -> StreamQuality.QUALITY_360P
+            else -> StreamQuality.AUTO
+        }
+
         val playbackSession = session.copy(preferredAudioLanguage = preferredAudioLanguage)
+        currentPlaybackSession = playbackSession
 
         playerManager = PlayerManager(
             context = this,
@@ -193,6 +211,21 @@ class WashaNativePlayerActivity : AppCompatActivity() {
                 runOnUiThread {
                     if (isFinishing) return@runOnUiThread
                     Log.w(TAG, "Playback error: $msg")
+                    // Soft retry once for flaky mobile networks before giving up.
+                    val sessionToRetry = currentPlaybackSession
+                    if (fatalErrorRetries < 1 && sessionToRetry != null) {
+                        fatalErrorRetries += 1
+                        Log.w(TAG, "♻️ Re-init player after error (attempt $fatalErrorRetries)")
+                        try {
+                            playerManager.release()
+                            exoBoundToView = false
+                            playerManager.initialize(sessionToRetry)
+                            syncPlaybackSurface()
+                            return@runOnUiThread
+                        } catch (e: Exception) {
+                            Log.e(TAG, "Re-init failed", e)
+                        }
+                    }
                     showChannelUnavailableAndFinish()
                 }
             },
@@ -266,7 +299,7 @@ class WashaNativePlayerActivity : AppCompatActivity() {
             StreamQuality.QUALITY_720P,
             StreamQuality.QUALITY_1080P,
         )
-        val initial = qualities.indexOf(selectedOkoaQuality).let { if (it >= 0) it else 2 }
+        val initial = qualities.indexOf(selectedOkoaQuality).let { if (it >= 0) it else 0 }
         AlertDialog.Builder(this, androidx.appcompat.R.style.Theme_AppCompat_Dialog_Alert)
             .setTitle(R.string.pick_quality)
             .setSingleChoiceItems(

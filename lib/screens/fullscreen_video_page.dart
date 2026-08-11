@@ -110,7 +110,14 @@ class _FullscreenVideoPageState extends State<FullscreenVideoPage> with WidgetsB
   void didChangeMetrics() {
     super.didChangeMetrics();
     _applyImmersive();
-    if (mounted) setState(() {});
+    // Avoid empty setState storms on every metrics tick — they rebuild Video/WebView
+    // mid-playback and cause visible scratches. Only refresh when orientation flips.
+    if (!mounted) return;
+    final next = MediaQuery.orientationOf(context);
+    final wasLandscape = _hasSeenLandscapeSession;
+    if (next == Orientation.landscape && !wasLandscape) {
+      setState(() => _hasSeenLandscapeSession = true);
+    }
   }
 
   Future<void> _init() async {

@@ -118,6 +118,23 @@ class MainActivity : FlutterActivity() {
                                 "audioLanguage",
                                 args["audioLanguage"]?.toString().orEmpty().ifEmpty { "sw" },
                             )
+                            intent.putExtra(
+                                "dataSaver",
+                                args["dataSaver"] == true ||
+                                    args["dataSaver"]?.toString()?.equals("true", ignoreCase = true) == true,
+                            )
+                            intent.putExtra(
+                                "defaultQuality",
+                                args["defaultQuality"]?.toString().orEmpty(),
+                            )
+                            intent.putExtra(
+                                "fallbackStreamsJson",
+                                args["fallbackStreamsJson"]?.toString().orEmpty(),
+                            )
+                            intent.putExtra(
+                                "playerPolicyJson",
+                                args["playerPolicyJson"]?.toString().orEmpty(),
+                            )
                             nativeOpenResult = result
                             @Suppress("DEPRECATION")
                             startActivityForResult(intent, NATIVE_PLAYER_REQUEST)

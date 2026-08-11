@@ -9,6 +9,7 @@ import '../../models/remote_player_config.dart';
 import '../../services/native_android_player.dart';
 import '../../services/player_config_service.dart';
 import '../../services/player_engine.dart';
+import '../../services/storage_service.dart';
 import '../analytics/playback_analytics.dart';
 import 'playback_session.dart';
 import '../../screens/fullscreen_video_page.dart';
@@ -80,6 +81,13 @@ class PlaybackOrchestrator {
     }
 
     if (NativeAndroidPlayer.supported && PlayerEngine.usesNativeStack(engine)) {
+      bool dataSaver = true;
+      try {
+        dataSaver = await StorageService().getDataSaverEnabled();
+      } catch (_) {}
+      final defaultQuality = dataSaver
+          ? '360p'
+          : (policy.defaultQuality.trim().isEmpty ? 'AUTO' : policy.defaultQuality);
       await NativeAndroidPlayer.open(
         url: url,
         channelId: session.channelId,
@@ -95,6 +103,8 @@ class PlaybackOrchestrator {
         playbackEngine: engine,
         audioLanguage: audioLanguage,
         playerPolicy: policy,
+        dataSaver: dataSaver,
+        defaultQuality: defaultQuality,
       );
       return;
     }

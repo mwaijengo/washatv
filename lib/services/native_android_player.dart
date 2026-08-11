@@ -28,6 +28,8 @@ class NativeAndroidPlayer {
     String? playbackEngine,
     String? audioLanguage,
     RemotePlayerConfig? playerPolicy,
+    bool? dataSaver,
+    String? defaultQuality,
   }) async {
     if (!supported) return;
 
@@ -49,6 +51,8 @@ class NativeAndroidPlayer {
         'playbackEngine': playbackEngine,
       'audioLanguage': (audioLanguage == null || audioLanguage.isEmpty) ? 'sw' : audioLanguage,
       if (playerPolicy != null) 'playerPolicyJson': jsonEncode(_policyToMap(playerPolicy)),
+      if (dataSaver != null) 'dataSaver': dataSaver,
+      if (defaultQuality != null && defaultQuality.isNotEmpty) 'defaultQuality': defaultQuality,
     });
   }
 

@@ -41,6 +41,53 @@ import {
 import bcrypt from 'bcrypt';
 import { nanoid } from 'nanoid';
 
+/** Normalize admin user search so Device IDs / USR ids still match with messy paste. */
+function parseAdminUserSearch(raw: string): {
+  like: string | null;
+  exact: string | null;
+  compact: string | null;
+} {
+  const q = String(raw ?? '').trim().replace(/\s+/g, ' ');
+  if (!q) return { like: null, exact: null, compact: null };
+  const escaped = q.replace(/[%_]/g, '');
+  const compact = escaped.replace(/[\s\-_.]+/g, '').toUpperCase();
+  return {
+    like: `%${escaped}%`,
+    exact: escaped,
+    compact: compact.length >= 4 ? compact : null,
+  };
+}
+
+const ADMIN_USER_SEARCH_WHERE = `
+  ($1::text IS NULL)
+  OR name ILIKE $1
+  OR phone ILIKE $1
+  OR COALESCE(device_id, '') ILIKE $1
+  OR id ILIKE $1
+  OR ($2::text IS NOT NULL AND LOWER(COALESCE(device_id, '')) = LOWER($2))
+  OR ($2::text IS NOT NULL AND LOWER(id) = LOWER($2))
+  OR (
+    $3::text IS NOT NULL
+    AND UPPER(REGEXP_REPLACE(COALESCE(device_id, ''), '[^A-Za-z0-9]', '', 'g')) LIKE '%' || $3 || '%'
+  )
+  OR (
+    $3::text IS NOT NULL
+    AND UPPER(REGEXP_REPLACE(id, '[^A-Za-z0-9]', '', 'g')) LIKE '%' || $3 || '%'
+  )
+`;
+
+const ADMIN_USER_SEARCH_ORDER = `
+  CASE
+    WHEN $2::text IS NOT NULL AND LOWER(COALESCE(device_id, '')) = LOWER($2) THEN 0
+    WHEN $2::text IS NOT NULL AND LOWER(id) = LOWER($2) THEN 1
+    WHEN COALESCE(device_id, '') ILIKE $2 || '%' THEN 2
+    WHEN id ILIKE $2 || '%' THEN 3
+    ELSE 4
+  END,
+  created_at DESC NULLS LAST,
+  id DESC
+`;
+
 /** Repair completed SonicPesa payments that never wrote premium_until (stuck accounts). */
 async function repairStuckCompletedPayments(
   pool: DbPool,
@@ -1538,96 +1585,114 @@ export async function registerRoutes(
   });
 
   app.get<{ Querystring: { q?: string; limit?: string } }>('/api/v1/admin/users', { preHandler: adminPre }, async (req) => {
-    await normalizeAllPremiumWindows(pool);
     const q = String(req.query?.q ?? '').trim();
-    const limitRaw = Number(req.query?.limit ?? 5000);
-    const limit = Number.isFinite(limitRaw) ? Math.min(Math.max(Math.trunc(limitRaw), 1), 20000) : 5000;
-    const like = q ? `%${q.replace(/[%_]/g, '')}%` : null;
-    const r = await pool.query(
-      `SELECT id, name, phone, device_id, status, subscription, premium_until, admin_access_until, created_at
-       FROM users
-       WHERE ($1::text IS NULL)
-          OR name ILIKE $1
-          OR phone ILIKE $1
-          OR COALESCE(device_id, '') ILIKE $1
-          OR id ILIKE $1
-       ORDER BY created_at DESC NULLS LAST, id DESC
-       LIMIT $2`,
-      [like, limit],
-    );
-    const total = await pool.query(`SELECT COUNT(*)::int AS c FROM users`);
+    // Search path skips the expensive batch premium repair — listing correctness > normalize.
+    if (!q) await normalizeAllPremiumWindows(pool);
+    const limitRaw = Number(req.query?.limit ?? 300);
+    const limit = Number.isFinite(limitRaw) ? Math.min(Math.max(Math.trunc(limitRaw), 1), 5000) : 300;
+    const { like, exact, compact } = parseAdminUserSearch(q);
+    const params = [like, exact, compact, limit] as const;
+    const [r, matchedRes, totalRes] = await Promise.all([
+      pool.query(
+        `SELECT id, name, phone, device_id, status, subscription, premium_until, admin_access_until, created_at
+         FROM users
+         WHERE ${ADMIN_USER_SEARCH_WHERE}
+         ORDER BY ${ADMIN_USER_SEARCH_ORDER}
+         LIMIT $4`,
+        [...params],
+      ),
+      like
+        ? pool.query(
+            `SELECT COUNT(*)::int AS c FROM users WHERE ${ADMIN_USER_SEARCH_WHERE}`,
+            [like, exact, compact],
+          )
+        : Promise.resolve(null),
+      pool.query(`SELECT COUNT(*)::int AS c FROM users`),
+    ]);
+    const total = Number((totalRes.rows[0] as { c: number }).c ?? r.rowCount ?? 0);
+    const matched = matchedRes
+      ? Number((matchedRes.rows[0] as { c: number }).c ?? r.rowCount ?? 0)
+      : total;
     return {
       users: r.rows,
-      total: Number((total.rows[0] as { c: number }).c ?? r.rowCount ?? 0),
+      total,
+      matched,
       limit,
     };
   });
 
   /** One round-trip for admin dashboard — parallel DB reads (faster than 7 separate HTTP calls). */
-  app.get<{ Querystring: { q?: string; limit?: string } }>('/api/v1/admin/sync', { preHandler: adminPre }, async (req) => {
-    await normalizeAllPremiumWindows(pool);
-    const q = String(req.query?.q ?? '').trim();
-    const limitRaw = Number(req.query?.limit ?? 5000);
-    const limit = Number.isFinite(limitRaw) ? Math.min(Math.max(Math.trunc(limitRaw), 1), 20000) : 5000;
-    const like = q ? `%${q.replace(/[%_]/g, '')}%` : null;
-    const [
-      usersRes,
-      usersTotalRes,
-      channelsRes,
-      slidesRes,
-      txRes,
-      notiRes,
-      logsRes,
-      subscriptions,
-      stats,
-    ] = await Promise.all([
-      pool.query(
-        `SELECT id, name, phone, device_id, status, subscription, premium_until, admin_access_until, created_at
-         FROM users
-         WHERE ($1::text IS NULL)
-            OR name ILIKE $1
-            OR phone ILIKE $1
-            OR COALESCE(device_id, '') ILIKE $1
-            OR id ILIKE $1
-         ORDER BY created_at DESC NULLS LAST, id DESC
-         LIMIT $2`,
-        [like, limit],
-      ),
-      pool.query(`SELECT COUNT(*)::int AS c FROM users`),
-      pool.query(
-        `SELECT id, name, category, premium, live, status, thumbnail, stream_url, viewers, rating, drm, drm_clear_key, sort_order, updated_at
-         FROM channels ORDER BY sort_order, name, id`,
-      ),
-      pool.query(
-        `SELECT id, title, subtitle, image_url, premium, active, sort_order, updated_at
-         FROM slides ORDER BY sort_order, id`,
-      ),
-      pool.query(
-        `SELECT t.*, COALESCE(u.name, 'Viewer') AS user_name
-         FROM transactions t
-         LEFT JOIN users u ON u.id = t.user_id
-         ORDER BY t.created_at DESC NULLS LAST
-         LIMIT 1000`,
-      ),
-      pool.query(`SELECT * FROM notifications ORDER BY created_at DESC NULLS LAST LIMIT 100`),
-      pool.query(
-        `SELECT id, admin_name, action, details, created_at FROM admin_logs ORDER BY created_at DESC NULLS LAST LIMIT 200`,
-      ),
-      fetchAdminSubscriptions(pool),
-      fetchAdminStatsOverview(pool),
-    ]);
-    return {
-      users: usersRes.rows,
-      users_total: Number((usersTotalRes.rows[0] as { c: number }).c ?? usersRes.rowCount ?? 0),
-      channels: channelsRes.rows,
-      slides: slidesRes.rows,
-      transactions: txRes.rows,
-      notifications: notiRes.rows,
-      logs: logsRes.rows,
-      subscriptions,
-      stats,
-    };
-  });
+  app.get<{ Querystring: { q?: string; limit?: string; skip_users?: string } }>(
+    '/api/v1/admin/sync',
+    { preHandler: adminPre },
+    async (req) => {
+      const q = String(req.query?.q ?? '').trim();
+      const skipUsers =
+        String(req.query?.skip_users ?? '') === '1' ||
+        String(req.query?.skip_users ?? '').toLowerCase() === 'true';
+      // Skip heavy normalize while searching; still run on normal dashboard sync.
+      if (!q && !skipUsers) await normalizeAllPremiumWindows(pool);
+      const limitRaw = Number(req.query?.limit ?? 300);
+      const limit = Number.isFinite(limitRaw) ? Math.min(Math.max(Math.trunc(limitRaw), 1), 5000) : 300;
+      const { like, exact, compact } = parseAdminUserSearch(q);
+      const usersQuery = skipUsers
+        ? Promise.resolve({ rows: [] as unknown[], rowCount: 0 })
+        : pool.query(
+            `SELECT id, name, phone, device_id, status, subscription, premium_until, admin_access_until, created_at
+             FROM users
+             WHERE ${ADMIN_USER_SEARCH_WHERE}
+             ORDER BY ${ADMIN_USER_SEARCH_ORDER}
+             LIMIT $4`,
+            [like, exact, compact, limit],
+          );
+      const [
+        usersRes,
+        usersTotalRes,
+        channelsRes,
+        slidesRes,
+        txRes,
+        notiRes,
+        logsRes,
+        subscriptions,
+        stats,
+      ] = await Promise.all([
+        usersQuery,
+        pool.query(`SELECT COUNT(*)::int AS c FROM users`),
+        pool.query(
+          `SELECT id, name, category, premium, live, status, thumbnail, stream_url, viewers, rating, drm, drm_clear_key, sort_order, updated_at
+           FROM channels ORDER BY sort_order, name, id`,
+        ),
+        pool.query(
+          `SELECT id, title, subtitle, image_url, premium, active, sort_order, updated_at
+           FROM slides ORDER BY sort_order, id`,
+        ),
+        pool.query(
+          `SELECT t.*, COALESCE(u.name, 'Viewer') AS user_name
+           FROM transactions t
+           LEFT JOIN users u ON u.id = t.user_id
+           ORDER BY t.created_at DESC NULLS LAST
+           LIMIT 1000`,
+        ),
+        pool.query(`SELECT * FROM notifications ORDER BY created_at DESC NULLS LAST LIMIT 100`),
+        pool.query(
+          `SELECT id, admin_name, action, details, created_at FROM admin_logs ORDER BY created_at DESC NULLS LAST LIMIT 200`,
+        ),
+        fetchAdminSubscriptions(pool),
+        fetchAdminStatsOverview(pool),
+      ]);
+      return {
+        users: usersRes.rows,
+        users_total: Number((usersTotalRes.rows[0] as { c: number }).c ?? usersRes.rowCount ?? 0),
+        channels: channelsRes.rows,
+        slides: slidesRes.rows,
+        transactions: txRes.rows,
+        notifications: notiRes.rows,
+        logs: logsRes.rows,
+        subscriptions,
+        stats,
+      };
+    },
+  );
 
   app.get('/api/v1/admin/stats/overview', { preHandler: adminPre }, async () => {
     const stats = await fetchAdminStatsOverview(pool);

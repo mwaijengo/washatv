@@ -168,15 +168,6 @@ class PlayerManager(
     fun getCurrentSession(): StreamSession? = currentSession
 
     private fun shouldUseWebView(url: String): Boolean {
-        val u = url.trim().lowercase()
-        if (u.isEmpty()) return false
-        return Regex("""\.php(\?|$|#)""").containsMatchIn(u) ||
-            u.contains(".html") ||
-            (u.startsWith("http") &&
-                !u.contains(".mpd") &&
-                !u.contains(".m3u8") &&
-                !u.contains(".m3u") &&
-                !u.contains(".mp4") &&
-                !u.contains(".ts"))
+        return StreamUrlClassifier.shouldUseWebViewForUrl(url)
     }
 }

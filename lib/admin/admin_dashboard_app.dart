@@ -4,7 +4,7 @@ import 'dart:math';
 import 'dart:ui';
 
 import 'package:fl_chart/fl_chart.dart';
-import 'package:flutter/foundation.dart' show kIsWeb, kReleaseMode;
+import 'package:flutter/foundation.dart' show compute, kIsWeb, kReleaseMode;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:google_fonts/google_fonts.dart';
@@ -19,6 +19,10 @@ import 'admin_colors.dart';
 import 'admin_currency.dart';
 import 'admin_data.dart';
 import 'admin_models.dart';
+
+/// Off-main-isolate JSON parse for large admin sync payloads (prevents UI freezes).
+Map<String, dynamic> _decodeJsonMapIsolate(String body) =>
+    jsonDecode(body) as Map<String, dynamic>;
 
 enum _AccessUnit { hours, days, weeks, months }
 
@@ -94,13 +98,24 @@ class AdminScaffold extends StatefulWidget {
   State<AdminScaffold> createState() => _AdminScaffoldState();
 }
 
-class _AdminScaffoldState extends State<AdminScaffold> {
+class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserver {
   final _rand = Random();
   final _globalSearch = TextEditingController();
   final _userSearch = TextEditingController();
   Timer? _userSearchDebounce;
   /// Authoritative DB count (may exceed loaded list length when filtered).
   int _usersTotal = 0;
+  /// Rows matching the current server search (`q`). 0 when not searching.
+  int _usersMatched = 0;
+  bool _usersSearchLoading = false;
+  /// Prevents overlapping full syncs from racing / freezing the UI.
+  int _hydrateSeq = 0;
+  Future<bool>? _hydrateInFlight;
+  /// Browse page size — keep modest; search uses the server `q` path to find any user.
+  static const int _usersBrowseLimit = 200;
+  static const int _usersSearchLimit = 50;
+  /// Pause background polls while the OS reports the app is not visible.
+  bool _appLifecyclePaused = false;
   /// Same Railway API as the viewer app unless overridden with `--dart-define=WASHA_API_BASE_URL=...`.
   String get _apiBase => widget.auth.apiBase;
   bool get _hasAdminSession => widget.auth.hasSession;
@@ -153,6 +168,7 @@ class _AdminScaffoldState extends State<AdminScaffold> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _users = generateUsers(_rand);
     _channels = generateChannels(_rand);
     /// Empty until bootstrap/admin APIs load — avoids fake carousel rows overwriting real DB state in the UI.
@@ -164,15 +180,35 @@ class _AdminScaffoldState extends State<AdminScaffold> {
     _notifications = staticNotifications();
     _logs = generateLogs(_rand);
     unawaited(_bootstrapAdminData());
-    _statsRefreshTimer = Timer.periodic(const Duration(seconds: 10), (_) {
-      if (!mounted || !_hasAdminSession) return;
+    // Stats only matter on dashboard — polling every page rebuilds Users/Channels and causes ANRs.
+    _statsRefreshTimer = Timer.periodic(const Duration(seconds: 20), (_) {
+      if (!mounted || !_hasAdminSession || _appLifecyclePaused) return;
+      if (_page != AdminPageId.dashboard && _page != AdminPageId.analytics) return;
       unawaited(_refreshDashboardStats());
     });
-    _adminRefreshTimer = Timer.periodic(const Duration(seconds: 30), (_) {
-      if (!mounted || !_hasAdminSession) return;
+    // Full sync is expensive; keep it rare and page-aware.
+    _adminRefreshTimer = Timer.periodic(const Duration(seconds: 60), (_) {
+      if (!mounted || !_hasAdminSession || _appLifecyclePaused) return;
       if (_page == AdminPageId.pricing) return;
+      // Never interrupt an active user search with a full dashboard sync.
+      if (_normalizedUserSearchQuery().isNotEmpty) return;
+      if (_page == AdminPageId.users) {
+        unawaited(_searchUsersFromBackend());
+        return;
+      }
+      if (_page == AdminPageId.dashboard || _page == AdminPageId.analytics) {
+        unawaited(_refreshDashboardStats());
+        return;
+      }
       unawaited(_hydrateFromBackend());
     });
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    _appLifecyclePaused = state == AppLifecycleState.paused ||
+        state == AppLifecycleState.detached ||
+        state == AppLifecycleState.hidden;
   }
 
   /// Load settings (API key), then server bootstrap. Local pricing prefs apply **only** if bootstrap fails (offline).
@@ -222,9 +258,9 @@ class _AdminScaffoldState extends State<AdminScaffold> {
   String _dashboardSubtitle() {
     if (!_hasAdminSession) return 'Sign in to load live data';
     if (_statsRefreshFailed && _dashboardStats == null) return 'Could not load stats · pull down to retry';
-    if (_statsRefreshFailed) return 'Update failed · last ${_formatRelative(_statsFetchedAt)} · auto 10s';
+    if (_statsRefreshFailed) return 'Update failed · last ${_formatRelative(_statsFetchedAt)}';
     if (_dashboardStats != null) {
-      return 'Live data · updated ${_formatRelative(_statsFetchedAt)} · auto 10s';
+      return 'Live data · updated ${_formatRelative(_statsFetchedAt)}';
     }
     return 'Loading live stats…';
   }
@@ -244,19 +280,37 @@ class _AdminScaffoldState extends State<AdminScaffold> {
         if (notify && mounted) setState(() => _statsRefreshFailed = true);
         return false;
       }
-      final map = jsonDecode(res.body) as Map<String, dynamic>;
+      final map = await _decodeJsonMapSafe(res.body);
+      if (map == null) {
+        if (notify && mounted) setState(() => _statsRefreshFailed = true);
+        return false;
+      }
       final stats = _parseStatsJson((map['stats'] as Map?)?.cast<String, dynamic>());
       if (stats == null) {
         if (notify && mounted) setState(() => _statsRefreshFailed = true);
         return false;
       }
       if (!mounted) return false;
+      final unchanged = _dashboardStats != null &&
+          _dashboardStats!.totalUsers == stats.totalUsers &&
+          _dashboardStats!.premiumUsers == stats.premiumUsers &&
+          _dashboardStats!.freeUsers == stats.freeUsers &&
+          _dashboardStats!.activeChannels == stats.activeChannels &&
+          _dashboardStats!.revenue == stats.revenue;
       if (notify) {
-        setState(() {
-          _dashboardStats = stats;
+        // Avoid rebuilding heavy pages when numbers did not change.
+        if (unchanged && !_statsRefreshFailed) {
           _statsFetchedAt = DateTime.now();
-          _statsRefreshFailed = false;
-        });
+          if (_page == AdminPageId.dashboard || _page == AdminPageId.analytics) {
+            setState(() {});
+          }
+        } else {
+          setState(() {
+            _dashboardStats = stats;
+            _statsFetchedAt = DateTime.now();
+            _statsRefreshFailed = false;
+          });
+        }
       } else {
         _dashboardStats = stats;
         _statsFetchedAt = DateTime.now();
@@ -266,6 +320,22 @@ class _AdminScaffoldState extends State<AdminScaffold> {
     } catch (_) {
       if (notify && mounted) setState(() => _statsRefreshFailed = true);
       return false;
+    }
+  }
+
+  Future<Map<String, dynamic>?> _decodeJsonMapSafe(String body) async {
+    try {
+      if (body.length < 12000) {
+        return jsonDecode(body) as Map<String, dynamic>;
+      }
+      // Large sync payloads — keep decode off the UI isolate to avoid ANR.
+      return await compute(_decodeJsonMapIsolate, body);
+    } catch (_) {
+      try {
+        return jsonDecode(body) as Map<String, dynamic>;
+      } catch (_) {
+        return null;
+      }
     }
   }
 
@@ -380,19 +450,41 @@ class _AdminScaffoldState extends State<AdminScaffold> {
   /// Same rule as [PublicApiService._publicGetHeaders]: on web, extra headers can force CORS preflight on GET.
   Map<String, String> get _publicBootstrapHeaders => kIsWeb ? <String, String>{} : const {'Cache-Control': 'no-cache', 'Pragma': 'no-cache'};
 
-  Future<bool> _hydrateFromBackend() async {
+  String _normalizedUserSearchQuery() {
+    // Collapse whitespace; keep dashes (Device IDs use them). Uppercase helps WTV-… matches.
+    return _userSearch.text.trim().replaceAll(RegExp(r'\s+'), ' ');
+  }
+
+  Future<bool> _hydrateFromBackend({bool forceUsersReload = false}) async {
+    final existing = _hydrateInFlight;
+    if (existing != null && !forceUsersReload) return existing;
+
+    final seq = ++_hydrateSeq;
+    final future = _hydrateFromBackendImpl(seq);
+    _hydrateInFlight = future;
     try {
+      return await future;
+    } finally {
+      if (identical(_hydrateInFlight, future)) _hydrateInFlight = null;
+    }
+  }
+
+  Future<bool> _hydrateFromBackendImpl(int seq) async {
+    try {
+      final searchQ = _normalizedUserSearchQuery();
+      final browsingUsers = searchQ.isEmpty;
       final bootstrapUri = Uri.parse('$_apiBase/api/v1/public/bootstrap').replace(
         queryParameters: const {'since': '0'},
       );
       final bootstrapFuture = http.get(bootstrapUri, headers: _publicBootstrapHeaders).timeout(const Duration(seconds: 15));
+      // While searching, keep sync payload small (no user dump) — users come from /admin/users.
       final adminFuture = _hasAdminSession
           ? http
               .get(
                 Uri.parse('$_apiBase/api/v1/admin/sync').replace(
                   queryParameters: {
-                    'limit': '5000',
-                    if (_userSearch.text.trim().isNotEmpty) 'q': _userSearch.text.trim(),
+                    'limit': browsingUsers ? '$_usersBrowseLimit' : '1',
+                    if (!browsingUsers) 'skip_users': '1',
                   },
                 ),
                 headers: _adminHeaders(),
@@ -403,17 +495,19 @@ class _AdminScaffoldState extends State<AdminScaffold> {
       late final http.Response bootstrapRes;
       http.Response? adminRes;
       if (adminFuture != null) {
-        final pair = await Future.wait([bootstrapFuture, adminFuture]);
-        bootstrapRes = pair[0] as http.Response;
-        adminRes = pair[1] as http.Response;
+        final pair = await Future.wait<http.Response>([bootstrapFuture, adminFuture]);
+        bootstrapRes = pair[0];
+        adminRes = pair[1];
       } else {
         bootstrapRes = await bootstrapFuture;
       }
 
+      if (seq != _hydrateSeq || !mounted) return false;
+
       final bootstrapOk = bootstrapRes.statusCode >= 200 && bootstrapRes.statusCode < 300;
       Map<String, dynamic>? bootstrapMap;
       if (bootstrapOk) {
-        bootstrapMap = jsonDecode(bootstrapRes.body) as Map<String, dynamic>;
+        bootstrapMap = await _decodeJsonMapSafe(bootstrapRes.body);
       }
 
       Map<String, dynamic>? adminSyncMap;
@@ -423,13 +517,13 @@ class _AdminScaffoldState extends State<AdminScaffold> {
           return false;
         }
         if (adminRes.statusCode >= 200 && adminRes.statusCode < 300) {
-          adminSyncMap = jsonDecode(adminRes.body) as Map<String, dynamic>;
+          adminSyncMap = await _decodeJsonMapSafe(adminRes.body);
         } else if (_hasAdminSession) {
           adminSyncMap = await _fetchLegacyAdminBundle();
         }
       }
 
-      if (!mounted) return false;
+      if (seq != _hydrateSeq || !mounted) return false;
       setState(() {
         if (bootstrapMap != null) {
           final map = bootstrapMap;
@@ -501,7 +595,8 @@ class _AdminScaffoldState extends State<AdminScaffold> {
           _applyForceUpdateSettingsFromMap(settings);
         }
         if (adminSyncMap != null) {
-          _applyAdminSyncPayload(adminSyncMap);
+          // Preserve in-progress search results: only replace users when browsing.
+          _applyAdminSyncPayload(adminSyncMap, applyUsers: browsingUsers);
         }
       });
       if (mounted) {
@@ -512,9 +607,76 @@ class _AdminScaffoldState extends State<AdminScaffold> {
         await _refreshDashboardStats(notify: false);
         if (mounted) setState(() {});
       }
+      // Re-apply active search after a browse sync so the list stays accurate.
+      if (_hasAdminSession && !browsingUsers && mounted && seq == _hydrateSeq) {
+        unawaited(_searchUsersFromBackend());
+      }
       return bootstrapOk || adminSyncMap != null || _dashboardStats != null;
     } catch (_) {
       return false;
+    }
+  }
+
+  /// Lightweight users-only fetch — used for search so we never rebuild the whole dashboard.
+  Future<void> _searchUsersFromBackend() async {
+    if (!_hasAdminSession) return;
+    final q = _normalizedUserSearchQuery();
+    if (!mounted) return;
+    setState(() => _usersSearchLoading = true);
+    try {
+      final res = await http
+          .get(
+            Uri.parse('$_apiBase/api/v1/admin/users').replace(
+              queryParameters: {
+                'limit': q.isEmpty ? '$_usersBrowseLimit' : '$_usersSearchLimit',
+                if (q.isNotEmpty) 'q': q,
+              },
+            ),
+            headers: _adminHeaders(),
+          )
+          .timeout(const Duration(seconds: 20));
+      if (!mounted) return;
+      if (res.statusCode == 401 || res.statusCode == 403) {
+        await _handleAdminUnauthorized();
+        return;
+      }
+      // Ignore stale responses if the query changed while in flight.
+      if (_normalizedUserSearchQuery() != q) return;
+      if (res.statusCode < 200 || res.statusCode >= 300) {
+        setState(() => _usersSearchLoading = false);
+        return;
+      }
+      final map = await _decodeJsonMapSafe(res.body);
+      if (map == null) {
+        if (mounted) setState(() => _usersSearchLoading = false);
+        return;
+      }
+      final rawUsers = map['users'];
+      final totalRaw = map['total'] ?? map['users_total'];
+      final matchedRaw = map['matched'] ?? map['total'];
+      setState(() {
+        if (rawUsers is List) {
+          _users = _parseUsersJson(rawUsers);
+          _sortAdminLists();
+        }
+        if (totalRaw is num) {
+          _usersTotal = totalRaw.toInt();
+        } else if (totalRaw is String) {
+          _usersTotal = int.tryParse(totalRaw) ?? _users.length;
+        }
+        if (q.isEmpty) {
+          _usersMatched = 0;
+        } else if (matchedRaw is num) {
+          _usersMatched = matchedRaw.toInt();
+        } else if (matchedRaw is String) {
+          _usersMatched = int.tryParse(matchedRaw) ?? _users.length;
+        } else {
+          _usersMatched = _users.length;
+        }
+        _usersSearchLoading = false;
+      });
+    } catch (_) {
+      if (mounted) setState(() => _usersSearchLoading = false);
     }
   }
 
@@ -639,11 +801,12 @@ class _AdminScaffoldState extends State<AdminScaffold> {
   List<AdminUser> _parseUsersJson(List<dynamic> raw) {
     return raw.whereType<Map>().map((rawItem) {
       final j = rawItem.cast<String, dynamic>();
+      final deviceRaw = _s(j['device_id']);
       return AdminUser(
         id: _s(j['id']),
         name: _s(j['name'], fallback: 'Viewer'),
         phone: _s(j['phone'], fallback: 'N/A'),
-        deviceId: _s(j['device_id']),
+        deviceId: deviceRaw.isEmpty ? null : deviceRaw,
         status: _s(j['status'], fallback: 'active'),
         subscription: _s(j['subscription'], fallback: 'free'),
         createdAt: _dt(j['created_at']) ?? DateTime.fromMillisecondsSinceEpoch(0),
@@ -685,8 +848,8 @@ class _AdminScaffoldState extends State<AdminScaffold> {
         http.get(
           Uri.parse('$_apiBase/api/v1/admin/users').replace(
             queryParameters: {
-              'limit': '5000',
-              if (_userSearch.text.trim().isNotEmpty) 'q': _userSearch.text.trim(),
+              'limit': '$_usersBrowseLimit',
+              if (_normalizedUserSearchQuery().isNotEmpty) 'q': _normalizedUserSearchQuery(),
             },
           ),
           headers: _adminHeaders(),
@@ -738,16 +901,28 @@ class _AdminScaffoldState extends State<AdminScaffold> {
     }
   }
 
-  void _applyAdminSyncPayload(Map<String, dynamic> adminMap) {
-    final rawUsers = adminMap['users'];
-    if (rawUsers is List) _users = _parseUsersJson(rawUsers);
-    final totalRaw = adminMap['users_total'] ?? adminMap['total'];
-    if (totalRaw is num) {
-      _usersTotal = totalRaw.toInt();
-    } else if (totalRaw is String) {
-      _usersTotal = int.tryParse(totalRaw) ?? _users.length;
+  void _applyAdminSyncPayload(Map<String, dynamic> adminMap, {bool applyUsers = true}) {
+    if (applyUsers) {
+      final rawUsers = adminMap['users'];
+      if (rawUsers is List) _users = _parseUsersJson(rawUsers);
+      final totalRaw = adminMap['users_total'] ?? adminMap['total'];
+      if (totalRaw is num) {
+        _usersTotal = totalRaw.toInt();
+      } else if (totalRaw is String) {
+        _usersTotal = int.tryParse(totalRaw) ?? _users.length;
+      } else if (rawUsers is List) {
+        _usersTotal = _users.length;
+      }
+      _usersMatched = 0;
     } else {
-      _usersTotal = _users.length;
+      // Still refresh authoritative total when present so header stays honest.
+      final totalRaw = adminMap['users_total'] ?? adminMap['total'];
+      if (totalRaw is num) {
+        _usersTotal = totalRaw.toInt();
+      } else if (totalRaw is String) {
+        final parsed = int.tryParse(totalRaw);
+        if (parsed != null) _usersTotal = parsed;
+      }
     }
 
     final rawChannels = adminMap['channels'];
@@ -758,7 +933,7 @@ class _AdminScaffoldState extends State<AdminScaffold> {
 
     final rawTx = adminMap['transactions'];
     if (rawTx is List) {
-      _payments = rawTx.whereType<Map>().map((rawItem) {
+      _payments = rawTx.take(100).whereType<Map>().map((rawItem) {
         final j = rawItem.cast<String, dynamic>();
         return AdminPayment(
           id: _s(j['id']),
@@ -828,6 +1003,14 @@ class _AdminScaffoldState extends State<AdminScaffold> {
   }
 
   Future<void> _onPullRefresh() async {
+    final q = _normalizedUserSearchQuery();
+    if (q.isNotEmpty && _page == AdminPageId.users) {
+      await Future.wait([
+        _searchUsersFromBackend(),
+        _refreshDashboardStats(),
+      ]);
+      return;
+    }
     await Future.wait([
       _hydrateFromBackend(),
       _refreshDashboardStats(),
@@ -962,6 +1145,7 @@ class _AdminScaffoldState extends State<AdminScaffold> {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _adminRefreshTimer?.cancel();
     _statsRefreshTimer?.cancel();
     _settingsSiteName.dispose();
@@ -986,6 +1170,19 @@ class _AdminScaffoldState extends State<AdminScaffold> {
       _page = p;
       if (_isMobile) _sidebarOpen = false;
     });
+  }
+
+  /// Header "Search..." finds users by Device ID / name / phone / USR id.
+  void _onGlobalSearchSubmitted(String raw) {
+    final q = raw.trim();
+    if (q.isEmpty) return;
+    _userSearch.text = q;
+    _globalSearch.clear();
+    setState(() {
+      _page = AdminPageId.users;
+      if (_isMobile) _sidebarOpen = false;
+    });
+    if (_hasAdminSession) unawaited(_searchUsersFromBackend());
   }
 
   void _toggleSidebar() => setState(() => _sidebarOpen = !_sidebarOpen);
@@ -1040,11 +1237,18 @@ class _AdminScaffoldState extends State<AdminScaffold> {
                         color: const Color(0xFF818CF8),
                         backgroundColor: AdminColors.bgSecondary,
                         onRefresh: _onPullRefresh,
-                        child: SingleChildScrollView(
-                          physics: const AlwaysScrollableScrollPhysics(),
-                          padding: EdgeInsets.fromLTRB(16, 16, 16, mobile ? 88 : 16),
-                          child: _buildPage(),
-                        ),
+                        // Users + Channels own their scroll views (virtualized). Nested
+                        // shrinkWrap grids/lists of many tiles caused Android ANRs.
+                        child: (_page == AdminPageId.users || _page == AdminPageId.channels)
+                            ? Padding(
+                                padding: EdgeInsets.fromLTRB(16, 16, 16, mobile ? 88 : 16),
+                                child: _page == AdminPageId.users ? _pageUsers() : _pageChannels(),
+                              )
+                            : SingleChildScrollView(
+                                physics: const AlwaysScrollableScrollPhysics(),
+                                padding: EdgeInsets.fromLTRB(16, 16, 16, mobile ? 88 : 16),
+                                child: _buildPage(),
+                              ),
                       ),
                     ),
                   ],
@@ -1139,8 +1343,10 @@ class _AdminScaffoldState extends State<AdminScaffold> {
               child: TextField(
                 controller: _globalSearch,
                 style: const TextStyle(fontSize: 13),
+                textInputAction: TextInputAction.search,
+                onSubmitted: _onGlobalSearchSubmitted,
                 decoration: InputDecoration(
-                  hintText: 'Search...',
+                  hintText: 'Tafuta user (Device ID / jina / simu)...',
                   hintStyle: const TextStyle(color: Color(0xFF6B7280), fontSize: 13),
                   prefixIcon: const Icon(Icons.search, size: 18, color: Color(0xFF6B7280)),
                   filled: true,
@@ -1871,24 +2077,33 @@ class _AdminScaffoldState extends State<AdminScaffold> {
     _userSearchDebounce?.cancel();
     _userSearchDebounce = Timer(const Duration(milliseconds: 350), () {
       if (!mounted || !_hasAdminSession) return;
-      unawaited(_hydrateFromBackend());
+      unawaited(_searchUsersFromBackend());
     });
   }
 
   Widget _pageUsers() {
-    final q = _userSearch.text.toLowerCase();
-    // Server already filters when q is set; keep a light local filter as fallback.
-    final filtered = _users.where((u) {
-      if (q.isEmpty) return true;
-      final blob = '${u.name} ${u.phone} ${u.displayDeviceId} ${u.status} ${u.subscription} ${u.id}'.toLowerCase();
-      return blob.contains(q);
-    }).toList()
-      ..sort((a, b) {
-        final c = b.createdAt.compareTo(a.createdAt);
-        if (c != 0) return c;
-        return b.id.compareTo(a.id);
-      });
+    final q = _normalizedUserSearchQuery().toLowerCase();
+    // Prefer server-filtered rows when searching; light local filter is only a safety net.
+    final filtered = q.isEmpty
+        ? List<AdminUser>.from(_users)
+        : _users.where((u) {
+            final blob =
+                '${u.name} ${u.phone} ${u.deviceId ?? ''} ${u.displayDeviceId} ${u.status} ${u.subscription} ${u.id}'
+                    .toLowerCase();
+            return blob.contains(q);
+          }).toList();
+    filtered.sort((a, b) {
+      final c = b.createdAt.compareTo(a.createdAt);
+      if (c != 0) return c;
+      return b.id.compareTo(a.id);
+    });
     final totalLabel = _usersTotal > 0 ? _usersTotal : _users.length;
+    final subtitle = q.isEmpty
+        ? '$totalLabel total · Device ID = kitambulisho cha Wasifu kwenye app'
+        : _usersSearchLoading
+            ? 'Inatafuta…'
+            : '${filtered.isNotEmpty ? (_usersMatched > 0 ? _usersMatched : filtered.length) : 0} matokeo · $totalLabel jumla';
+
     return LayoutBuilder(
       builder: (context, constraints) {
         final wideHeader = constraints.maxWidth >= 560;
@@ -1905,7 +2120,7 @@ class _AdminScaffoldState extends State<AdminScaffold> {
                       children: [
                         const Text('Users', style: TextStyle(fontSize: 24, fontWeight: FontWeight.w800)),
                         Text(
-                          '$totalLabel total · Device ID = kitambulisho cha Wasifu kwenye app',
+                          subtitle,
                           style: const TextStyle(fontSize: 12, color: AdminColors.textSecondary, height: 1.35),
                         ),
                       ],
@@ -1917,11 +2132,31 @@ class _AdminScaffoldState extends State<AdminScaffold> {
                       controller: _userSearch,
                       onChanged: _onUserSearchChanged,
                       style: const TextStyle(fontSize: 12),
+                      textInputAction: TextInputAction.search,
                       decoration: InputDecoration(
-                        hintText: 'Tafuta jina, simu, device ID...',
+                        hintText: 'Jina, simu, Device ID (WTV-…), USR-…',
                         filled: true,
                         fillColor: AdminColors.bgPrimary,
                         contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                        suffixIcon: _usersSearchLoading
+                            ? const Padding(
+                                padding: EdgeInsets.all(12),
+                                child: SizedBox(
+                                  width: 16,
+                                  height: 16,
+                                  child: CircularProgressIndicator(strokeWidth: 2),
+                                ),
+                              )
+                            : (q.isNotEmpty
+                                ? IconButton(
+                                    tooltip: 'Futa',
+                                    icon: const Icon(Icons.clear_rounded, size: 18),
+                                    onPressed: () {
+                                      _userSearch.clear();
+                                      _onUserSearchChanged('');
+                                    },
+                                  )
+                                : null),
                         enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: const BorderSide(color: Color(0x1AFFFFFF))),
                       ),
                     ),
@@ -1931,7 +2166,7 @@ class _AdminScaffoldState extends State<AdminScaffold> {
             else ...[
               const Text('Users', style: TextStyle(fontSize: 24, fontWeight: FontWeight.w800)),
               Text(
-                '$totalLabel total · Device ID = Wasifu',
+                subtitle,
                 style: const TextStyle(fontSize: 12, color: AdminColors.textSecondary, height: 1.35),
               ),
               const SizedBox(height: 10),
@@ -1939,22 +2174,73 @@ class _AdminScaffoldState extends State<AdminScaffold> {
                 controller: _userSearch,
                 onChanged: _onUserSearchChanged,
                 style: const TextStyle(fontSize: 12),
+                textInputAction: TextInputAction.search,
                 decoration: InputDecoration(
-                  hintText: 'Tafuta jina, simu, device ID...',
+                  hintText: 'Jina, simu, Device ID (WTV-…), USR-…',
                   filled: true,
                   fillColor: AdminColors.bgPrimary,
                   contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
+                  suffixIcon: _usersSearchLoading
+                      ? const Padding(
+                          padding: EdgeInsets.all(12),
+                          child: SizedBox(
+                            width: 16,
+                            height: 16,
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          ),
+                        )
+                      : (q.isNotEmpty
+                          ? IconButton(
+                              tooltip: 'Futa',
+                              icon: const Icon(Icons.clear_rounded, size: 18),
+                              onPressed: () {
+                                _userSearch.clear();
+                                _onUserSearchChanged('');
+                              },
+                            )
+                          : null),
                   enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: const BorderSide(color: Color(0x1AFFFFFF))),
                 ),
               ),
             ],
             const SizedBox(height: 14),
-            ListView.separated(
-              shrinkWrap: true,
-              physics: const NeverScrollableScrollPhysics(),
-              itemCount: filtered.length,
-              separatorBuilder: (_, __) => const SizedBox(height: 10),
-              itemBuilder: (context, i) => _userCard(filtered[i]),
+            Expanded(
+              child: filtered.isEmpty
+                  ? ListView(
+                      physics: const AlwaysScrollableScrollPhysics(),
+                      children: [
+                        const SizedBox(height: 48),
+                        Icon(
+                          q.isEmpty ? Icons.groups_outlined : Icons.search_off_rounded,
+                          size: 40,
+                          color: AdminColors.textSecondary,
+                        ),
+                        const SizedBox(height: 12),
+                        Text(
+                          _usersSearchLoading
+                              ? 'Inatafuta mtumiaji…'
+                              : q.isEmpty
+                                  ? 'Hakuna watumiaji bado'
+                                  : 'Hakuna matokeo ya "$q"',
+                          textAlign: TextAlign.center,
+                          style: const TextStyle(fontSize: 14, color: AdminColors.textSecondary),
+                        ),
+                        if (q.isNotEmpty && !_usersSearchLoading) ...[
+                          const SizedBox(height: 8),
+                          const Text(
+                            'Tumia Device ID kamili kutoka Wasifu (WTV-XXXX-XXXXXXXX)\nau ID ya ndani (USR-…).',
+                            textAlign: TextAlign.center,
+                            style: TextStyle(fontSize: 12, color: AdminColors.textSecondary, height: 1.4),
+                          ),
+                        ],
+                      ],
+                    )
+                  : ListView.separated(
+                      physics: const AlwaysScrollableScrollPhysics(),
+                      itemCount: filtered.length,
+                      separatorBuilder: (_, __) => const SizedBox(height: 10),
+                      itemBuilder: (context, i) => _userCard(filtered[i]),
+                    ),
             ),
           ],
         );
@@ -1964,7 +2250,8 @@ class _AdminScaffoldState extends State<AdminScaffold> {
 
   Widget _userCard(AdminUser u) {
     final id = u.displayDeviceId;
-    return Container(
+    return RepaintBoundary(
+      child: Container(
       decoration: BoxDecoration(
         borderRadius: BorderRadius.circular(18),
         gradient: const LinearGradient(
@@ -2130,6 +2417,7 @@ class _AdminScaffoldState extends State<AdminScaffold> {
           ],
         ),
       ),
+    ),
     );
   }
 
@@ -2587,7 +2875,7 @@ class _AdminScaffoldState extends State<AdminScaffold> {
   // --- Channels ---
   Widget _pageChannels() {
     return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         Row(
           children: [
@@ -2604,119 +2892,143 @@ class _AdminScaffoldState extends State<AdminScaffold> {
           ],
         ),
         const SizedBox(height: 12),
-        LayoutBuilder(
-          builder: (context, c) {
-            final cross = c.maxWidth > 900 ? 4 : (c.maxWidth > 520 ? 3 : 2);
-            return GridView.builder(
-              shrinkWrap: true,
-              physics: const NeverScrollableScrollPhysics(),
-              gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(crossAxisCount: cross, mainAxisSpacing: 12, crossAxisSpacing: 12, childAspectRatio: 0.82),
-              itemCount: _channels.length,
-              itemBuilder: (context, i) {
-                final ch = _channels[i];
-                return Container(
-                  decoration: BoxDecoration(
-                    color: AdminColors.bgTertiary,
-                    borderRadius: BorderRadius.circular(16),
-                    border: Border.all(color: const Color(0x0DFFFFFF)),
-                  ),
-                  clipBehavior: Clip.antiAlias,
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.stretch,
-                    children: [
-                      Expanded(
-                        child: Stack(
-                          fit: StackFit.expand,
-                          children: [
-                            Image.network(
-                              _safeImageUrl(ch.thumbnail),
-                              fit: BoxFit.cover,
-                              errorBuilder: (_, __, ___) => _imageFallback(Icons.tv, 'Hakuna picha'),
-                            ),
-                            if (ch.status != 'active')
-                              Positioned.fill(
-                                child: Container(
-                                  color: const Color(0x66000000),
-                                  alignment: Alignment.center,
-                                  child: Container(
-                                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-                                    decoration: BoxDecoration(color: const Color(0xE61F2937), borderRadius: BorderRadius.circular(8)),
-                                    child: const Text('INACTIVE', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800, letterSpacing: 0.8, color: Colors.white)),
+        Expanded(
+          child: LayoutBuilder(
+            builder: (context, c) {
+              final cross = c.maxWidth > 900 ? 4 : (c.maxWidth > 520 ? 3 : 2);
+              final tileW = (c.maxWidth - (cross - 1) * 12) / cross;
+              final cacheW = (tileW * MediaQuery.devicePixelRatioOf(context)).round().clamp(64, 512);
+              if (_channels.isEmpty) {
+                return ListView(
+                  physics: const AlwaysScrollableScrollPhysics(),
+                  children: const [
+                    SizedBox(height: 48),
+                    Icon(Icons.tv_off_outlined, size: 40, color: AdminColors.textSecondary),
+                    SizedBox(height: 12),
+                    Text('Hakuna channels', textAlign: TextAlign.center, style: TextStyle(fontSize: 14, color: AdminColors.textSecondary)),
+                  ],
+                );
+              }
+              return GridView.builder(
+                physics: const AlwaysScrollableScrollPhysics(),
+                gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+                  crossAxisCount: cross,
+                  mainAxisSpacing: 12,
+                  crossAxisSpacing: 12,
+                  childAspectRatio: 0.82,
+                ),
+                itemCount: _channels.length,
+                itemBuilder: (context, i) {
+                  final ch = _channels[i];
+                  return RepaintBoundary(
+                    child: Container(
+                      decoration: BoxDecoration(
+                        color: AdminColors.bgTertiary,
+                        borderRadius: BorderRadius.circular(16),
+                        border: Border.all(color: const Color(0x0DFFFFFF)),
+                      ),
+                      clipBehavior: Clip.antiAlias,
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: [
+                          Expanded(
+                            child: Stack(
+                              fit: StackFit.expand,
+                              children: [
+                                Image.network(
+                                  _safeImageUrl(ch.thumbnail),
+                                  fit: BoxFit.cover,
+                                  cacheWidth: cacheW,
+                                  filterQuality: FilterQuality.low,
+                                  gaplessPlayback: true,
+                                  errorBuilder: (_, __, ___) => _imageFallback(Icons.tv, 'Hakuna picha'),
+                                ),
+                                if (ch.status != 'active')
+                                  Positioned.fill(
+                                    child: Container(
+                                      color: const Color(0x66000000),
+                                      alignment: Alignment.center,
+                                      child: Container(
+                                        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                                        decoration: BoxDecoration(color: const Color(0xE61F2937), borderRadius: BorderRadius.circular(8)),
+                                        child: const Text('INACTIVE', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800, letterSpacing: 0.8, color: Colors.white)),
+                                      ),
+                                    ),
+                                  ),
+                                Positioned(
+                                  top: 8,
+                                  right: 8,
+                                  child: Row(
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      if (ch.premium) _tinyBadge('Premium', const Color(0xFFF59E0B), darkText: true),
+                                      if (ch.live) ...[const SizedBox(width: 4), _tinyBadge('LIVE', const Color(0xFFEF4444))],
+                                    ],
                                   ),
                                 ),
-                              ),
-                            Positioned(
-                              top: 8,
-                              right: 8,
-                              child: Row(
-                                mainAxisSize: MainAxisSize.min,
-                                children: [
-                                  if (ch.premium) _tinyBadge('Premium', const Color(0xFFF59E0B), darkText: true),
-                                  if (ch.live) ...[const SizedBox(width: 4), _tinyBadge('LIVE', const Color(0xFFEF4444))],
-                                ],
-                              ),
-                            ),
-                            if (ch.effectiveDrm != 'none')
-                              Positioned(
-                                top: 8,
-                                left: 8,
-                                child: _tinyBadge(_channelDrmShort(ch.effectiveDrm), const Color(0xFF4F46E5)),
-                              ),
-                            Positioned(
-                              left: 0,
-                              right: 0,
-                              bottom: 0,
-                              child: Container(
-                                padding: const EdgeInsets.all(8),
-                                decoration: const BoxDecoration(
-                                  gradient: LinearGradient(begin: Alignment.topCenter, end: Alignment.bottomCenter, colors: [Color(0x00000000), Color(0xCC000000)]),
-                                ),
-                                child: Column(
-                                  crossAxisAlignment: CrossAxisAlignment.start,
-                                  children: [
-                                    Text(ch.name, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 13, color: Colors.white)),
-                                    Text(
-                                      ch.streamUrl.trim().isNotEmpty ? '${ch.category} · Stream' : ch.category,
-                                      style: const TextStyle(fontSize: 9, color: Color(0xFFD1D5DB)),
+                                if (ch.effectiveDrm != 'none')
+                                  Positioned(
+                                    top: 8,
+                                    left: 8,
+                                    child: _tinyBadge(_channelDrmShort(ch.effectiveDrm), const Color(0xFF4F46E5)),
+                                  ),
+                                Positioned(
+                                  left: 0,
+                                  right: 0,
+                                  bottom: 0,
+                                  child: Container(
+                                    padding: const EdgeInsets.all(8),
+                                    decoration: const BoxDecoration(
+                                      gradient: LinearGradient(begin: Alignment.topCenter, end: Alignment.bottomCenter, colors: [Color(0x00000000), Color(0xCC000000)]),
                                     ),
-                                  ],
+                                    child: Column(
+                                      crossAxisAlignment: CrossAxisAlignment.start,
+                                      children: [
+                                        Text(ch.name, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 13, color: Colors.white)),
+                                        Text(
+                                          ch.streamUrl.trim().isNotEmpty ? '${ch.category} · Stream' : ch.category,
+                                          style: const TextStyle(fontSize: 9, color: Color(0xFFD1D5DB)),
+                                        ),
+                                      ],
+                                    ),
+                                  ),
                                 ),
-                              ),
+                              ],
                             ),
-                          ],
-                        ),
+                          ),
+                          Padding(
+                            padding: const EdgeInsets.fromLTRB(6, 2, 4, 6),
+                            child: Row(
+                              children: [
+                                Text('⭐${ch.rating}', style: const TextStyle(fontSize: 9, color: AdminColors.textSecondary)),
+                                const Spacer(),
+                                IconButton(
+                                  onPressed: () => _showChannelEditor(index: i),
+                                  icon: const Icon(Icons.edit_outlined, size: 18, color: Color(0xFF818CF8)),
+                                  tooltip: 'Edit channel',
+                                  padding: EdgeInsets.zero,
+                                  constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
+                                  visualDensity: VisualDensity.compact,
+                                ),
+                                IconButton(
+                                  onPressed: () => _confirmDeleteChannel(ch.id),
+                                  icon: const Icon(Icons.delete_outline_rounded, size: 18, color: Color(0xFFF87171)),
+                                  tooltip: 'Delete channel',
+                                  padding: EdgeInsets.zero,
+                                  constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
+                                  visualDensity: VisualDensity.compact,
+                                ),
+                              ],
+                            ),
+                          ),
+                        ],
                       ),
-                      Padding(
-                        padding: const EdgeInsets.fromLTRB(6, 2, 4, 6),
-                        child: Row(
-                          children: [
-                            Text('⭐${ch.rating}', style: const TextStyle(fontSize: 9, color: AdminColors.textSecondary)),
-                            const Spacer(),
-                            IconButton(
-                              onPressed: () => _showChannelEditor(index: i),
-                              icon: const Icon(Icons.edit_outlined, size: 18, color: Color(0xFF818CF8)),
-                              tooltip: 'Edit channel',
-                              padding: EdgeInsets.zero,
-                              constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
-                              visualDensity: VisualDensity.compact,
-                            ),
-                            IconButton(
-                              onPressed: () => _confirmDeleteChannel(ch.id),
-                              icon: const Icon(Icons.delete_outline_rounded, size: 18, color: Color(0xFFF87171)),
-                              tooltip: 'Delete channel',
-                              padding: EdgeInsets.zero,
-                              constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
-                              visualDensity: VisualDensity.compact,
-                            ),
-                          ],
-                        ),
-                      ),
-                    ],
-                  ),
-                );
-              },
-            );
-          },
+                    ),
+                  );
+                },
+              );
+            },
+          ),
         ),
       ],
     );
@@ -4390,7 +4702,7 @@ class _AdminScaffoldState extends State<AdminScaffold> {
                     const SizedBox(height: 8),
                     const Text(
                       'Washa mtumiaji asiyesasisha hawezi kuona channels wala kulipa — atalazimishwa kwenda Play Store kwanza. '
-                      'Baada ya kuchapisha APK mpya, weka Build ya chini = versionCode mpya (sasa 10 kwa 1.0.9+10).',
+                      'Baada ya kuchapisha APK mpya, weka Build ya chini = versionCode mpya (sasa 11 kwa 1.0.10+11).',
                       style: TextStyle(fontSize: 11.5, height: 1.4, color: AdminColors.textSecondary),
                     ),
                     SwitchListTile(
@@ -4406,7 +4718,7 @@ class _AdminScaffoldState extends State<AdminScaffold> {
                       onChanged: (v) => _settings.minAndroidBuild = int.tryParse(v.trim()) ?? 0,
                       decoration: _inputDeco().copyWith(
                         labelText: 'Build ya chini (versionCode)',
-                        hintText: '10',
+                        hintText: '11',
                         prefixIcon: const Icon(Icons.numbers_rounded, size: 20),
                       ),
                     ),
@@ -4416,7 +4728,7 @@ class _AdminScaffoldState extends State<AdminScaffold> {
                       onChanged: (v) => _settings.minAndroidVersion = v.trim(),
                       decoration: _inputDeco().copyWith(
                         labelText: 'Toleo la chini',
-                        hintText: '1.0.9',
+                        hintText: '1.0.10',
                         prefixIcon: const Icon(Icons.new_releases_outlined, size: 20),
                       ),
                     ),
@@ -4426,7 +4738,7 @@ class _AdminScaffoldState extends State<AdminScaffold> {
                       onChanged: (v) => _settings.latestAndroidVersion = v.trim(),
                       decoration: _inputDeco().copyWith(
                         labelText: 'Toleo jipya',
-                        hintText: '1.0.9',
+                        hintText: '1.0.10',
                         prefixIcon: const Icon(Icons.upgrade_rounded, size: 20),
                       ),
                     ),
@@ -4437,7 +4749,7 @@ class _AdminScaffoldState extends State<AdminScaffold> {
                       onChanged: (v) => _settings.latestAndroidBuild = int.tryParse(v.trim()) ?? 0,
                       decoration: _inputDeco().copyWith(
                         labelText: 'Build jipya (hiari)',
-                        hintText: '10',
+                        hintText: '11',
                         prefixIcon: const Icon(Icons.build_circle_outlined, size: 20),
                       ),
                     ),
