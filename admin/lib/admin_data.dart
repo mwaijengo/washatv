@@ -40,13 +40,6 @@ Map<String, PricingPlan> defaultPricingPlans() {
   };
 }
 
-/// Same shape as [StorageService.getOrCreateDeviceId] in the user app.
-String _mockDeviceId(Random rand) {
-  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
-  String ch() => chars[rand.nextInt(chars.length)];
-  return 'WTV-${ch()}${ch()}${ch()}${ch()}-${ch()}${ch()}${ch()}${ch()}';
-}
-
 List<AdminUser> generateUsers(Random rand) {
   return <AdminUser>[];
 }

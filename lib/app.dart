@@ -76,6 +76,8 @@ class _WashaAppState extends State<WashaApp> with WidgetsBindingObserver {
   /// When false, "Jaribu tena" resumes the existing order instead of creating a new STK push.
   bool _paymentAllowNewCharge = true;
   DateTime? _paymentCooldownUntil;
+  /// After a successful payment, keep local unlock briefly while the server profile catches up.
+  DateTime? _paymentUnlockGraceUntil;
   int remoteConfigVersion = 0;
   int remoteConfigSyncedAt = 0;
   String? bootstrapSyncSignature;
@@ -417,8 +419,23 @@ class _WashaAppState extends State<WashaApp> with WidgetsBindingObserver {
   void _applyViewerProfile(ViewerProfile profile) {
     final wasPremium = premium;
     final serverEnd = profile.premiumActive ? profile.premiumUntil : null;
-    // Server is authoritative: never keep a local invent-end after revoke/expiry.
-    final nextEnd = subService.mergeEndDates(subEnd, serverEnd, preferRemote: true);
+    final inPaymentGrace = _paymentUnlockGraceUntil != null &&
+        DateTime.now().isBefore(_paymentUnlockGraceUntil!) &&
+        subService.isPremium(subEnd);
+
+    // Server is authoritative for revoke/expiry, but never wipe a fresh paid unlock
+    // on a brief free profile read before reconcile finishes.
+    final DateTime? nextEnd;
+    if (profile.premiumActive && serverEnd != null) {
+      nextEnd = subService.mergeEndDates(subEnd, serverEnd);
+      if (subService.isPremium(serverEnd)) {
+        _paymentUnlockGraceUntil = null;
+      }
+    } else if (inPaymentGrace) {
+      nextEnd = subEnd;
+    } else {
+      nextEnd = subService.mergeEndDates(subEnd, serverEnd, preferRemote: true);
+    }
 
     Plan nextPlan = selectedPlan;
     final key = profile.planKey?.trim();
@@ -791,6 +808,8 @@ class _WashaAppState extends State<WashaApp> with WidgetsBindingObserver {
       subEnd = end;
       _premiumPlanLabel = selectedPlan.name;
       _premiumAccessSource = 'payment';
+      // Keep channels unlocked while profile reconcile lands on the server.
+      _paymentUnlockGraceUntil = DateTime.now().add(const Duration(minutes: 5));
     });
     _schedulePremiumExpiryCheck();
     unawaited(_syncPushTopics());

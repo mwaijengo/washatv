@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
-# Same as admin/build_ipa.sh but run from repo root using the root iOS target + lib/main_admin.dart
-# (use this if your signing / bundle id lives under ./ios rather than ./admin/ios).
+# Prefer admin/build_ipa.sh — that IPA is lightweight (no video/Firebase).
+# This root script embeds the full viewer plugin set; use only if signing lives under ./ios.
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$ROOT"
+
+echo "NOTE: For device installs, prefer: cd admin && ./build_ipa.sh (or ./build_apk.sh)."
+echo "This root build uses lib/main_admin.dart and includes heavy viewer plugins."
 
 DEF="admin/dev_defines.json"
 if [[ ! -f "$DEF" ]]; then

@@ -4,21 +4,19 @@ import 'dart:math';
 import 'dart:ui';
 
 import 'package:fl_chart/fl_chart.dart';
-import 'package:flutter/foundation.dart' show compute, kIsWeb, kReleaseMode;
+import 'package:flutter/foundation.dart' show compute, kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:google_fonts/google_fonts.dart';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 
-import '../constants/app_channel_categories.dart';
-import '../services/pricing_catalog.dart';
-import '../services/storage_service.dart';
 import 'admin_auth.dart';
 import 'admin_colors.dart';
 import 'admin_currency.dart';
 import 'admin_data.dart';
 import 'admin_models.dart';
+import 'admin_prefs_keys.dart';
+import 'channel_categories.dart';
 
 /// Off-main-isolate JSON parse for large admin sync payloads (prevents UI freezes).
 Map<String, dynamic> _decodeJsonMapIsolate(String body) =>
@@ -48,7 +46,7 @@ class _PricingControllersBundle {
   }
 }
 
-/// Run with: `flutter run -t lib/main_admin.dart` (see [AdminLaunchGate] for login gate).
+/// Prefer `cd admin && flutter run` on device (lightweight plugins). See admin/README.md.
 class WashaAdminApp extends StatelessWidget {
   const WashaAdminApp({super.key, required this.home});
 
@@ -57,11 +55,12 @@ class WashaAdminApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final base = ThemeData(brightness: Brightness.dark, useMaterial3: true);
+    // System fonts only — no GoogleFonts network fetch (avoids startup ANR on device).
     return MaterialApp(
       debugShowCheckedModeBanner: false,
       theme: base.copyWith(
         scaffoldBackgroundColor: AdminColors.bgPrimary,
-        textTheme: GoogleFonts.interTextTheme(base.textTheme).apply(
+        textTheme: base.textTheme.apply(
           bodyColor: AdminColors.textPrimary,
           displayColor: AdminColors.textPrimary,
         ),
@@ -224,7 +223,7 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
 
   Future<void> _loadSavedSettings() async {
     final sp = await SharedPreferences.getInstance();
-    final wa = sp.getString(StorageService.supportWhatsappPrefsKey);
+    final wa = sp.getString(AdminPrefsKeys.supportWhatsapp);
     if (!mounted) return;
     setState(() {
       if (wa != null && wa.isNotEmpty) {
@@ -4797,7 +4796,7 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
                       : _settingsUpdateTitle.text.trim();
                   _settings.updateMessage = _settingsUpdateMessage.text.trim();
                   final sp = await SharedPreferences.getInstance();
-                  await sp.setString(StorageService.supportWhatsappPrefsKey, wa);
+                  await sp.setString(AdminPrefsKeys.supportWhatsapp, wa);
                   if (_hasAdminSession) {
                     try {
                       final res = await http

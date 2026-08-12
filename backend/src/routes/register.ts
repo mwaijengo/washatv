@@ -35,6 +35,7 @@ import { fetchAdminStatsOverview, fetchAdminSubscriptions } from '../lib/adminSt
 import {
   buildAppUpdatePayload,
   fetchAppUpdateSettings,
+  normalizeForceUpdateSettings,
   readClientAppIdentity,
   stripCatalogForForcedUpdate,
 } from '../lib/appUpdatePolicy.js';
@@ -88,14 +89,27 @@ const ADMIN_USER_SEARCH_ORDER = `
   id DESC
 `;
 
-/** Repair completed SonicPesa payments that never wrote premium_until (stuck accounts). */
-async function repairStuckCompletedPayments(
+type SoftLog = {
+  warn: (obj: unknown, msg?: string) => void;
+  error?: (obj: unknown, msg?: string) => void;
+};
+
+/**
+ * Ensure a successful SonicPesa payment unlocks all premium channels for this device
+ * without requiring an admin grant. Covers:
+ * 1) completed txs that never wrote premium_until
+ * 2) pending txs that SonicPesa already marks SUCCESS (missed webhook / closed app)
+ */
+async function reconcileDevicePremium(
   pool: DbPool,
+  env: Env,
   deviceId: string,
-  log: { warn: (e: unknown, msg: string) => void },
+  log: SoftLog,
 ): Promise<string | null> {
   const id = deviceId.trim();
   if (!id) return null;
+
+  // 1) Completed payment, no paid window yet (admin window alone does not block repair).
   try {
     const stuck = await pool.query(
       `SELECT t.provider_ref, t.amount, t.plan_key, t.phone, u.name
@@ -105,38 +119,118 @@ async function repairStuckCompletedPayments(
          AND t.provider = 'sonicpesa'
          AND t.status = 'completed'
          AND t.amount > 0
-         AND u.premium_until IS NULL
+         AND (u.premium_until IS NULL OR u.premium_until <= now())
          AND (u.admin_access_until IS NULL OR u.admin_access_until <= now())
+         -- Only repair when this payment never produced a lasting window:
+         -- completed_at is after any prior premium_until (or premium was never set).
+         AND (
+           u.premium_until IS NULL
+           OR COALESCE(t.completed_at, t.created_at) >= u.premium_until
+         )
        ORDER BY COALESCE(t.completed_at, t.created_at) DESC
        LIMIT 1`,
       [id],
     );
-    if (!stuck.rowCount) return null;
-    const row = stuck.rows[0] as {
-      provider_ref: string;
-      amount: number;
-      plan_key: string | null;
-      phone: string | null;
-      name: string | null;
-    };
-    const granted = await withDbRetry(() =>
-      grantPremiumFromPayment(pool, {
-        deviceId: id,
-        userName: String(row.name ?? 'Viewer').trim() || 'Viewer',
-        phone: row.phone ?? '',
-        amount: Number(row.amount),
-        method: mobileMoneyMethodLabel(detectTzMobileNetwork(row.phone ?? '')),
-        planKey: row.plan_key ?? '',
-        provider: 'sonicpesa',
-        providerRef: String(row.provider_ref),
-        metadata: { source: 'stuck-completed-repair' },
-      }),
-    );
-    return granted.premium_until;
+    if (stuck.rowCount) {
+      const row = stuck.rows[0] as {
+        provider_ref: string;
+        amount: number;
+        plan_key: string | null;
+        phone: string | null;
+        name: string | null;
+      };
+      const granted = await withDbRetry(() =>
+        grantPremiumFromPayment(pool, {
+          deviceId: id,
+          userName: String(row.name ?? 'Viewer').trim() || 'Viewer',
+          phone: row.phone ?? '',
+          amount: Number(row.amount),
+          method: mobileMoneyMethodLabel(detectTzMobileNetwork(row.phone ?? '')),
+          planKey: row.plan_key ?? '',
+          provider: 'sonicpesa',
+          providerRef: String(row.provider_ref),
+          metadata: { source: 'stuck-completed-repair' },
+        }),
+      );
+      if (granted.premium_until && Date.parse(granted.premium_until) > Date.now()) {
+        return granted.premium_until;
+      }
+    }
   } catch (e) {
     log.warn(e, 'stuck completed payment repair failed');
-    return null;
   }
+
+  // 2) Pending order already paid at SonicPesa — grant now (webhook / poll never finished).
+  if (!sonicpesaConfigured(env)) return null;
+  try {
+    const pending = await pool.query(
+      `SELECT t.provider_ref, t.amount, t.plan_key, t.phone, u.name
+       FROM transactions t
+       JOIN users u ON u.id = t.user_id
+       WHERE u.device_id = $1
+         AND t.provider = 'sonicpesa'
+         AND t.status = 'pending'
+         AND t.amount > 0
+         AND t.created_at > now() - interval '7 days'
+       ORDER BY t.created_at DESC
+       LIMIT 3`,
+      [id],
+    );
+    for (const raw of pending.rows) {
+      const row = raw as {
+        provider_ref: string;
+        amount: number;
+        plan_key: string | null;
+        phone: string | null;
+        name: string | null;
+      };
+      const orderId = String(row.provider_ref ?? '').trim();
+      if (!orderId) continue;
+      let remote;
+      try {
+        remote = await sonicpesaOrderStatus(env, orderId);
+      } catch (e) {
+        log.warn(e, 'reconcile: sonicpesa status failed');
+        continue;
+      }
+      if (!remote.ok) continue;
+      const remoteStatus = normalizePaymentStatus(remote.payment_status ?? remote.status ?? 'PENDING');
+      if (isSonicpesaFailure(remoteStatus)) {
+        await pool.query(
+          `UPDATE transactions SET status = 'failed', updated_at = now(),
+             metadata = COALESCE(metadata, '{}'::jsonb) || $2::jsonb
+           WHERE provider = 'sonicpesa' AND provider_ref = $1 AND status = 'pending'`,
+          [orderId, JSON.stringify({ sonicpesa_status: remoteStatus, closed_at: 'profile-reconcile' })],
+        );
+        continue;
+      }
+      if (!isSonicpesaSuccess(remoteStatus)) continue;
+
+      const granted = await withDbRetry(() =>
+        grantPremiumFromPayment(pool, {
+          deviceId: id,
+          userName: String(row.name ?? 'Viewer').trim() || 'Viewer',
+          phone: row.phone ?? '',
+          amount: Number(row.amount) || Number(remote.amount ?? 0),
+          method: mobileMoneyMethodLabel(detectTzMobileNetwork(row.phone ?? '')),
+          planKey: row.plan_key ?? '',
+          provider: 'sonicpesa',
+          providerRef: orderId,
+          metadata: {
+            source: 'profile-reconcile-pending-success',
+            sonicpesa_status: remoteStatus,
+          },
+        }),
+      );
+      if (granted.premium_until && Date.parse(granted.premium_until) > Date.now()) {
+        return granted.premium_until;
+      }
+    }
+  } catch (e) {
+    log.warn(e, 'pending payment reconcile failed');
+  }
+
+  return null;
 }
 
 export async function registerRoutes(
@@ -164,11 +258,23 @@ export async function registerRoutes(
     time: new Date().toISOString(),
   }));
 
-  /** Lightweight poll — same sync cursor as bootstrap without heavy catalog payload (Supasoka-style). */
-  app.get('/api/v1/public/bootstrap-meta', async (_req, reply) => {
+  /** Lightweight poll — includes force-update gate (cheap; no catalog). */
+  app.get('/api/v1/public/bootstrap-meta', async (req, reply) => {
     const meta = await getConfigMeta(pool);
+    const clientId = readClientAppIdentity({
+      query: req.query as Record<string, unknown>,
+      headers: req.headers as Record<string, unknown>,
+    });
+    const updateSettings = await fetchAppUpdateSettings(pool);
+    const appUpdate = buildAppUpdatePayload(updateSettings, clientId);
     reply.header('Cache-Control', 'private, no-store');
-    return { ok: true, version: meta.version, configSyncedAt: meta.configSyncedAt };
+    return {
+      ok: true,
+      version: meta.version,
+      configSyncedAt: meta.configSyncedAt,
+      appUpdate,
+      updateRequired: appUpdate.updateRequired,
+    };
   });
 
   /** Viewer premium sync by stable device id (admin grants + paid subscriptions). */
@@ -176,7 +282,7 @@ export async function registerRoutes(
     const deviceId = (req.params.device_id ?? '').trim();
     if (!deviceId) return reply.code(400).send({ error: 'device_id is required' });
 
-    const repairedUntil = await repairStuckCompletedPayments(pool, deviceId, req.log);
+    const repairedUntil = await reconcileDevicePremium(pool, env, deviceId, req.log);
     if (repairedUntil) await notifyClientsAfterPremiumGrant();
 
     const r = await pool.query(
@@ -215,7 +321,7 @@ export async function registerRoutes(
     const deviceId = (req.params.device_id ?? '').trim();
     if (!deviceId) return reply.code(400).send({ error: 'device_id is required' });
 
-    const repairedUntil = await repairStuckCompletedPayments(pool, deviceId, req.log);
+    const repairedUntil = await reconcileDevicePremium(pool, env, deviceId, req.log);
     if (repairedUntil) await notifyClientsAfterPremiumGrant();
 
     const r = await pool.query(
@@ -1325,7 +1431,39 @@ export async function registerRoutes(
       update_message: string;
     }>;
   }>('/api/v1/admin/settings', { preHandler: adminPre }, async (req) => {
-      const b = req.body ?? {};
+      const raw = req.body ?? {};
+      const b = normalizeForceUpdateSettings({
+        ...raw,
+        force_update_enabled: raw.force_update_enabled,
+        min_android_build:
+          raw.min_android_build !== undefined
+            ? Math.max(0, Math.trunc(Number(raw.min_android_build) || 0))
+            : undefined,
+        min_android_version:
+          raw.min_android_version !== undefined ? String(raw.min_android_version) : undefined,
+        latest_android_version:
+          raw.latest_android_version !== undefined ? String(raw.latest_android_version) : undefined,
+        latest_android_build:
+          raw.latest_android_build !== undefined
+            ? Math.max(0, Math.trunc(Number(raw.latest_android_build) || 0))
+            : undefined,
+        play_store_url: raw.play_store_url !== undefined ? String(raw.play_store_url) : undefined,
+        update_title: raw.update_title !== undefined ? String(raw.update_title) : undefined,
+        update_message: raw.update_message !== undefined ? String(raw.update_message) : undefined,
+      }) as Partial<{
+        site_name: string;
+        subscription_enabled: boolean;
+        maintenance_mode: boolean;
+        whatsapp_number: string;
+        force_update_enabled: boolean;
+        min_android_build: number;
+        min_android_version: string;
+        latest_android_version: string;
+        latest_android_build: number;
+        play_store_url: string;
+        update_title: string;
+        update_message: string;
+      }>;
       const client = await pool.connect();
       try {
         await client.query('BEGIN');

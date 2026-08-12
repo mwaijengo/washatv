@@ -63,16 +63,67 @@ export function readClientAppIdentity(req: {
   return { build, version };
 }
 
+/** Resolve the build/version floor used to decide updateRequired. */
+export function resolveRequiredAppVersion(settings: AppUpdateSettings): {
+  requiredBuild: number;
+  requiredVersion: string;
+  forceUpdateEnabled: boolean;
+} {
+  const minBuild = Math.max(0, Math.trunc(Number(settings.min_android_build) || 0));
+  const latestBuild = Math.max(0, Math.trunc(Number(settings.latest_android_build) || 0));
+  const minVersion = String(settings.min_android_version ?? '').trim();
+  const latestVersion = String(settings.latest_android_version ?? '').trim();
+  const forceUpdateEnabled =
+    Boolean(settings.force_update_enabled) || minBuild > 0 || minVersion.length > 0;
+
+  // Prefer explicit min_*; fall back to latest_* only when min_* for that axis was not set.
+  const requiredBuild =
+    minBuild > 0
+      ? minBuild
+      : forceUpdateEnabled && !minVersion && latestBuild > 0
+        ? latestBuild
+        : 0;
+  const requiredVersion =
+    minVersion ||
+    (forceUpdateEnabled && minBuild <= 0 && latestVersion ? latestVersion : '');
+
+  return { requiredBuild, requiredVersion, forceUpdateEnabled };
+}
+
+/**
+ * When admin enables force-update, copy latest build/version into min fields if empty
+ * so toggling the switch alone still blocks outdated installs.
+ */
+export function normalizeForceUpdateSettings(
+  input: Partial<AppUpdateSettings>,
+): Partial<AppUpdateSettings> {
+  const out = { ...input };
+  const enabling = out.force_update_enabled === true;
+  if (!enabling && out.force_update_enabled !== false) return out;
+
+  const latestBuild = Math.max(0, Math.trunc(Number(out.latest_android_build ?? 0) || 0));
+  const latestVersion = String(out.latest_android_version ?? '').trim();
+  const minBuild = Math.max(0, Math.trunc(Number(out.min_android_build ?? 0) || 0));
+  const minVersion = String(out.min_android_version ?? '').trim();
+
+  if (enabling) {
+    if (minBuild <= 0 && latestBuild > 0) out.min_android_build = latestBuild;
+    if (!minVersion && latestVersion) out.min_android_version = latestVersion;
+  }
+
+  return out;
+}
+
 export function buildAppUpdatePayload(
   settings: AppUpdateSettings,
   client?: ClientAppIdentity,
 ): AppUpdatePayload {
-  const minBuild = Math.max(0, Math.trunc(Number(settings.min_android_build) || 0));
   const latestBuildRaw = Math.max(0, Math.trunc(Number(settings.latest_android_build) || 0));
-  const latestBuild = latestBuildRaw > 0 ? latestBuildRaw : minBuild;
-  const minVersion = String(settings.min_android_version ?? '').trim();
+  const minBuildRaw = Math.max(0, Math.trunc(Number(settings.min_android_build) || 0));
+  const latestBuild = latestBuildRaw > 0 ? latestBuildRaw : minBuildRaw;
+  const minVersionRaw = String(settings.min_android_version ?? '').trim();
   const latestVersion =
-    String(settings.latest_android_version ?? '').trim() || minVersion;
+    String(settings.latest_android_version ?? '').trim() || minVersionRaw;
   const playStoreUrl =
     String(settings.play_store_url ?? '').trim() || DEFAULT_PLAY_STORE_URL;
   const updateTitle =
@@ -81,26 +132,28 @@ export function buildAppUpdatePayload(
     String(settings.update_message ?? '').trim() ||
     'Toleo jipya linahitajika ili kuendelea kutumia app. Pakua kutoka Play Store kisha fungua tena.';
 
-  const forceUpdateEnabled =
-    Boolean(settings.force_update_enabled) || minBuild > 0 || minVersion.length > 0;
+  const { requiredBuild, requiredVersion, forceUpdateEnabled } =
+    resolveRequiredAppVersion(settings);
 
   let updateRequired = false;
   if (forceUpdateEnabled) {
-    // Missing/unknown client build counts as outdated — covers older apps without query params.
     const clientBuild =
       client != null && Number.isFinite(client.build) && (client.build ?? 0) > 0
         ? Math.trunc(client.build!)
         : 0;
     const clientVersion = String(client?.version ?? '').trim();
-    if (minBuild > 0 && clientBuild < minBuild) {
-      updateRequired = true;
-    } else if (
-      minBuild <= 0 &&
-      minVersion &&
-      (!clientVersion || isVersionBelow(clientVersion, minVersion))
-    ) {
-      updateRequired = true;
-    } else if (minBuild > 0 && client == null) {
+
+    if (requiredBuild > 0) {
+      // Missing build or below floor → must update (covers old APKs without identity headers).
+      if (clientBuild <= 0 || clientBuild < requiredBuild) {
+        updateRequired = true;
+      }
+    } else if (requiredVersion) {
+      if (!clientVersion || isVersionBelow(clientVersion, requiredVersion)) {
+        updateRequired = true;
+      }
+    } else if (Boolean(settings.force_update_enabled)) {
+      // Toggle on with no thresholds — block until admin sets build/version targets.
       updateRequired = true;
     }
   }
@@ -108,9 +161,9 @@ export function buildAppUpdatePayload(
   return {
     updateRequired,
     forceUpdateEnabled,
-    minVersion,
+    minVersion: requiredVersion || minVersionRaw,
     latestVersion,
-    minBuild,
+    minBuild: requiredBuild || minBuildRaw,
     latestBuild,
     playStoreUrl,
     updateTitle,

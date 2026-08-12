@@ -94,4 +94,34 @@ assert.equal(
   'admin grant alone is enough',
 );
 
+/** Mirrors shouldReapplyCompletedPayment — do not resurrect legitimate expiries. */
+function shouldReapplyCompletedPayment(
+  premiumUntil: Date | null,
+  paymentCompletedAt: Date | null,
+  now: Date = new Date(),
+): boolean {
+  if (premiumUntil == null) return true;
+  if (premiumUntil.getTime() > now.getTime()) return false;
+  if (!paymentCompletedAt) return false;
+  return paymentCompletedAt.getTime() >= premiumUntil.getTime();
+}
+
+const paidAt = new Date('2026-07-01T12:00:00Z');
+const untilAfterGrant = new Date('2026-07-31T12:00:00Z');
+assert.equal(
+  shouldReapplyCompletedPayment(untilAfterGrant, paidAt, new Date('2026-08-10T12:00:00Z')),
+  false,
+  'legitimately expired payment must not re-apply',
+);
+assert.equal(
+  shouldReapplyCompletedPayment(null, paidAt, now),
+  true,
+  'null premium_until must re-apply',
+);
+assert.equal(
+  shouldReapplyCompletedPayment(new Date('2026-06-01T00:00:00Z'), new Date('2026-08-01T00:00:00Z'), now),
+  true,
+  'stale until before payment completed_at must re-apply',
+);
+
 console.log('premiumAccess.logic.test.ts: all assertions passed');

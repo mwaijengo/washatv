@@ -1,5 +1,4 @@
 import 'package:flutter/material.dart';
-import 'package:google_fonts/google_fonts.dart';
 
 import 'admin_auth.dart';
 import 'admin_colors.dart';
@@ -72,7 +71,7 @@ class _AdminLoginScreenState extends State<AdminLoginScreen> {
                 const SizedBox(height: 20),
                 Text(
                   'WASHA Admin',
-                  style: GoogleFonts.inter(
+                  style: TextStyle(
                     fontSize: 26,
                     fontWeight: FontWeight.w800,
                     color: AdminColors.textPrimary,

@@ -2,8 +2,8 @@ import 'dart:convert';
 
 import 'package:shared_preferences/shared_preferences.dart';
 
-import '../admin/admin_currency.dart';
 import '../models/plan.dart';
+import '../utils/tzs_format.dart';
 
 const String kPricingStorageKey = 'washatvPricing';
 

@@ -2,7 +2,12 @@
  * Run: npx tsx src/lib/appUpdatePolicy.test.ts
  */
 import assert from 'node:assert/strict';
-import { buildAppUpdatePayload, type AppUpdateSettings } from './appUpdatePolicy.js';
+import {
+  buildAppUpdatePayload,
+  normalizeForceUpdateSettings,
+  resolveRequiredAppVersion,
+  type AppUpdateSettings,
+} from './appUpdatePolicy.js';
 
 const base: AppUpdateSettings = {
   force_update_enabled: true,
@@ -37,5 +42,39 @@ const off: AppUpdateSettings = {
   min_android_version: '',
 };
 assert.equal(buildAppUpdatePayload(off, { build: 1 }).updateRequired, false);
+
+// Toggle on + latest only (admin forgot min build) — latest becomes required floor.
+const latestOnly: AppUpdateSettings = {
+  ...base,
+  force_update_enabled: true,
+  min_android_build: 0,
+  min_android_version: '',
+  latest_android_build: 12,
+  latest_android_version: '1.0.11',
+};
+assert.equal(
+  buildAppUpdatePayload(latestOnly, { build: 11, version: '1.0.10' }).updateRequired,
+  true,
+  'latest build used when min build is 0',
+);
+assert.equal(
+  buildAppUpdatePayload(latestOnly, { build: 12, version: '1.0.11' }).updateRequired,
+  false,
+  'current build passes when latest is the floor',
+);
+
+const normalized = normalizeForceUpdateSettings({
+  force_update_enabled: true,
+  min_android_build: 0,
+  min_android_version: '',
+  latest_android_build: 12,
+  latest_android_version: '1.0.11',
+});
+assert.equal(normalized.min_android_build, 12);
+assert.equal(normalized.min_android_version, '1.0.11');
+
+const req = resolveRequiredAppVersion(latestOnly);
+assert.equal(req.requiredBuild, 12);
+assert.equal(req.requiredVersion, '1.0.11');
 
 console.log('appUpdatePolicy.test.ts: all assertions passed');

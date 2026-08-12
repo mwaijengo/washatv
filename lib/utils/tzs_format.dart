@@ -1,4 +1,5 @@
-/// Tanzanian Shilling (TZS) display helpers for the admin dashboard.
+/// Tanzanian Shilling (TZS) display helpers shared by viewer + admin.
+library;
 
 String _thousands(int n) {
   final s = n.abs().toString();

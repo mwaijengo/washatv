@@ -132,6 +132,24 @@ function needsPremiumRepair(premiumUntil: Date | null | undefined): boolean {
 }
 
 /**
+ * Re-apply when this completed payment never produced an active window.
+ * Safe against legitimate expiry: a proper grant sets premium_until = completed_at + duration,
+ * so completed_at < premium_until always holds until the window ends — after expiry
+ * completed_at is still before the (past) premium_until, so we do NOT resurrect.
+ * Stuck case: premium_until null, or stale/expired until that is <= completed_at
+ * (grant never ran after this payment completed).
+ */
+function shouldReapplyCompletedPayment(
+  premiumUntil: Date | null | undefined,
+  paymentCompletedAt: Date | null | undefined,
+): boolean {
+  if (premiumUntil == null) return true;
+  if (premiumUntil.getTime() > Date.now()) return false;
+  if (!paymentCompletedAt) return false;
+  return paymentCompletedAt.getTime() >= premiumUntil.getTime();
+}
+
+/**
  * Map paid amount → plan_key (closest enabled plan price). Used for orphan webhook/status recovery
  * when plan_key was never persisted.
  */
@@ -242,29 +260,41 @@ export async function grantPremiumFromPayment(pool: DbPool, input: GrantPremiumI
       };
     }
 
-    // Already completed — return current premium; repair only if never applied.
+    // Already completed — return current premium; repair if grant never landed.
     const existingTx = await client.query(
-      `SELECT status, user_id, plan_key FROM transactions WHERE provider = $1 AND provider_ref = $2 LIMIT 1`,
+      `SELECT status, user_id, plan_key, completed_at, created_at
+       FROM transactions WHERE provider = $1 AND provider_ref = $2 LIMIT 1`,
       [provider, providerRef],
     );
-    const row = existingTx.rows[0] as { status: string; user_id: string; plan_key: string | null } | undefined;
+    const row = existingTx.rows[0] as
+      | {
+          status: string;
+          user_id: string;
+          plan_key: string | null;
+          completed_at: Date | null;
+          created_at: Date;
+        }
+      | undefined;
     if (!row) {
       throw new Error('transaction missing after conflict');
     }
 
     const prem = await client.query(
-      `SELECT premium_until, subscription FROM users WHERE id = $1`,
+      `SELECT premium_until, subscription, admin_access_until FROM users WHERE id = $1`,
       [row.user_id],
     );
     const userRow = prem.rows[0] as
-      | { premium_until: Date | null; subscription: string }
+      | { premium_until: Date | null; subscription: string; admin_access_until: Date | null }
       | undefined;
     const until = userRow?.premium_until ?? null;
+    const paymentCompletedAt = row.completed_at ?? row.created_at;
 
-    // Repair whenever the paid tx exists but premium_until was never written
-    // (free+null, or legacy subscription='premium' with null until). Do NOT re-extend
-    // after a legitimate expiry — that would resurrect old completed orders forever.
-    if (needsPremiumRepair(until)) {
+    // Repair whenever this paid tx never produced a lasting premium window.
+    // Do NOT re-extend after a legitimate expiry — see shouldReapplyCompletedPayment.
+    if (
+      needsPremiumRepair(until) ||
+      shouldReapplyCompletedPayment(until, paymentCompletedAt)
+    ) {
       const repairedUntil = await applyPremiumWindow(
         client,
         row.user_id,
@@ -278,6 +308,7 @@ export async function grantPremiumFromPayment(pool: DbPool, input: GrantPremiumI
         user_id: String(row.user_id),
         premium_until: repairedUntil ? new Date(repairedUntil).toISOString() : null,
         repaired: true,
+        newly_granted: true,
       };
     }
 
