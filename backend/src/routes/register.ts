@@ -14,6 +14,7 @@ import {
 import {
   normalizeAllPremiumWindows,
   normalizeUserPremiumWindows,
+  PREMIUM_ACTIVE_SQL,
 } from '../lib/premiumAccess.js';
 import {
   detectTzMobileNetwork,
@@ -1722,42 +1723,58 @@ export async function registerRoutes(
     }
   });
 
-  app.get<{ Querystring: { q?: string; limit?: string } }>('/api/v1/admin/users', { preHandler: adminPre }, async (req) => {
-    const q = String(req.query?.q ?? '').trim();
-    // Search path skips the expensive batch premium repair — listing correctness > normalize.
-    if (!q) await normalizeAllPremiumWindows(pool);
-    const limitRaw = Number(req.query?.limit ?? 300);
-    const limit = Number.isFinite(limitRaw) ? Math.min(Math.max(Math.trunc(limitRaw), 1), 5000) : 300;
-    const { like, exact, compact } = parseAdminUserSearch(q);
-    const params = [like, exact, compact, limit] as const;
-    const [r, matchedRes, totalRes] = await Promise.all([
-      pool.query(
-        `SELECT id, name, phone, device_id, status, subscription, premium_until, admin_access_until, created_at
-         FROM users
-         WHERE ${ADMIN_USER_SEARCH_WHERE}
-         ORDER BY ${ADMIN_USER_SEARCH_ORDER}
-         LIMIT $4`,
-        [...params],
-      ),
-      like
-        ? pool.query(
-            `SELECT COUNT(*)::int AS c FROM users WHERE ${ADMIN_USER_SEARCH_WHERE}`,
-            [like, exact, compact],
-          )
-        : Promise.resolve(null),
-      pool.query(`SELECT COUNT(*)::int AS c FROM users`),
-    ]);
-    const total = Number((totalRes.rows[0] as { c: number }).c ?? r.rowCount ?? 0);
-    const matched = matchedRes
-      ? Number((matchedRes.rows[0] as { c: number }).c ?? r.rowCount ?? 0)
-      : total;
-    return {
-      users: r.rows,
-      total,
-      matched,
-      limit,
-    };
-  });
+  app.get<{ Querystring: { q?: string; limit?: string; premium?: string } }>(
+    '/api/v1/admin/users',
+    { preHandler: adminPre },
+    async (req) => {
+      const q = String(req.query?.q ?? '').trim();
+      const premiumOnly = ['1', 'true', 'yes', 'premium'].includes(
+        String(req.query?.premium ?? '').trim().toLowerCase(),
+      );
+      // Search path skips the expensive batch premium repair — listing correctness > normalize.
+      if (!q) await normalizeAllPremiumWindows(pool);
+      const limitRaw = Number(req.query?.limit ?? 300);
+      const limit = Number.isFinite(limitRaw) ? Math.min(Math.max(Math.trunc(limitRaw), 1), 5000) : 300;
+      const { like, exact, compact } = parseAdminUserSearch(q);
+      const premiumClause = premiumOnly ? ` AND (${PREMIUM_ACTIVE_SQL})` : '';
+      const where = `(${ADMIN_USER_SEARCH_WHERE})${premiumClause}`;
+      const params = [like, exact, compact, limit] as const;
+      const [r, matchedRes, totalRes, premiumTotalRes] = await Promise.all([
+        pool.query(
+          `SELECT id, name, phone, device_id, status, subscription, premium_until, admin_access_until, created_at
+           FROM users
+           WHERE ${where}
+           ORDER BY ${ADMIN_USER_SEARCH_ORDER}
+           LIMIT $4`,
+          [...params],
+        ),
+        like || premiumOnly
+          ? pool.query(`SELECT COUNT(*)::int AS c FROM users WHERE ${where}`, [like, exact, compact])
+          : Promise.resolve(null),
+        pool.query(`SELECT COUNT(*)::int AS c FROM users`),
+        premiumOnly
+          ? pool.query(`SELECT COUNT(*)::int AS c FROM users WHERE ${PREMIUM_ACTIVE_SQL}`)
+          : Promise.resolve(null),
+      ]);
+      const total = Number((totalRes.rows[0] as { c: number }).c ?? r.rowCount ?? 0);
+      const premiumTotal = premiumTotalRes
+        ? Number((premiumTotalRes.rows[0] as { c: number }).c ?? 0)
+        : undefined;
+      const matched = matchedRes
+        ? Number((matchedRes.rows[0] as { c: number }).c ?? r.rowCount ?? 0)
+        : premiumOnly
+          ? (premiumTotal ?? total)
+          : total;
+      return {
+        users: r.rows,
+        total,
+        matched,
+        limit,
+        premium_only: premiumOnly,
+        ...(premiumTotal !== undefined ? { premium_total: premiumTotal } : {}),
+      };
+    },
+  );
 
   /** One round-trip for admin dashboard — parallel DB reads (faster than 7 separate HTTP calls). */
   app.get<{ Querystring: { q?: string; limit?: string; skip_users?: string } }>(
@@ -1995,6 +2012,81 @@ export async function registerRoutes(
         ],
       ).catch(() => {});
       return { ok: true, version: v, user: r.rows[0] };
+    },
+  );
+
+  /** Bulk-remove premium so selected viewers must pay again. */
+  app.post<{ Body: Record<string, unknown> }>(
+    '/api/v1/admin/users/bulk-revoke-premium',
+    { preHandler: adminPre, attachValidation: true },
+    async (req, reply) => {
+      const b = req.body ?? {};
+      const rawIds = Array.isArray(b.user_ids)
+        ? b.user_ids
+        : Array.isArray(b.ids)
+          ? b.ids
+          : [];
+      const ids = [
+        ...new Set(
+          rawIds
+            .map((v) => String(v ?? '').trim())
+            .filter((id) => id.length > 0 && id.length < 128),
+        ),
+      ];
+      if (!ids.length) {
+        return reply.code(400).send({ error: 'user_ids required (non-empty array)' });
+      }
+      if (ids.length > 2000) {
+        return reply.code(400).send({ error: 'too many user_ids (max 2000)' });
+      }
+
+      const r = await pool.query(
+        `UPDATE users
+         SET subscription = 'free', premium_until = NULL, admin_access_until = NULL
+         WHERE id = ANY($1::text[])
+         RETURNING id, name, phone, device_id, status, subscription, premium_until, admin_access_until, created_at`,
+        [ids],
+      );
+      const revoked = r.rows as Array<{ id: string; name: string }>;
+      const revokedIds = new Set(revoked.map((u) => u.id));
+      const missing = ids.filter((id) => !revokedIds.has(id));
+
+      const v = await bumpConfigVersion(pool);
+      sse.notifyConfigVersion(v);
+
+      const adminName = (() => {
+        try {
+          return (req.user as { sub?: string })?.sub ?? 'admin';
+        } catch {
+          return 'admin';
+        }
+      })();
+      const sample = revoked
+        .slice(0, 8)
+        .map((u) => u.name || u.id)
+        .join(', ');
+      pool
+        .query(
+          `INSERT INTO admin_logs (id, admin_name, action, details, created_at) VALUES ($1,$2,$3,$4,now())`,
+          [
+            `LOG-${nanoid(10)}`,
+            adminName,
+            'bulk_revoke_premium',
+            `Revoked premium for ${revoked.length} user(s)` +
+              (sample ? `: ${sample}${revoked.length > 8 ? '…' : ''}` : '') +
+              (missing.length ? `; missing: ${missing.length}` : ''),
+          ],
+        )
+        .catch(() => {});
+
+      return {
+        ok: true,
+        version: v,
+        revoked_count: revoked.length,
+        requested_count: ids.length,
+        missing_ids: missing,
+        users: revoked,
+      };
     },
   );
 

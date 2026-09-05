@@ -2622,6 +2622,523 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
     }
   }
 
+  Future<({List<AdminUser> users, int matched, int total, int? premiumTotal})> _fetchUsersForBulkRevoke({
+    required String query,
+    required bool premiumOnly,
+  }) async {
+    final q = query.trim();
+    final res = await http
+        .get(
+          Uri.parse('$_apiBase/api/v1/admin/users').replace(
+            queryParameters: {
+              'limit': '2000',
+              'premium': premiumOnly ? '1' : '0',
+              if (q.isNotEmpty) 'q': q,
+            },
+          ),
+          headers: _adminHeaders(),
+        )
+        .timeout(const Duration(seconds: 20));
+    if (res.statusCode < 200 || res.statusCode >= 300) {
+      throw Exception('users ${res.statusCode}');
+    }
+    final map = jsonDecode(res.body) as Map<String, dynamic>;
+    final rawUsers = map['users'];
+    final users = rawUsers is List ? _parseUsersJson(rawUsers) : <AdminUser>[];
+    // Client-side safety net: keep only users who still look premium when filtering.
+    final filtered = premiumOnly ? users.where((u) => u.effectivePremium).toList() : users;
+    filtered.sort((a, b) {
+      final c = b.createdAt.compareTo(a.createdAt);
+      if (c != 0) return c;
+      return b.id.compareTo(a.id);
+    });
+    final matchedRaw = map['matched'];
+    final totalRaw = map['total'] ?? map['users_total'];
+    final premiumRaw = map['premium_total'];
+    int asInt(Object? v, int fallback) {
+      if (v is int) return v;
+      if (v is num) return v.toInt();
+      return int.tryParse(v?.toString() ?? '') ?? fallback;
+    }
+
+    return (
+      users: filtered,
+      matched: asInt(matchedRaw, filtered.length),
+      total: asInt(totalRaw, filtered.length),
+      premiumTotal: premiumRaw == null ? null : asInt(premiumRaw, filtered.length),
+    );
+  }
+
+  Future<int> _bulkRevokePremiumIds(Set<String> ids) async {
+    if (ids.isEmpty) return 0;
+    final res = await http
+        .post(
+          Uri.parse('$_apiBase/api/v1/admin/users/bulk-revoke-premium'),
+          headers: _adminHeaders(),
+          body: jsonEncode({'user_ids': ids.toList()}),
+        )
+        .timeout(const Duration(seconds: 45));
+    if (res.statusCode < 200 || res.statusCode >= 300) {
+      final body = res.body.trim();
+      final detail = body.isNotEmpty && body.length < 220 ? body : 'HTTP ${res.statusCode}';
+      throw Exception(detail);
+    }
+    final map = jsonDecode(res.body) as Map<String, dynamic>;
+    final revokedCount = () {
+      final v = map['revoked_count'];
+      if (v is int) return v;
+      if (v is num) return v.toInt();
+      return ids.length;
+    }();
+    final revokedRaw = map['users'];
+    final revokedIds = <String>{};
+    if (revokedRaw is List) {
+      for (final row in revokedRaw) {
+        if (row is Map) {
+          final id = _s(row['id']);
+          if (id.isNotEmpty) revokedIds.add(id);
+        }
+      }
+    }
+    if (revokedIds.isEmpty) revokedIds.addAll(ids);
+
+    if (mounted) {
+      setState(() {
+        for (final u in _users) {
+          if (!revokedIds.contains(u.id)) continue;
+          u.subscription = 'free';
+          u.premiumUntil = null;
+          u.adminAccessUntil = null;
+        }
+      });
+    }
+    return revokedCount;
+  }
+
+  Future<void> _showBulkRevokePremiumDialog() async {
+    if (!_hasAdminSession) {
+      _showToast('Hakuna kikao cha msimamizi', _ToastType.error);
+      return;
+    }
+
+    final searchCtrl = TextEditingController();
+    Timer? debounce;
+    var loading = true;
+    var acting = false;
+    var premiumOnly = true;
+    var query = '';
+    var users = <AdminUser>[];
+    var matched = 0;
+    var total = 0;
+    int? premiumTotal;
+    final selected = <String>{};
+    String? error;
+    var initialLoadScheduled = false;
+    void Function(void Function())? dialogSetState;
+
+    Future<void> load([void Function(void Function())? setModal]) async {
+      final set = setModal ?? dialogSetState;
+      if (set == null) return;
+      set(() {
+        loading = true;
+        error = null;
+      });
+      try {
+        final result = await _fetchUsersForBulkRevoke(query: query, premiumOnly: premiumOnly);
+        if (!mounted) return;
+        set(() {
+          users = result.users;
+          matched = result.matched;
+          total = result.total;
+          premiumTotal = result.premiumTotal;
+          loading = false;
+          // Drop selections that vanished from the list after a refresh.
+          selected.removeWhere((id) => !users.any((u) => u.id == id));
+        });
+      } catch (e) {
+        if (!mounted) return;
+        set(() {
+          loading = false;
+          error = '$e';
+          users = [];
+        });
+      }
+    }
+
+    try {
+      await showDialog<void>(
+        context: context,
+        barrierDismissible: true,
+        builder: (ctx) => StatefulBuilder(
+          builder: (ctx, setModal) {
+            dialogSetState = setModal;
+            if (!initialLoadScheduled) {
+              initialLoadScheduled = true;
+              WidgetsBinding.instance.addPostFrameCallback((_) {
+                if (ctx.mounted) unawaited(load(setModal));
+              });
+            }
+
+            final visibleIds = users.map((u) => u.id).toSet();
+            final allVisibleSelected =
+                visibleIds.isNotEmpty && visibleIds.every(selected.contains);
+            final selectedCount = selected.length;
+
+            String sourceLabel(AdminUser u) {
+              final paid = u.premiumUntil != null && u.premiumUntil!.isAfter(DateTime.now());
+              final adm = u.adminAccessActive;
+              if (paid && adm) return 'Malipo + msimamizi';
+              if (paid) return 'Malipo';
+              if (adm) return 'Msimamizi';
+              if (u.subscription == 'premium') return 'Premium (flag)';
+              return 'Free';
+            }
+
+            String expiryLabel(AdminUser u) {
+              final ends = <DateTime>[
+                if (u.premiumUntil != null && u.premiumUntil!.isAfter(DateTime.now())) u.premiumUntil!,
+                if (u.adminAccessUntil != null && u.adminAccessUntil!.isAfter(DateTime.now()))
+                  u.adminAccessUntil!,
+              ];
+              if (ends.isEmpty) return '—';
+              ends.sort();
+              return 'hadi ${_fmtAccessDate(ends.last)}';
+            }
+
+            return AlertDialog(
+              backgroundColor: AdminColors.bgSecondary,
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+              insetPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 24),
+              titlePadding: const EdgeInsets.fromLTRB(20, 18, 12, 0),
+              contentPadding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
+              actionsPadding: const EdgeInsets.fromLTRB(16, 0, 16, 14),
+              title: Row(
+                children: [
+                  Container(
+                    width: 36,
+                    height: 36,
+                    decoration: BoxDecoration(
+                      color: const Color(0x33F43F5E),
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    child: const Icon(Icons.person_off_rounded, color: Color(0xFFFB7185), size: 20),
+                  ),
+                  const SizedBox(width: 12),
+                  const Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text('Ondoa premium', style: TextStyle(fontWeight: FontWeight.w800, fontSize: 18)),
+                        SizedBox(height: 2),
+                        Text(
+                          'Chagua watumiaji — watarudishwa free na watalipa tena',
+                          style: TextStyle(fontSize: 11.5, color: AdminColors.textSecondary, height: 1.3),
+                        ),
+                      ],
+                    ),
+                  ),
+                  IconButton(
+                    tooltip: 'Funga',
+                    onPressed: acting ? null : () => Navigator.pop(ctx),
+                    icon: const Icon(Icons.close_rounded),
+                  ),
+                ],
+              ),
+              content: SizedBox(
+                width: min(640, MediaQuery.sizeOf(ctx).width - 32),
+                height: min(560, MediaQuery.sizeOf(ctx).height * 0.72),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    TextField(
+                      controller: searchCtrl,
+                      enabled: !acting,
+                      onChanged: (v) {
+                        debounce?.cancel();
+                        debounce = Timer(const Duration(milliseconds: 320), () {
+                          query = v.trim();
+                          unawaited(load(setModal));
+                        });
+                      },
+                      textInputAction: TextInputAction.search,
+                      decoration: _inputDeco().copyWith(
+                        hintText: 'Tafuta: jina, simu, Device ID, USR-…',
+                        prefixIcon: const Icon(Icons.search_rounded, size: 20),
+                        suffixIcon: loading
+                            ? const Padding(
+                                padding: EdgeInsets.all(12),
+                                child: SizedBox(
+                                  width: 16,
+                                  height: 16,
+                                  child: CircularProgressIndicator(strokeWidth: 2),
+                                ),
+                              )
+                            : (searchCtrl.text.isNotEmpty
+                                ? IconButton(
+                                    tooltip: 'Futa',
+                                    icon: const Icon(Icons.clear_rounded, size: 18),
+                                    onPressed: acting
+                                        ? null
+                                        : () {
+                                            searchCtrl.clear();
+                                            query = '';
+                                            unawaited(load(setModal));
+                                          },
+                                  )
+                                : IconButton(
+                                    tooltip: 'Onyesha upya',
+                                    icon: const Icon(Icons.refresh_rounded, size: 18),
+                                    onPressed: acting ? null : () => unawaited(load(setModal)),
+                                  )),
+                      ),
+                    ),
+                    const SizedBox(height: 10),
+                    Wrap(
+                      spacing: 8,
+                      runSpacing: 8,
+                      crossAxisAlignment: WrapCrossAlignment.center,
+                      children: [
+                        FilterChip(
+                          selected: premiumOnly,
+                          label: Text(
+                            premiumTotal != null ? 'Premium tu ($premiumTotal)' : 'Premium tu',
+                            style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600),
+                          ),
+                          onSelected: acting
+                              ? null
+                              : (v) {
+                                  if (!v) return;
+                                  premiumOnly = true;
+                                  setModal(() {});
+                                  unawaited(load(setModal));
+                                },
+                          selectedColor: const Color(0x33FBBF24),
+                          checkmarkColor: const Color(0xFFFBBF24),
+                          side: BorderSide(
+                            color: premiumOnly ? const Color(0x66FBBF24) : const Color(0x22FFFFFF),
+                          ),
+                        ),
+                        FilterChip(
+                          selected: !premiumOnly,
+                          label: Text(
+                            'Wote ($total)',
+                            style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600),
+                          ),
+                          onSelected: acting
+                              ? null
+                              : (v) {
+                                  if (!v) return;
+                                  premiumOnly = false;
+                                  setModal(() {});
+                                  unawaited(load(setModal));
+                                },
+                          selectedColor: const Color(0x336366F1),
+                          checkmarkColor: const Color(0xFFA5B4FC),
+                          side: BorderSide(
+                            color: !premiumOnly ? const Color(0x666366F1) : const Color(0x22FFFFFF),
+                          ),
+                        ),
+                        TextButton.icon(
+                          onPressed: acting || users.isEmpty
+                              ? null
+                              : () => setModal(() {
+                                    if (allVisibleSelected) {
+                                      selected.removeAll(visibleIds);
+                                    } else {
+                                      selected.addAll(visibleIds);
+                                    }
+                                  }),
+                          icon: Icon(
+                            allVisibleSelected ? Icons.deselect_rounded : Icons.select_all_rounded,
+                            size: 16,
+                          ),
+                          label: Text(allVisibleSelected ? 'Ondoa uteuzi' : 'Chagua vyote vinavyoonekana'),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 8),
+                    Text(
+                      loading
+                          ? 'Inapakia orodha…'
+                          : error != null
+                              ? 'Hitilafu: $error'
+                              : '${users.length} wanaonekana · $matched matokeo'
+                                  '${selectedCount > 0 ? ' · $selectedCount wamechaguliwa' : ''}',
+                      style: TextStyle(
+                        fontSize: 11.5,
+                        color: error != null ? const Color(0xFFFB7185) : AdminColors.textSecondary,
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    Expanded(
+                      child: Container(
+                        decoration: BoxDecoration(
+                          color: AdminColors.bgPrimary,
+                          borderRadius: BorderRadius.circular(14),
+                          border: Border.all(color: const Color(0x14FFFFFF)),
+                        ),
+                        clipBehavior: Clip.antiAlias,
+                        child: loading && users.isEmpty
+                            ? const Center(child: CircularProgressIndicator(strokeWidth: 2.4))
+                            : users.isEmpty
+                                ? Center(
+                                    child: Padding(
+                                      padding: const EdgeInsets.all(20),
+                                      child: Text(
+                                        premiumOnly
+                                            ? 'Hakuna watumiaji wa premium wanaolingana.'
+                                            : 'Hakuna watumiaji wanaolingana.',
+                                        textAlign: TextAlign.center,
+                                        style: const TextStyle(color: AdminColors.textSecondary, height: 1.35),
+                                      ),
+                                    ),
+                                  )
+                                : ListView.separated(
+                                    itemCount: users.length,
+                                    separatorBuilder: (_, _) =>
+                                        const Divider(height: 1, color: Color(0x12FFFFFF)),
+                                    itemBuilder: (context, i) {
+                                      final u = users[i];
+                                      final checked = selected.contains(u.id);
+                                      final premium = u.effectivePremium;
+                                      return CheckboxListTile(
+                                        value: checked,
+                                        onChanged: acting
+                                            ? null
+                                            : (v) => setModal(() {
+                                                  if (v == true) {
+                                                    selected.add(u.id);
+                                                  } else {
+                                                    selected.remove(u.id);
+                                                  }
+                                                }),
+                                        dense: true,
+                                        controlAffinity: ListTileControlAffinity.leading,
+                                        activeColor: const Color(0xFFF43F5E),
+                                        title: Text(
+                                          u.name,
+                                          style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w700),
+                                        ),
+                                        subtitle: Padding(
+                                          padding: const EdgeInsets.only(top: 2),
+                                          child: Column(
+                                            crossAxisAlignment: CrossAxisAlignment.start,
+                                            children: [
+                                              Text(
+                                                '${u.phone} · ${u.displayDeviceId}',
+                                                style: const TextStyle(
+                                                  fontSize: 11,
+                                                  color: AdminColors.textSecondary,
+                                                  height: 1.25,
+                                                ),
+                                              ),
+                                              const SizedBox(height: 2),
+                                              Text(
+                                                '${premium ? 'PREMIUM' : 'FREE'} · ${sourceLabel(u)} · ${expiryLabel(u)}',
+                                                style: TextStyle(
+                                                  fontSize: 10.5,
+                                                  fontWeight: FontWeight.w600,
+                                                  color: premium
+                                                      ? const Color(0xFFFBBF24)
+                                                      : AdminColors.textSecondary,
+                                                ),
+                                              ),
+                                            ],
+                                          ),
+                                        ),
+                                      );
+                                    },
+                                  ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              actions: [
+                Row(
+                  children: [
+                    Expanded(
+                      child: OutlinedButton(
+                        onPressed: acting ? null : () => Navigator.pop(ctx),
+                        style: OutlinedButton.styleFrom(
+                          foregroundColor: AdminColors.textSecondary,
+                          side: const BorderSide(color: Color(0x26FFFFFF)),
+                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                        ),
+                        child: const Text('Ghairi'),
+                      ),
+                    ),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      flex: 2,
+                      child: FilledButton.icon(
+                        style: FilledButton.styleFrom(
+                          backgroundColor: const Color(0xFFDC2626),
+                          foregroundColor: Colors.white,
+                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                          padding: const EdgeInsets.symmetric(vertical: 12),
+                        ),
+                        onPressed: acting || selected.isEmpty
+                            ? null
+                            : () async {
+                                final ok = await _showDeleteConfirmModal(
+                                  title: 'Rudisha free $selectedCount watumiaji?',
+                                  message:
+                                      'Watumiaji $selectedCount wataondolewa premium (malipo + muda wa msimamizi). '
+                                      'Watakuwa free tena na watalazimika kulipa ili kuona channels za premium.',
+                                  confirmLabel: 'Ondoa premium',
+                                );
+                                if (!ok || !ctx.mounted) return;
+                                setModal(() => acting = true);
+                                try {
+                                  final n = await _bulkRevokePremiumIds(Set<String>.from(selected));
+                                  if (!ctx.mounted) return;
+                                  Navigator.pop(ctx);
+                                  if (!mounted) return;
+                                  _showToast(
+                                    n == 1
+                                        ? 'Premium imeondolewa kwa mtumiaji 1'
+                                        : 'Premium imeondolewa kwa watumiaji $n',
+                                    _ToastType.success,
+                                  );
+                                  unawaited(_searchUsersFromBackend());
+                                  unawaited(_refreshDashboardStats());
+                                } catch (e) {
+                                  if (!ctx.mounted) return;
+                                  setModal(() => acting = false);
+                                  _showToast('Imeshindwa: $e', _ToastType.error);
+                                }
+                              },
+                        icon: acting
+                            ? const SizedBox(
+                                width: 16,
+                                height: 16,
+                                child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
+                              )
+                            : const Icon(Icons.person_off_rounded, size: 18),
+                        label: Text(
+                          acting
+                              ? 'Inaondoa…'
+                              : selectedCount == 0
+                                  ? 'Chagua watumiaji'
+                                  : 'Ondoa premium ($selectedCount)',
+                          style: const TextStyle(fontWeight: FontWeight.w700),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            );
+          },
+        ),
+      );
+    } finally {
+      debounce?.cancel();
+      searchCtrl.dispose();
+    }
+  }
+
   Future<void> _applyAdminDuration(AdminUser u, Duration add) async {
     if (!_hasAdminSession) return;
     if (add.inMilliseconds < 1000) return;
@@ -4635,6 +5152,57 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
               const Text('Settings', style: TextStyle(fontSize: 24, fontWeight: FontWeight.w800)),
               const SizedBox(height: 16),
               _adminSessionCard(),
+              const SizedBox(height: 16),
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.all(16),
+                decoration: BoxDecoration(
+                  color: const Color(0x22F43F5E),
+                  borderRadius: BorderRadius.circular(14),
+                  border: Border.all(color: const Color(0x33F43F5E)),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Row(
+                      children: [
+                        Icon(Icons.person_off_rounded, color: Color(0xFFFB7185)),
+                        SizedBox(width: 10),
+                        Expanded(
+                          child: Text(
+                            'Ondoa premium kwa watumiaji',
+                            style: TextStyle(fontSize: 15, fontWeight: FontWeight.w800),
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 8),
+                    const Text(
+                      'Chuja orodha ya watumiaji (premium), chagua unaotaka, kisha warudishe free. '
+                      'Watapoteza ufikiaji wa malipo na muda wa msimamizi — watalazimika kulipa tena.',
+                      style: TextStyle(fontSize: 11.5, height: 1.4, color: AdminColors.textSecondary),
+                    ),
+                    const SizedBox(height: 12),
+                    SizedBox(
+                      width: double.infinity,
+                      child: FilledButton.icon(
+                        style: FilledButton.styleFrom(
+                          backgroundColor: const Color(0xFFDC2626),
+                          foregroundColor: Colors.white,
+                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                          padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 14),
+                        ),
+                        onPressed: _hasAdminSession ? () => unawaited(_showBulkRevokePremiumDialog()) : null,
+                        icon: const Icon(Icons.filter_list_rounded, size: 18),
+                        label: const Text(
+                          'Chuja & ondoa premium',
+                          style: TextStyle(fontWeight: FontWeight.w700),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
               const SizedBox(height: 20),
               const Text('Site Name', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600)),
               const SizedBox(height: 6),
