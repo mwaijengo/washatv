@@ -2631,8 +2631,8 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
         .get(
           Uri.parse('$_apiBase/api/v1/admin/users').replace(
             queryParameters: {
-              'limit': '2000',
-              'premium': premiumOnly ? '1' : '0',
+              'limit': premiumOnly ? '2000' : '2000',
+              if (premiumOnly) 'premium': '1',
               if (q.isNotEmpty) 'q': q,
             },
           ),
@@ -2644,9 +2644,68 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
     }
     final map = jsonDecode(res.body) as Map<String, dynamic>;
     final rawUsers = map['users'];
-    final users = rawUsers is List ? _parseUsersJson(rawUsers) : <AdminUser>[];
+    var users = rawUsers is List ? _parseUsersJson(rawUsers) : <AdminUser>[];
+    final serverPremiumOnly = map['premium_only'] == true;
+
+    // Older backends ignore ?premium=1 — enrich from /subscriptions (active only).
+    if (premiumOnly && !serverPremiumOnly) {
+      try {
+        final subRes = await http
+            .get(Uri.parse('$_apiBase/api/v1/admin/subscriptions'), headers: _adminHeaders())
+            .timeout(const Duration(seconds: 20));
+        if (subRes.statusCode >= 200 && subRes.statusCode < 300) {
+          final subMap = jsonDecode(subRes.body) as Map<String, dynamic>;
+          final rawSubs = subMap['subscriptions'];
+          if (rawSubs is List) {
+            final byId = {for (final u in users) u.id: u};
+            for (final row in rawSubs.whereType<Map>()) {
+              final j = row.cast<String, dynamic>();
+              final status = _s(j['status']).toLowerCase();
+              if (status != 'active') continue;
+              final id = _s(j['id']);
+              if (id.isEmpty) continue;
+              final existing = byId[id];
+              if (existing != null) {
+                if (!existing.effectivePremium) {
+                  existing.premiumUntil = _dt(j['end_date']) ?? existing.premiumUntil;
+                }
+                continue;
+              }
+              byId[id] = AdminUser(
+                id: id,
+                name: _s(j['user_name'], fallback: 'Viewer'),
+                phone: '—',
+                deviceId: null,
+                status: 'active',
+                subscription: 'premium',
+                createdAt: _dt(j['created_at']) ?? DateTime.fromMillisecondsSinceEpoch(0),
+                // Subscriptions API marks active via paid OR admin window; end_date is paid only.
+                premiumUntil: _dt(j['end_date']) ?? DateTime.now().add(const Duration(hours: 1)),
+              );
+            }
+            users = byId.values.toList();
+          }
+        }
+      } catch (_) {
+        // Keep users list from /admin/users if subscriptions fails.
+      }
+    }
+
     // Client-side safety net: keep only users who still look premium when filtering.
-    final filtered = premiumOnly ? users.where((u) => u.effectivePremium).toList() : users;
+    var filtered = premiumOnly ? users.where((u) => u.effectivePremium).toList() : users;
+    if (q.isNotEmpty) {
+      final needle = q.toLowerCase();
+      final compact = needle.replaceAll(RegExp(r'[\s\-_.]+'), '');
+      filtered = filtered.where((u) {
+        final hay = '${u.name} ${u.phone} ${u.displayDeviceId} ${u.id}'.toLowerCase();
+        if (hay.contains(needle)) return true;
+        if (compact.length >= 4) {
+          final compactHay = hay.replaceAll(RegExp(r'[\s\-_.]+'), '');
+          if (compactHay.contains(compact)) return true;
+        }
+        return false;
+      }).toList();
+    }
     filtered.sort((a, b) {
       final c = b.createdAt.compareTo(a.createdAt);
       if (c != 0) return c;
@@ -2663,46 +2722,84 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
 
     return (
       users: filtered,
-      matched: asInt(matchedRaw, filtered.length),
+      matched: premiumOnly || q.isNotEmpty ? filtered.length : asInt(matchedRaw, filtered.length),
       total: asInt(totalRaw, filtered.length),
-      premiumTotal: premiumRaw == null ? null : asInt(premiumRaw, filtered.length),
+      premiumTotal: premiumRaw == null
+          ? (premiumOnly ? filtered.length : null)
+          : asInt(premiumRaw, filtered.length),
     );
   }
 
   Future<int> _bulkRevokePremiumIds(Set<String> ids) async {
     if (ids.isEmpty) return 0;
-    final res = await http
-        .post(
-          Uri.parse('$_apiBase/api/v1/admin/users/bulk-revoke-premium'),
-          headers: _adminHeaders(),
-          body: jsonEncode({'user_ids': ids.toList()}),
-        )
-        .timeout(const Duration(seconds: 45));
-    if (res.statusCode < 200 || res.statusCode >= 300) {
-      final body = res.body.trim();
-      final detail = body.isNotEmpty && body.length < 220 ? body : 'HTTP ${res.statusCode}';
-      throw Exception(detail);
-    }
-    final map = jsonDecode(res.body) as Map<String, dynamic>;
-    final revokedCount = () {
-      final v = map['revoked_count'];
-      if (v is int) return v;
-      if (v is num) return v.toInt();
-      return ids.length;
-    }();
-    final revokedRaw = map['users'];
-    final revokedIds = <String>{};
-    if (revokedRaw is List) {
-      for (final row in revokedRaw) {
-        if (row is Map) {
-          final id = _s(row['id']);
-          if (id.isNotEmpty) revokedIds.add(id);
+    try {
+      final res = await http
+          .post(
+            Uri.parse('$_apiBase/api/v1/admin/users/bulk-revoke-premium'),
+            headers: _adminHeaders(),
+            body: jsonEncode({'user_ids': ids.toList()}),
+          )
+          .timeout(const Duration(seconds: 45));
+      if (res.statusCode == 404) {
+        // Older API builds may not have the bulk route yet — fall back per user.
+        return _bulkRevokePremiumIdsSequentially(ids);
+      }
+      if (res.statusCode < 200 || res.statusCode >= 300) {
+        final body = res.body.trim();
+        final detail = body.isNotEmpty && body.length < 220 ? body : 'HTTP ${res.statusCode}';
+        throw Exception(detail);
+      }
+      final map = jsonDecode(res.body) as Map<String, dynamic>;
+      final revokedCount = () {
+        final v = map['revoked_count'];
+        if (v is int) return v;
+        if (v is num) return v.toInt();
+        return ids.length;
+      }();
+      final revokedRaw = map['users'];
+      final revokedIds = <String>{};
+      if (revokedRaw is List) {
+        for (final row in revokedRaw) {
+          if (row is Map) {
+            final id = _s(row['id']);
+            if (id.isNotEmpty) revokedIds.add(id);
+          }
         }
       }
-    }
-    if (revokedIds.isEmpty) revokedIds.addAll(ids);
+      if (revokedIds.isEmpty) revokedIds.addAll(ids);
 
-    if (mounted) {
+      if (mounted) {
+        setState(() {
+          for (final u in _users) {
+            if (!revokedIds.contains(u.id)) continue;
+            u.subscription = 'free';
+            u.premiumUntil = null;
+            u.adminAccessUntil = null;
+          }
+        });
+      }
+      return revokedCount;
+    } on Exception {
+      rethrow;
+    }
+  }
+
+  Future<int> _bulkRevokePremiumIdsSequentially(Set<String> ids) async {
+    var ok = 0;
+    final revokedIds = <String>{};
+    for (final id in ids) {
+      final res = await http
+          .post(
+            Uri.parse('$_apiBase/api/v1/admin/users/${Uri.encodeComponent(id)}/revoke-premium'),
+            headers: _adminHeadersForDelete(),
+          )
+          .timeout(const Duration(seconds: 15));
+      if (res.statusCode >= 200 && res.statusCode < 300) {
+        ok += 1;
+        revokedIds.add(id);
+      }
+    }
+    if (mounted && revokedIds.isNotEmpty) {
       setState(() {
         for (final u in _users) {
           if (!revokedIds.contains(u.id)) continue;
@@ -2712,7 +2809,10 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
         }
       });
     }
-    return revokedCount;
+    if (ok == 0 && ids.isNotEmpty) {
+      throw Exception('Imeshindwa kuondoa premium (HTTP fallback)');
+    }
+    return ok;
   }
 
   Future<void> _showBulkRevokePremiumDialog() async {
