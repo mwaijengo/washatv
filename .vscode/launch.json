@@ -19,14 +19,6 @@
       "toolArgs": ["--dart-define-from-file=dev_defines.json"]
     },
     {
-      "name": "Admin · Chrome from root (heavy plugins — desktop only)",
-      "request": "launch",
-      "type": "dart",
-      "program": "lib/main_admin.dart",
-      "deviceId": "chrome",
-      "toolArgs": ["--dart-define-from-file=admin/dev_defines.json"]
-    },
-    {
       "name": "Viewer · Chrome",
       "request": "launch",
       "type": "dart",

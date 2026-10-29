@@ -6,6 +6,7 @@ import '../models/channel.dart';
 import '../player/wash_channel_playback.dart';
 import '../services/native_android_player.dart';
 import '../services/player_playback_service.dart';
+import '../theme/app_theme.dart';
 import '../utils/player_orientation.dart';
 
 typedef PlayerBackHandler = bool Function();
@@ -17,6 +18,7 @@ class PlayerScreen extends StatefulWidget {
     required this.channel,
     required this.onBack,
     required this.channels,
+    required this.resolveStream,
     this.onBackHandlerChanged,
     this.onFullscreenChanged,
   });
@@ -24,6 +26,8 @@ class PlayerScreen extends StatefulWidget {
   final Channel? channel;
   final VoidCallback onBack;
   final List<Channel> channels;
+  /// Fetches the playable stream from the server; returns null when access was denied (caller shows why).
+  final Future<Channel?> Function(Channel channel) resolveStream;
   final ValueChanged<PlayerBackHandler?>? onBackHandlerChanged;
   final ValueChanged<bool>? onFullscreenChanged;
 
@@ -115,13 +119,19 @@ class _PlayerScreenState extends State<PlayerScreen> {
 
   Future<void> _openLandscapePlayback() async {
     if (!mounted) return;
-    final c = _current;
-    if (!c.hasStream) {
+    final listed = _current;
+    if (!listed.hasStream) {
       widget.onBack();
       return;
     }
 
     final generation = ++_openGeneration;
+    final c = await widget.resolveStream(listed);
+    if (!_sessionAlive(generation)) return;
+    if (c == null || c.streamUrl.isEmpty) {
+      widget.onBack();
+      return;
+    }
     final channelData = channelDataFor(c);
 
     try {
@@ -184,13 +194,44 @@ class _PlayerScreenState extends State<PlayerScreen> {
           _leaveBeforeFullscreen();
         }
       },
-      child: const ColoredBox(
-        color: Colors.black,
+      child: ColoredBox(
+        color: AppTheme.background,
         child: Center(
-          child: SizedBox(
-            width: 28,
-            height: 28,
-            child: CircularProgressIndicator(strokeWidth: 2.5, color: Color(0xFFEF4444)),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Container(
+                width: 64,
+                height: 64,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  gradient: AppTheme.primaryGradient,
+                  boxShadow: [
+                    BoxShadow(
+                      color: AppTheme.cyan.withValues(alpha: 0.3),
+                      blurRadius: 20,
+                    ),
+                  ],
+                ),
+                child: const Padding(
+                  padding: EdgeInsets.all(16),
+                  child: CircularProgressIndicator(
+                    strokeWidth: 2.5,
+                    color: AppTheme.background,
+                  ),
+                ),
+              ),
+              const SizedBox(height: 20),
+              Text(
+                _current.name,
+                style: AppTheme.titleMedium,
+              ),
+              const SizedBox(height: 6),
+              Text(
+                'Inafungua player...',
+                style: AppTheme.bodyMedium.copyWith(fontSize: 12),
+              ),
+            ],
           ),
         ),
       ),

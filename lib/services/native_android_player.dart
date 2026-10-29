@@ -6,7 +6,7 @@ import 'package:flutter/services.dart';
 import '../models/channel_playback.dart';
 import '../models/remote_player_config.dart';
 
-/// Opens the Kotlin native player on Android (see `android/.../com/washatv/player/`).
+/// Opens Orizon TV's native [OrizonPlayerActivity] on Android.
 class NativeAndroidPlayer {
   NativeAndroidPlayer._();
 
@@ -30,6 +30,7 @@ class NativeAndroidPlayer {
     RemotePlayerConfig? playerPolicy,
     bool? dataSaver,
     String? defaultQuality,
+    String? videoZoomMode,
   }) async {
     if (!supported) return;
 
@@ -53,6 +54,20 @@ class NativeAndroidPlayer {
       if (playerPolicy != null) 'playerPolicyJson': jsonEncode(_policyToMap(playerPolicy)),
       if (dataSaver != null) 'dataSaver': dataSaver,
       if (defaultQuality != null && defaultQuality.isNotEmpty) 'defaultQuality': defaultQuality,
+      if (videoZoomMode != null && videoZoomMode.isNotEmpty) 'videoZoomMode': videoZoomMode,
+    });
+  }
+
+  static Future<void> syncUserPlaybackSettings({
+    required bool dataSaver,
+    required String defaultQuality,
+    required String videoZoomMode,
+  }) async {
+    if (!supported) return;
+    await _channel.invokeMethod<void>('syncPlaybackPreferences', <String, dynamic>{
+      'dataSaver': dataSaver,
+      'defaultQuality': defaultQuality,
+      'videoZoomMode': videoZoomMode,
     });
   }
 

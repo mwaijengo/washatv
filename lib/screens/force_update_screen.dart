@@ -2,6 +2,9 @@ import 'package:flutter/material.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../models/app_update_status.dart';
+import '../theme/app_theme.dart';
+import '../widgets/cinematic_background.dart';
+import '../widgets/gradient_button.dart';
 
 /// Non-dismissible gate — user must update from Play Store before using the app.
 class ForceUpdateScreen extends StatefulWidget {
@@ -71,26 +74,14 @@ class _ForceUpdateScreenState extends State<ForceUpdateScreen> with SingleTicker
     return PopScope(
       canPop: false,
       child: Scaffold(
-        backgroundColor: const Color(0xFF0B1220),
+        backgroundColor: AppTheme.background,
         body: Stack(
           fit: StackFit.expand,
           children: [
-            DecoratedBox(
-              decoration: BoxDecoration(
-                gradient: RadialGradient(
-                  center: const Alignment(0, -0.35),
-                  radius: 1.15,
-                  colors: [
-                    const Color(0xFF6366F1).withValues(alpha: 0.22),
-                    const Color(0xFF0B1220),
-                    const Color(0xFF0B1220),
-                  ],
-                ),
-              ),
-            ),
+            const CinematicBackground(),
             SafeArea(
               child: Padding(
-                padding: const EdgeInsets.fromLTRB(24, 24, 24, 28),
+                padding: const EdgeInsets.fromLTRB(28, 28, 28, 32),
                 child: Column(
                   children: [
                     const Spacer(flex: 2),
@@ -99,75 +90,58 @@ class _ForceUpdateScreenState extends State<ForceUpdateScreen> with SingleTicker
                         CurvedAnimation(parent: _pulse, curve: Curves.easeInOut),
                       ),
                       child: Container(
-                        width: 84,
-                        height: 84,
+                        width: 88,
+                        height: 88,
                         decoration: BoxDecoration(
                           borderRadius: BorderRadius.circular(24),
-                          gradient: const LinearGradient(
-                            colors: [Color(0xFF6366F1), Color(0xFF8B5CF6)],
-                          ),
+                          gradient: AppTheme.primaryGradient,
                           boxShadow: [
                             BoxShadow(
-                              color: const Color(0xFF6366F1).withValues(alpha: 0.35),
+                              color: AppTheme.cyan.withValues(alpha: 0.35),
                               blurRadius: 28,
                               offset: const Offset(0, 12),
                             ),
                           ],
                         ),
-                        child: const Icon(Icons.system_update_alt_rounded, size: 40, color: Colors.white),
+                        child: const Icon(Icons.system_update_alt_rounded, size: 42, color: AppTheme.background),
                       ),
                     ),
-                    const SizedBox(height: 28),
+                    const SizedBox(height: 32),
                     Text(
                       widget.status.updateTitle,
                       textAlign: TextAlign.center,
-                      style: const TextStyle(
-                        fontSize: 26,
-                        fontWeight: FontWeight.w800,
-                        color: Colors.white,
-                        letterSpacing: -0.3,
-                      ),
+                      style: AppTheme.displayMedium,
                     ),
                     const SizedBox(height: 14),
                     Text(
                       widget.status.updateMessage,
                       textAlign: TextAlign.center,
-                      style: const TextStyle(fontSize: 15, height: 1.45, color: Color(0xFFCBD5E1)),
+                      style: AppTheme.bodyMedium.copyWith(fontSize: 15),
                     ),
-                    const SizedBox(height: 22),
+                    const SizedBox(height: 24),
                     Container(
                       width: double.infinity,
-                      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+                      padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 16),
                       decoration: BoxDecoration(
-                        color: const Color(0x14FFFFFF),
-                        borderRadius: BorderRadius.circular(16),
-                        border: Border.all(color: const Color(0x22FFFFFF)),
+                        color: AppTheme.surfaceElevated,
+                        borderRadius: BorderRadius.circular(18),
+                        border: Border.all(color: AppTheme.white10),
                       ),
                       child: Column(
                         children: [
                           _metaRow('Toleo lako', current),
-                          const SizedBox(height: 8),
+                          const SizedBox(height: 10),
                           _metaRow('Inahitajika', _requiredLabel),
                         ],
                       ),
                     ),
                     const Spacer(flex: 3),
-                    SizedBox(
-                      width: double.infinity,
+                    GradientButton(
+                      label: 'Fungua Play Store',
+                      icon: Icons.shop_rounded,
+                      expanded: true,
+                      onPressed: _openStore,
                       height: 52,
-                      child: FilledButton.icon(
-                        onPressed: _openStore,
-                        style: FilledButton.styleFrom(
-                          backgroundColor: const Color(0xFF6366F1),
-                          foregroundColor: Colors.white,
-                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
-                        ),
-                        icon: const Icon(Icons.shop_rounded),
-                        label: const Text(
-                          'Fungua Play Store',
-                          style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700),
-                        ),
-                      ),
                     ),
                     const SizedBox(height: 12),
                     SizedBox(
@@ -176,15 +150,15 @@ class _ForceUpdateScreenState extends State<ForceUpdateScreen> with SingleTicker
                       child: OutlinedButton.icon(
                         onPressed: _checking ? null : _recheck,
                         style: OutlinedButton.styleFrom(
-                          foregroundColor: const Color(0xFFE2E8F0),
-                          side: const BorderSide(color: Color(0x33FFFFFF)),
+                          foregroundColor: AppTheme.textPrimary,
+                          side: const BorderSide(color: AppTheme.white14),
                           shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
                         ),
                         icon: _checking
                             ? const SizedBox(
                                 width: 16,
                                 height: 16,
-                                child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white70),
+                                child: CircularProgressIndicator(strokeWidth: 2),
                               )
                             : const Icon(Icons.refresh_rounded),
                         label: Text(_checking ? 'Inakagua…' : 'Nimesasisha — kagua tena'),
@@ -203,14 +177,12 @@ class _ForceUpdateScreenState extends State<ForceUpdateScreen> with SingleTicker
   Widget _metaRow(String label, String value) {
     return Row(
       children: [
-        Expanded(
-          child: Text(label, style: const TextStyle(fontSize: 12.5, color: Color(0xFF94A3B8))),
-        ),
+        Expanded(child: Text(label, style: AppTheme.bodyMedium.copyWith(fontSize: 13))),
         Flexible(
           child: Text(
             value,
             textAlign: TextAlign.end,
-            style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: Color(0xFFF8FAFC)),
+            style: AppTheme.titleMedium.copyWith(fontSize: 13),
           ),
         ),
       ],

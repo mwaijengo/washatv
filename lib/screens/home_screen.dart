@@ -1,12 +1,19 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_animate/flutter_animate.dart';
 
 import '../constants/app_channel_categories.dart';
 import '../models/channel.dart';
 import '../models/hero_slide.dart';
+import '../models/app_user_settings.dart';
 import '../theme/app_theme.dart';
-import '../utils/cache_bust_image_url.dart';
 import '../widgets/channel_card.dart';
+import '../widgets/channel_flex_grid.dart';
+import '../widgets/channel_row.dart';
 import '../widgets/glass_panel.dart';
+import '../widgets/gradient_button.dart';
+import '../widgets/hero_carousel.dart';
+import '../widgets/section_header.dart';
+import '../widgets/washa_app_bar.dart';
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({
@@ -18,9 +25,9 @@ class HomeScreen extends StatefulWidget {
     required this.premium,
     required this.channels,
     required this.slides,
-    /// From bootstrap `version` — carousel images reload after admin publishes changes.
     this.carouselConfigVersion = 0,
     this.displayName,
+    this.channelDisplay = ChannelDisplayStyle.scroll,
   });
 
   final int carouselIndex;
@@ -32,6 +39,7 @@ class HomeScreen extends StatefulWidget {
   final List<HeroSlide> slides;
   final int carouselConfigVersion;
   final String? displayName;
+  final ChannelDisplayStyle channelDisplay;
 
   @override
   State<HomeScreen> createState() => _HomeScreenState();
@@ -40,9 +48,8 @@ class HomeScreen extends StatefulWidget {
 class _HomeScreenState extends State<HomeScreen> {
   String query = '';
   String selectedCategory = 'All';
-  List<String> get categories {
-    return ['All', ...kAppChannelCategories];
-  }
+
+  List<String> get categories => ['All', ...kAppChannelCategories];
 
   @override
   Widget build(BuildContext context) {
@@ -56,248 +63,100 @@ class _HomeScreenState extends State<HomeScreen> {
     final free = widget.channels.where((e) => !e.premium && matches(e)).toList();
     final premiumChannels = widget.channels.where((e) => e.premium && matches(e)).toList();
     final slideCount = widget.slides.length;
-    final HeroSlide? slide =
-        slideCount == 0 ? null : widget.slides[widget.carouselIndex.clamp(0, slideCount - 1)];
-    return SingleChildScrollView(
-      padding: const EdgeInsets.fromLTRB(16, 18, 16, 120),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          _header(context),
-          const SizedBox(height: 22),
-          if (slide != null) ...[
-            ClipRRect(
-              borderRadius: BorderRadius.circular(32),
-              child: SizedBox(
-                height: 420,
-                child: Stack(
-                  fit: StackFit.expand,
-                  children: [
-                    AnimatedSwitcher(
-                      duration: const Duration(milliseconds: 700),
-                      child: Image.network(
-                        imageUrlWithCacheEpoch(slide.imageUrl, widget.carouselConfigVersion),
-                        fit: BoxFit.cover,
-                        key: ValueKey('${slide.id}|${widget.carouselConfigVersion}|${slide.imageUrl}'),
-                        errorBuilder: (_, __, ___) => Container(
-                          color: const Color(0xFF0F172A),
-                          alignment: Alignment.center,
-                          child: const Icon(Icons.broken_image_outlined, size: 40, color: Color(0xFF6B7280)),
-                        ),
-                      ),
-                    ),
-                    Container(
-                      decoration: const BoxDecoration(
-                        gradient: LinearGradient(
-                          begin: Alignment.bottomCenter,
-                          end: Alignment.topCenter,
-                          colors: [Color(0xDD000000), Color(0x66000000), Colors.transparent],
-                        ),
-                      ),
-                    ),
-                    Positioned(
-                      left: 22,
-                      right: 22,
-                      bottom: 24,
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(slide.title, style: const TextStyle(fontSize: 28, fontWeight: FontWeight.w800)),
-                          Text(slide.subtitle, style: const TextStyle(color: Color(0xFFE5E7EB))),
-                        ],
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-            const SizedBox(height: 12),
-            Row(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: List.generate(slideCount, (i) {
-                final active = i == widget.carouselIndex;
-                return GestureDetector(
-                  onTap: () => widget.onCarouselDot(i),
-                  child: AnimatedContainer(
-                    duration: const Duration(milliseconds: 250),
-                    margin: const EdgeInsets.symmetric(horizontal: 4),
-                    width: active ? 28 : 10,
-                    height: 10,
-                    decoration: BoxDecoration(
-                      color: active ? Colors.white : Colors.white30,
-                      borderRadius: BorderRadius.circular(12),
-                    ),
-                  ),
-                );
-              }),
-            ),
-            const SizedBox(height: 18),
-          ] else ...[
-            GlassPanel(
-              radius: 22,
-              child: Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
-                child: Row(
-                  children: [
-                    Icon(Icons.slideshow_rounded, color: AppTheme.indigo.withValues(alpha: 0.9)),
-                    const SizedBox(width: 12),
-                    const Expanded(
-                      child: Text(
-                        'Hakuna matangazo ya slides kwa sasa.',
-                        style: TextStyle(fontSize: 13, height: 1.35, color: Color(0xFFCBD5E1)),
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-            const SizedBox(height: 18),
-          ],
-          _searchAndFilter(),
-          const SizedBox(height: 18),
-          const Text(kSectionFreeChannelsTitle, style: TextStyle(fontSize: 18, fontWeight: FontWeight.w700)),
-          const SizedBox(height: 10),
-          _grid(free),
-          const SizedBox(height: 16),
-          GlassPanel(
-            radius: 30,
-            child: Container(
-              padding: const EdgeInsets.all(18),
-              decoration: BoxDecoration(
-                gradient: LinearGradient(
-                  colors: [AppTheme.amber.withValues(alpha: 0.08), AppTheme.orange.withValues(alpha: 0.08)],
-                ),
-              ),
-              child: Row(
-                children: [
-                  Container(
-                    width: 48,
-                    height: 48,
-                    decoration: BoxDecoration(
-                      gradient: const LinearGradient(colors: [AppTheme.amber, AppTheme.orange]),
-                      borderRadius: BorderRadius.circular(16),
-                    ),
-                    child: const Icon(Icons.workspace_premium),
-                  ),
-                  const SizedBox(width: 12),
-                  const Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text('Fungua Channel Zote', style: TextStyle(fontWeight: FontWeight.w800, fontSize: 20)),
-                        Text('Zaidi ya channel 30 za premium', style: TextStyle(color: Color(0xFF9CA3AF), fontSize: 12, fontWeight: FontWeight.w500)),
-                      ],
-                    ),
-                  ),
-                  ElevatedButton(onPressed: widget.onOpenSubscription, child: const Text('Fungua Sasa')),
-                ],
-              ),
-            ),
-          ),
-          const SizedBox(height: 20),
-          const Text(kSectionPremiumChannelsTitle, style: TextStyle(fontSize: 18, fontWeight: FontWeight.w700)),
-          const SizedBox(height: 10),
-          _grid(premiumChannels),
-        ],
-      ),
-    );
-  }
 
-  Widget _grid(List<Channel> list) {
-    return GridView.builder(
-      itemCount: list.length,
-      shrinkWrap: true,
-      physics: const NeverScrollableScrollPhysics(),
-      gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-        crossAxisCount: 2,
-        crossAxisSpacing: 12,
-        mainAxisSpacing: 12,
-        childAspectRatio: 0.85,
-      ),
-      itemBuilder: (_, i) {
-        final c = list[i];
-        return ChannelCard(
-          channel: c,
-          imageCacheEpoch: widget.carouselConfigVersion,
-          locked: c.premium && !widget.premium,
-          onTap: () => c.premium && !widget.premium ? widget.onOpenSubscription() : widget.onOpenPlayer(c),
-        );
-      },
-    );
-  }
-
-  Widget _header(BuildContext context) {
-    final initials = _initials(widget.displayName);
-    return Row(
-      children: [
-        Container(
-          width: 40,
-          height: 40,
-          decoration: BoxDecoration(
-            borderRadius: BorderRadius.circular(14),
-            gradient: const LinearGradient(colors: [AppTheme.indigo, AppTheme.purple]),
-          ),
-          child: const Icon(Icons.play_arrow),
-        ),
-        const SizedBox(width: 10),
-        const Expanded(
-          child: Text(
-            'WASHA TV',
-            style: TextStyle(fontSize: 30, fontWeight: FontWeight.w800),
-          ),
-        ),
-        Column(
-          crossAxisAlignment: CrossAxisAlignment.end,
-          children: [
-            Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-                  decoration: BoxDecoration(
-                    color: widget.premium ? const Color(0xFFFBBF24) : const Color(0xFF374151),
-                    borderRadius: BorderRadius.circular(12),
-                  ),
-                  child: Text(
-                    widget.premium ? 'PREMIUM' : 'FREE',
-                    style: TextStyle(
-                      fontSize: 9,
-                      fontWeight: FontWeight.w700,
-                      color: widget.premium ? const Color(0xFF111827) : const Color(0xFFD1D5DB),
-                    ),
-                  ),
-                ),
-                const SizedBox(width: 8),
-                Container(
-                  width: 40,
-                  height: 40,
-                  decoration: const BoxDecoration(
-                    shape: BoxShape.circle,
-                    gradient: LinearGradient(colors: [Color(0xFFA855F7), Color(0xFFEC4899)]),
-                  ),
-                  padding: const EdgeInsets.all(2),
-                  child: Container(
-                    decoration: const BoxDecoration(
-                      shape: BoxShape.circle,
-                      color: Color(0xFF374151),
-                    ),
-                    child: Center(
-                      child: Text(
-                        initials,
-                        style: const TextStyle(
-                          fontSize: 14,
-                          fontWeight: FontWeight.w800,
-                          color: Color(0xFFF3F4F6),
-                        ),
-                      ),
-                    ),
-                  ),
-                ),
-              ],
+    return CustomScrollView(
+      physics: const BouncingScrollPhysics(),
+      slivers: [
+        SliverPadding(
+          padding: const EdgeInsets.fromLTRB(20, 16, 20, 0),
+          sliver: SliverToBoxAdapter(
+            child: WashaAppBar(
+              displayName: widget.displayName,
+              premium: widget.premium,
             ),
-          ],
+          ),
         ),
+        SliverPadding(
+          padding: const EdgeInsets.fromLTRB(0, 20, 0, 0),
+          sliver: SliverToBoxAdapter(
+            child: slideCount > 0
+                ? HeroCarousel(
+                    slides: widget.slides,
+                    currentIndex: widget.carouselIndex,
+                    onIndexChanged: widget.onCarouselDot,
+                    imageCacheEpoch: widget.carouselConfigVersion,
+                  )
+                : _emptyHero(),
+          ),
+        ),
+        SliverPadding(
+          padding: const EdgeInsets.fromLTRB(20, 20, 20, 0),
+          sliver: SliverToBoxAdapter(child: _searchAndFilter()),
+        ),
+        SliverPadding(
+          padding: const EdgeInsets.fromLTRB(20, 24, 20, 0),
+          sliver: SliverToBoxAdapter(
+            child: SectionHeader(
+              title: kSectionFreeChannelsTitle,
+              subtitle: '${free.length} channeli za bure',
+              icon: Icons.tv_rounded,
+              accentColor: AppTheme.cyan,
+            ),
+          ),
+        ),
+        _freeChannelsSection(free),
+        SliverPadding(
+          padding: const EdgeInsets.fromLTRB(20, 6, 20, 0),
+          sliver: SliverToBoxAdapter(child: _premiumCta()),
+        ),
+        SliverPadding(
+          padding: const EdgeInsets.fromLTRB(20, 24, 20, 0),
+          sliver: SliverToBoxAdapter(
+            child: SectionHeader(
+              title: kSectionPremiumChannelsTitle,
+              subtitle: '${premiumChannels.length} channeli za premium',
+              icon: Icons.diamond_rounded,
+              accentColor: AppTheme.gold,
+              animationDelay: 100.ms,
+            ),
+          ),
+        ),
+        _premiumChannelsSection(premiumChannels, free.length),
+        const SliverPadding(padding: EdgeInsets.only(bottom: 130)),
       ],
+    );
+  }
+
+  Widget _emptyHero() {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 20),
+      child: GlassPanel(
+        radius: 24,
+        glow: true,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 24),
+          child: Row(
+            children: [
+              Container(
+                width: 48,
+                height: 48,
+                decoration: BoxDecoration(
+                  borderRadius: BorderRadius.circular(14),
+                  gradient: AppTheme.accentGradient,
+                ),
+                child: const Icon(Icons.slideshow_rounded, color: AppTheme.background),
+              ),
+              const SizedBox(width: 16),
+              Expanded(
+                child: Text(
+                  'Hakuna matangazo ya slides kwa sasa.',
+                  style: AppTheme.bodyMedium,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
     );
   }
 
@@ -307,16 +166,16 @@ class _HomeScreenState extends State<HomeScreen> {
         Expanded(
           flex: 7,
           child: GlassPanel(
-            radius: 16,
+            radius: 14,
             child: TextField(
               onChanged: (v) => setState(() => query = v),
-              style: const TextStyle(fontSize: 14, color: Colors.white),
-              decoration: const InputDecoration(
-                contentPadding: EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+              style: AppTheme.titleMedium.copyWith(fontSize: 14),
+              decoration: InputDecoration(
+                contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
                 border: InputBorder.none,
                 hintText: 'Tafuta channel...',
-                hintStyle: TextStyle(color: Color(0xFF9CA3AF), fontSize: 13),
-                prefixIcon: Icon(Icons.search, color: Color(0xFFA5B4FC), size: 20),
+                hintStyle: AppTheme.bodyMedium.copyWith(fontSize: 13),
+                prefixIcon: Icon(Icons.search_rounded, color: AppTheme.cyan.withValues(alpha: 0.7), size: 22),
               ),
             ),
           ),
@@ -325,14 +184,14 @@ class _HomeScreenState extends State<HomeScreen> {
         Expanded(
           flex: 5,
           child: GlassPanel(
-            radius: 16,
+            radius: 14,
             child: DropdownButtonFormField<String>(
               initialValue: selectedCategory,
               isExpanded: true,
-              dropdownColor: const Color(0xFF111827),
-              icon: const Icon(Icons.keyboard_arrow_down, color: Color(0xFFA5B4FC)),
+              dropdownColor: AppTheme.surfaceElevated,
+              icon: Icon(Icons.keyboard_arrow_down_rounded, color: AppTheme.cyan.withValues(alpha: 0.7)),
               decoration: const InputDecoration(
-                contentPadding: EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                contentPadding: EdgeInsets.symmetric(horizontal: 12, vertical: 12),
                 border: InputBorder.none,
               ),
               items: categories
@@ -342,7 +201,7 @@ class _HomeScreenState extends State<HomeScreen> {
                       child: Text(
                         categoryDisplayName(c),
                         overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(fontSize: 13, color: Colors.white),
+                        style: AppTheme.titleMedium.copyWith(fontSize: 13),
                       ),
                     ),
                   )
@@ -355,19 +214,120 @@ class _HomeScreenState extends State<HomeScreen> {
           ),
         ),
       ],
+    )
+        .animate(delay: 150.ms)
+        .fadeIn(duration: 400.ms)
+        .slideY(begin: 0.05, end: 0, duration: 400.ms);
+  }
+
+  Widget _premiumCta() {
+    return GlassPanel(
+      radius: 24,
+      glow: true,
+      glowColor: AppTheme.gold,
+      child: Container(
+        padding: const EdgeInsets.all(20),
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(24),
+          gradient: LinearGradient(
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
+            colors: [
+              AppTheme.gold.withValues(alpha: 0.08),
+              AppTheme.orange.withValues(alpha: 0.05),
+            ],
+          ),
+        ),
+        child: Row(
+          children: [
+            Container(
+              width: 52,
+              height: 52,
+              decoration: BoxDecoration(
+                gradient: AppTheme.premiumGradient,
+                borderRadius: BorderRadius.circular(16),
+                boxShadow: [
+                  BoxShadow(
+                    color: AppTheme.gold.withValues(alpha: 0.3),
+                    blurRadius: 16,
+                  ),
+                ],
+              ),
+              child: const Icon(Icons.diamond_rounded, color: AppTheme.background, size: 26),
+            ),
+            const SizedBox(width: 14),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text('Fungua Channel Zote', style: AppTheme.titleLarge.copyWith(fontSize: 17)),
+                  const SizedBox(height: 3),
+                  Text(
+                    'Zaidi ya channel 30 za premium HD',
+                    style: AppTheme.bodyMedium.copyWith(fontSize: 12),
+                  ),
+                ],
+              ),
+            ),
+            GradientButton(
+              label: 'Fungua',
+              style: GradientButtonStyle.premium,
+              onPressed: widget.onOpenSubscription,
+              height: 40,
+            ),
+          ],
+        ),
+      ),
+    )
+        .animate(delay: 200.ms)
+        .fadeIn(duration: 500.ms)
+        .slideY(begin: 0.06, end: 0, duration: 500.ms);
+  }
+
+  void _onChannelTap(Channel c) {
+    if (c.premium && !widget.premium) {
+      widget.onOpenSubscription();
+    } else {
+      widget.onOpenPlayer(c);
+    }
+  }
+
+  Widget _freeChannelsSection(List<Channel> free) {
+    if (widget.channelDisplay == ChannelDisplayStyle.grid) {
+      return ChannelFlexGridSliver(
+        channels: free,
+        startIndex: 0,
+        imageCacheEpoch: widget.carouselConfigVersion,
+        lockedFor: (c) => c.premium && !widget.premium,
+        onTap: _onChannelTap,
+        childAspectRatio: 0.78,
+        variant: ChannelCardVariant.grid,
+      );
+    }
+    return SliverPadding(
+      padding: const EdgeInsets.only(top: 8),
+      sliver: SliverToBoxAdapter(
+        child: ChannelRow(
+          channels: free,
+          startIndex: 0,
+          height: 236,
+          imageCacheEpoch: widget.carouselConfigVersion,
+          lockedFor: (c) => c.premium && !widget.premium,
+          onTap: _onChannelTap,
+        ),
+      ),
     );
   }
 
-  String _initials(String? name) {
-    final n = (name ?? '').trim();
-    if (n.isEmpty || n.toLowerCase() == 'free user') {
-      return 'FU';
-    }
-    final parts = n.split(RegExp(r'\s+'));
-    if (parts.length == 1) {
-      final first = parts.first;
-      return first.substring(0, first.length.clamp(1, 2)).toUpperCase();
-    }
-    return '${parts.first[0]}${parts.last[0]}'.toUpperCase();
+  Widget _premiumChannelsSection(List<Channel> premiumChannels, int startIndex) {
+    return ChannelFlexGridSliver(
+      channels: premiumChannels,
+      startIndex: startIndex,
+      imageCacheEpoch: widget.carouselConfigVersion,
+      lockedFor: (c) => c.premium && !widget.premium,
+      onTap: _onChannelTap,
+      childAspectRatio: 0.78,
+      premiumSection: true,
+    );
   }
 }

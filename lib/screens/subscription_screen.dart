@@ -95,7 +95,7 @@ class SubscriptionScreen extends StatefulWidget {
                       const SizedBox(
                         width: 52,
                         height: 52,
-                        child: CircularProgressIndicator(strokeWidth: 3, color: Color(0xFF60A5FA)),
+                        child: CircularProgressIndicator(strokeWidth: 3, color: AppTheme.cyan),
                       ),
                     const SizedBox(height: 16),
                     Text(
@@ -445,15 +445,11 @@ class _SubscriptionScreenState extends State<SubscriptionScreen> {
         height: 56,
         decoration: BoxDecoration(
           borderRadius: BorderRadius.circular(18),
-          gradient: const LinearGradient(
-            begin: Alignment.topLeft,
-            end: Alignment.bottomRight,
-            colors: [Color(0xFF1D4ED8), Color(0xFF2563EB), Color(0xFF60A5FA)],
-          ),
-          border: Border.all(color: const Color(0x66BFDBFE)),
+          gradient: AppTheme.primaryGradient,
+          border: Border.all(color: AppTheme.cyan.withValues(alpha: 0.4)),
           boxShadow: [
             BoxShadow(
-              color: const Color(0xFF3B82F6).withValues(alpha: 0.42),
+              color: AppTheme.cyan.withValues(alpha: 0.35),
               blurRadius: 22,
               offset: const Offset(0, 9),
             ),
@@ -513,8 +509,8 @@ class _SubscriptionScreenState extends State<SubscriptionScreen> {
         margin: const EdgeInsets.only(bottom: 10),
         decoration: AppTheme.glass(
           radius: BorderRadius.circular(20),
-          border: Border.all(width: 2, color: widget.selectedPlan.id == p.id ? const Color(0xFF3B82F6) : Colors.transparent),
-          color: widget.selectedPlan.id == p.id ? const Color(0x143B82F6) : null,
+          border: Border.all(width: 2, color: widget.selectedPlan.id == p.id ? AppTheme.cyan : Colors.transparent),
+          color: widget.selectedPlan.id == p.id ? AppTheme.cyan.withValues(alpha: 0.08) : null,
         ),
         child: Padding(
           padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),

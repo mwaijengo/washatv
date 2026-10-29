@@ -42,6 +42,22 @@ import {
 } from '../lib/appUpdatePolicy.js';
 import bcrypt from 'bcrypt';
 import { nanoid } from 'nanoid';
+import { safeEqual } from '../lib/clientAuth.js';
+import { FixedWindowLimiter } from '../lib/rateLimit.js';
+import { clientIp, ipAllowed, ipTag, parseIpAllowList } from '../lib/clientIp.js';
+import { readViewerClaims, registerViewerSecurityRoutes } from './viewerSecurity.js';
+
+/** Viewer catalog never carries playback secrets; streams come from POST /public/playback. */
+const PUBLIC_CHANNEL_COLUMNS = `id, name, category, premium, live, status, thumbnail,
+  (stream_url <> '') AS has_stream, viewers, rating, drm, sort_order, updated_at`;
+const LEGACY_PUBLIC_CHANNEL_COLUMNS = `id, name, category, premium, live, status, thumbnail,
+  (stream_url <> '') AS has_stream, stream_url, viewers, rating, drm, drm_clear_key, sort_order, updated_at`;
+
+function maskPhone(phone: string | null | undefined): string {
+  const p = String(phone ?? '').trim();
+  if (p.length < 6) return p ? '***' : '';
+  return `${p.slice(0, 3)}${'*'.repeat(p.length - 5)}${p.slice(-2)}`;
+}
 
 /** Normalize admin user search so Device IDs / USR ids still match with messy paste. */
 function parseAdminUserSearch(raw: string): {
@@ -241,6 +257,14 @@ export async function registerRoutes(
   const { pool, sse, env } = deps;
 
   const adminLoginConfigured = Boolean(env.ADMIN_EMAIL && env.ADMIN_PASSWORD_HASH);
+  const adminLoginLimiter = new FixedWindowLimiter(10, 15 * 60_000);
+  const adminAllowList = parseIpAllowList(env.ADMIN_ALLOWED_IPS);
+  const adminIpSecret = `${env.JWT_SECRET}|admin-ip-binding`;
+  const publicChannelColumns = env.LEGACY_CATALOG_STREAMS
+    ? LEGACY_PUBLIC_CHANNEL_COLUMNS
+    : PUBLIC_CHANNEL_COLUMNS;
+
+  await registerViewerSecurityRoutes(app, { pool, env });
 
   async function notifyClientsAfterPremiumGrant() {
     try {
@@ -390,12 +414,15 @@ export async function registerRoutes(
     const premiumUntilMs = candidates.length > 0 ? Math.max(...candidates) : null;
     const premiumActive = premiumUntilMs != null && premiumUntilMs > now;
     const adminAccessUntilMs = adminMs > now ? adminMs : null;
+    const viewer = await readViewerClaims(req);
+    const ownsDevice = viewer?.sub === deviceId;
 
     reply.header('Cache-Control', 'private, no-store');
     return {
       ok: true,
+      ...(req.headers.authorization && !viewer ? { session_valid: false } : {}),
       name: row.name,
-      phone: row.phone,
+      phone: ownsDevice ? row.phone : maskPhone(row.phone),
       subscription: row.subscription,
       premiumActive,
       premiumUntilMs,
@@ -437,7 +464,7 @@ export async function registerRoutes(
          FROM pricing_plans ORDER BY plan_key`,
       ),
       pool.query(
-        `SELECT id, name, category, premium, live, status, thumbnail, stream_url, viewers, rating, drm, drm_clear_key, sort_order, updated_at
+        `SELECT ${publicChannelColumns}
          FROM channels WHERE status = 'active' ORDER BY sort_order, name`,
       ),
       pool.query(
@@ -511,7 +538,7 @@ export async function registerRoutes(
 
   app.get('/api/v1/public/channels', async () => {
     const r = await pool.query(
-      `SELECT id, name, category, premium, live, status, thumbnail, stream_url, viewers, rating, drm, drm_clear_key, sort_order, updated_at
+      `SELECT ${publicChannelColumns}
        FROM channels WHERE status = 'active' ORDER BY sort_order, name`,
     );
     const v = await getConfigVersion(pool);
@@ -1162,7 +1189,7 @@ export async function registerRoutes(
       const headerSecret = String(
         req.headers['x-webhook-secret'] ?? req.headers['x-sonicpesa-secret'] ?? '',
       ).trim();
-      if (headerSecret !== env.SONICPESA_WEBHOOK_SECRET) {
+      if (!safeEqual(headerSecret, env.SONICPESA_WEBHOOK_SECRET)) {
         return reply.code(401).send({ error: 'invalid webhook secret' });
       }
     }
@@ -1181,8 +1208,25 @@ export async function registerRoutes(
     );
 
     const completedEvent = event === 'payment.completed' || event === 'payment.success';
-    const success = completedEvent || isSonicpesaSuccess(status);
+    let success = completedEvent || isSonicpesaSuccess(status);
     const failed = isSonicpesaFailure(status);
+
+    // Without a shared webhook secret the body is unauthenticated — confirm with SonicPesa before granting.
+    if (success && !env.SONICPESA_WEBHOOK_SECRET) {
+      let confirmed = false;
+      try {
+        const remote = await sonicpesaOrderStatus(env, orderId);
+        confirmed =
+          remote.ok && isSonicpesaSuccess(normalizePaymentStatus(remote.payment_status ?? remote.status ?? ''));
+      } catch (e) {
+        req.log.warn(e, 'SonicPesa webhook: confirmation lookup failed');
+        return reply.code(503).send({ error: 'confirmation unavailable, will retry' });
+      }
+      if (!confirmed) {
+        req.log.warn({ orderId, ip: clientIp(req) }, 'SonicPesa webhook: success claim not confirmed by provider');
+        success = false;
+      }
+    }
 
     // Orphan recovery: paid webhook for an order we never stored (initiate DB failure).
     if (!txRow.rowCount && success) {
@@ -1384,29 +1428,53 @@ export async function registerRoutes(
         hint: 'Set ADMIN_EMAIL and ADMIN_PASSWORD_HASH or use ADMIN_API_KEY',
       });
     }
+    const ip = clientIp(req);
+    if (!ipAllowed(adminAllowList, ip)) {
+      req.log.warn({ ip }, 'admin login: IP not in ADMIN_ALLOWED_IPS');
+      return reply.code(403).send({ error: 'This network is not allowed to access admin' });
+    }
+    const wait = adminLoginLimiter.hit(`ip:${ip}`);
+    if (wait) {
+      req.log.warn({ ip }, 'admin login: rate limited');
+      reply.header('Retry-After', String(wait));
+      return reply.code(429).send({ error: 'Too many login attempts. Try again later.' });
+    }
     const { email, password } = req.body ?? { email: '', password: '' };
-    if (email !== env.ADMIN_EMAIL || !password) {
+    const emailOk = typeof email === 'string' && safeEqual(email.trim().toLowerCase(), env.ADMIN_EMAIL!.toLowerCase());
+    const ok = typeof password === 'string' && password.length > 0
+      ? await bcrypt.compare(password, env.ADMIN_PASSWORD_HASH!)
+      : false;
+    if (!emailOk || !ok) {
+      req.log.warn({ ip }, 'admin login: invalid credentials');
       return reply.code(401).send({ error: 'Invalid credentials' });
     }
-    const ok = await bcrypt.compare(password, env.ADMIN_PASSWORD_HASH!);
-    if (!ok) return reply.code(401).send({ error: 'Invalid credentials' });
+    req.log.info({ ip }, 'admin login: success');
     const token = await reply.jwtSign(
-      { role: 'admin', sub: env.ADMIN_EMAIL } as Record<string, unknown>,
-      { expiresIn: '12h' },
+      { role: 'admin', sub: env.ADMIN_EMAIL, ipt: ipTag(adminIpSecret, ip) } as Record<string, unknown>,
+      { expiresIn: env.ADMIN_SESSION_TTL_SECONDS },
     );
-    return { token, expiresIn: 43_200 };
+    return { token, expiresIn: env.ADMIN_SESSION_TTL_SECONDS };
   });
 
   const adminPre = async (req: import('fastify').FastifyRequest, reply: import('fastify').FastifyReply) => {
+    const ip = clientIp(req);
+    if (!ipAllowed(adminAllowList, ip)) {
+      req.log.warn({ ip, url: req.url }, 'admin API: IP not in ADMIN_ALLOWED_IPS');
+      return reply.code(403).send({ error: 'This network is not allowed to access admin' });
+    }
     const key = req.headers['x-admin-key'];
-    if (env.ADMIN_API_KEY && key === env.ADMIN_API_KEY) return;
+    if (env.ADMIN_API_KEY && typeof key === 'string' && safeEqual(key, env.ADMIN_API_KEY)) return;
     if (!adminLoginConfigured) {
       return reply.code(503).send({ error: 'Admin auth is not configured on server' });
     }
     try {
       await req.jwtVerify();
-      const p = req.user as { role?: string };
+      const p = req.user as { role?: string; ipt?: string };
       if (p.role !== 'admin') throw new Error('forbidden');
+      if (env.ADMIN_IP_BINDING && p.ipt !== ipTag(adminIpSecret, ip)) {
+        req.log.warn({ ip }, 'admin API: token used from a different IP');
+        return reply.code(401).send({ error: 'Session is bound to another network. Log in again.' });
+      }
     } catch {
       return reply.code(401).send({ error: 'Unauthorized' });
     }

@@ -13,9 +13,15 @@ if [[ ! -f android/app/upload-keystore.jks ]]; then
   exit 1
 fi
 
+if ! grep -q '^appSigningSecret=.\{32,\}' android/key.properties && [[ -z "${WASHA_APP_SIGNING_SECRET:-}" ]]; then
+  echo "Missing appSigningSecret in android/key.properties (same value as APP_SIGNING_SECRET on the API)."
+  exit 1
+fi
+
 echo "Building release app bundle (com.washatv)..."
 flutter pub get
-flutter build appbundle --release
+# Obfuscated Dart symbols; keep build/symbols private (needed to read crash stack traces).
+flutter build appbundle --release --obfuscate --split-debug-info=build/symbols
 
 OUT="build/app/outputs/bundle/release/app-release.aab"
 echo ""

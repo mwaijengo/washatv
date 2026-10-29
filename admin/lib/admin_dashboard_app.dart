@@ -2411,6 +2411,26 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
                       }
                     },
                   ),
+                _userActionChip(
+                  icon: u.status == 'suspended' ? Icons.lock_open_rounded : Icons.block_rounded,
+                  label: u.status == 'suspended' ? 'Fungua kifaa' : 'Zuia kifaa',
+                  color: u.status == 'suspended' ? AdminColors.accentSuccess : AdminColors.accentDanger,
+                  onTap: () async {
+                    final blocking = u.status != 'suspended';
+                    try {
+                      await _syncUserToBackend(u, {'status': blocking ? 'suspended' : 'active'});
+                      if (mounted) {
+                        setState(() {});
+                        _showToast(
+                          blocking ? 'Kifaa kimezuiwa — hakitaweza kutazama channel yoyote' : 'Kifaa kimefunguliwa',
+                          _ToastType.success,
+                        );
+                      }
+                    } catch (e) {
+                      if (mounted) _showToast('Imeshindwa: $e', _ToastType.error);
+                    }
+                  },
+                ),
               ],
             ),
           ],

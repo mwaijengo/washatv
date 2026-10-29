@@ -10,6 +10,7 @@ import 'package:wakelock_plus/wakelock_plus.dart';
 import 'package:webview_flutter/webview_flutter.dart';
 
 import '../player/flutter_playback_mode.dart';
+import '../player/playback_http_headers.dart';
 import '../player/stream_url_utils.dart';
 import '../player/web_playback_config.dart';
 import '../player/web_player_html.dart';
@@ -17,6 +18,8 @@ import '../player/web_stream_probe.dart';
 import '../widgets/chewie_video_player_view.dart';
 import '../widgets/native_video_player_view.dart';
 import '../widgets/web_embedded_player.dart';
+import '../models/app_user_settings.dart';
+import '../services/app_settings_service.dart';
 import '../utils/player_orientation.dart';
 
 /// Full-screen playback: `media_kit` for streams; WebView for PHP/HTML pages (same strategy as RN).
@@ -77,6 +80,7 @@ class _FullscreenVideoPageState extends State<FullscreenVideoPage> with WidgetsB
 
   /** After landscape once this session, do not show hint again (until new page). */
   bool _hasSeenLandscapeSession = false;
+  late final BoxFit _videoFit;
 
   void _applyImmersive() {
     SystemChrome.setEnabledSystemUIMode(
@@ -94,6 +98,7 @@ class _FullscreenVideoPageState extends State<FullscreenVideoPage> with WidgetsB
         (widget.playbackMode == FlutterPlaybackMode.shaka ||
             (widget.playbackMode == FlutterPlaybackMode.mediaKit &&
                 useWebViewForUrl(widget.videoUrl)));
+    _videoFit = _videoFitFromSettings();
     unawaited(PlayerOrientation.enterFullscreenPlayer());
     WakelockPlus.enable();
     _init();
@@ -232,7 +237,11 @@ class _FullscreenVideoPageState extends State<FullscreenVideoPage> with WidgetsB
       // Some webview_flutter_web versions don't support background color.
     }
     await _guardWebViewNavigation(_webController!);
-    _webController!.loadRequest(Uri.parse(widget.videoUrl));
+    final headers = mergePlaybackHeaders(widget.videoUrl, widget.httpHeaders);
+    await _webController!.loadRequest(
+      Uri.parse(widget.videoUrl),
+      headers: headers,
+    );
   }
 
   /// Keep stream/gateway URLs inside the app — never hand off to VLC/MX/system chooser.
@@ -523,6 +532,14 @@ class _FullscreenVideoPageState extends State<FullscreenVideoPage> with WidgetsB
     }
   }
 
+  BoxFit _videoFitFromSettings() {
+    return switch (AppSettingsService.instance.settings.videoZoom) {
+      VideoZoomPreference.fit => BoxFit.contain,
+      VideoZoomPreference.fill => BoxFit.cover,
+      VideoZoomPreference.stretch => BoxFit.fill,
+    };
+  }
+
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
@@ -536,38 +553,22 @@ class _FullscreenVideoPageState extends State<FullscreenVideoPage> with WidgetsB
 
   @override
   Widget build(BuildContext context) {
-    return OrientationBuilder(
-      builder: (context, orientation) {
-        if (orientation == Orientation.landscape && !_hasSeenLandscapeSession) {
-          WidgetsBinding.instance.addPostFrameCallback((_) {
-            if (mounted && !_hasSeenLandscapeSession) {
-              setState(() => _hasSeenLandscapeSession = true);
-            }
-          });
-        }
-
-        final isLandscape = orientation == Orientation.landscape;
-        final videoFit = isLandscape ? BoxFit.cover : BoxFit.contain;
-
-        return Scaffold(
-          backgroundColor: Colors.black,
-          extendBody: true,
-          extendBodyBehindAppBar: true,
-          body: Stack(
-            fit: StackFit.expand,
-            children: [
-              Positioned.fill(
-                child: ColoredBox(
-                  color: Colors.black,
-                  child: _buildVideoSurface(videoFit),
-                ),
-              ),
-              if (_loading)
-                const Center(child: CircularProgressIndicator()),
-            ],
+    return Scaffold(
+      backgroundColor: Colors.black,
+      extendBody: true,
+      extendBodyBehindAppBar: true,
+      body: Stack(
+        fit: StackFit.expand,
+        children: [
+          Positioned.fill(
+            child: ColoredBox(
+              color: Colors.black,
+              child: _buildVideoSurface(_videoFit),
+            ),
           ),
-        );
-      },
+          if (_loading) const Center(child: CircularProgressIndicator()),
+        ],
+      ),
     );
   }
 }

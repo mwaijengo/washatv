@@ -17,6 +17,7 @@ class PlayerControls extends StatelessWidget {
     this.onOpenSettings,
     this.isFullscreen = false,
     this.onToggleFullscreen,
+    this.channelName,
   });
 
   final bool playing;
@@ -31,6 +32,7 @@ class PlayerControls extends StatelessWidget {
   final VoidCallback? onOpenSettings;
   final bool isFullscreen;
   final VoidCallback? onToggleFullscreen;
+  final String? channelName;
 
   @override
   Widget build(BuildContext context) {
@@ -42,91 +44,231 @@ class PlayerControls extends StatelessWidget {
         ignoring: !visible,
         child: AnimatedOpacity(
           opacity: visible ? 1 : 0,
-          duration: const Duration(milliseconds: 220),
+          duration: const Duration(milliseconds: 280),
           curve: Curves.easeOut,
           child: GestureDetector(
             behavior: HitTestBehavior.opaque,
             onTap: onUserInteraction,
             child: Container(
-              padding: const EdgeInsets.fromLTRB(16, 32, 16, 12),
+              padding: const EdgeInsets.fromLTRB(20, 48, 20, 16),
               decoration: const BoxDecoration(
                 gradient: LinearGradient(
                   begin: Alignment.bottomCenter,
                   end: Alignment.topCenter,
-                  colors: [Color(0xE6000000), Colors.transparent],
+                  colors: [Color(0xF0010208), Color(0x99010208), Colors.transparent],
+                  stops: [0.0, 0.6, 1.0],
                 ),
               ),
               child: Column(
+                mainAxisSize: MainAxisSize.min,
                 children: [
-                  GestureDetector(
-                    onTapDown: (d) {
-                      onUserInteraction?.call();
-                      final box = context.findRenderObject() as RenderBox?;
-                      if (box == null) return;
-                      final local = box.globalToLocal(d.globalPosition);
-                      onSeek((local.dx / box.size.width).clamp(0, 1));
-                    },
-                    child: ClipRRect(
-                      borderRadius: BorderRadius.circular(3),
-                      child: LinearProgressIndicator(
-                        minHeight: 4,
-                        value: progress,
-                        backgroundColor: const Color(0x33FFFFFF),
-                        valueColor: const AlwaysStoppedAnimation(AppTheme.danger),
+                  if (channelName != null) ...[
+                    Align(
+                      alignment: Alignment.centerLeft,
+                      child: Row(
+                        children: [
+                          Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                            decoration: BoxDecoration(
+                              color: AppTheme.live,
+                              borderRadius: BorderRadius.circular(4),
+                            ),
+                            child: Text(
+                              'LIVE',
+                              style: AppTheme.labelSmall.copyWith(
+                                color: Colors.white,
+                                fontSize: 9,
+                              ),
+                            ),
+                          ),
+                          const SizedBox(width: 10),
+                          Expanded(
+                            child: Text(
+                              channelName!,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: AppTheme.titleMedium.copyWith(fontSize: 15),
+                            ),
+                          ),
+                        ],
                       ),
                     ),
+                    const SizedBox(height: 14),
+                  ],
+                  _SeekBar(
+                    progress: progress,
+                    onSeek: onSeek,
+                    onUserInteraction: onUserInteraction,
                   ),
-                  const SizedBox(height: 10),
+                  const SizedBox(height: 12),
                   Row(
                     children: [
-                      IconButton(
-                        onPressed: () {
+                      _ControlButton(
+                        icon: playing ? Icons.pause_rounded : Icons.play_arrow_rounded,
+                        onTap: () {
                           onUserInteraction?.call();
                           onPlay();
                         },
-                        icon: Icon(playing ? Icons.pause : Icons.play_arrow),
+                        primary: true,
                       ),
-                      Text(positionLabel, style: const TextStyle(fontSize: 12)),
-                      const SizedBox(width: 8),
-                      const Text('/', style: TextStyle(color: Color(0xFF6B7280))),
-                      const SizedBox(width: 8),
-                      Text(durationLabel, style: const TextStyle(color: Color(0xFF6B7280), fontSize: 12)),
+                      const SizedBox(width: 12),
+                      Text(
+                        positionLabel,
+                        style: AppTheme.labelSmall.copyWith(
+                          color: AppTheme.textPrimary,
+                          fontSize: 12,
+                        ),
+                      ),
+                      Text(
+                        ' / $durationLabel',
+                        style: AppTheme.labelSmall.copyWith(fontSize: 12),
+                      ),
                       const Spacer(),
                       if (onOpenLanguage != null)
-                        IconButton(
-                          tooltip: 'Lugha',
-                          onPressed: () {
+                        _ControlButton(
+                          icon: Icons.language_rounded,
+                          onTap: () {
                             onUserInteraction?.call();
                             onOpenLanguage!();
                           },
-                          icon: const Icon(Icons.public, size: 22),
                         ),
                       if (onOpenSettings != null)
-                        IconButton(
-                          tooltip: 'Mipangilio',
-                          onPressed: () {
+                        _ControlButton(
+                          icon: Icons.tune_rounded,
+                          onTap: () {
                             onUserInteraction?.call();
                             onOpenSettings!();
                           },
-                          icon: const Icon(Icons.settings, size: 22),
                         ),
                       if (onToggleFullscreen != null)
-                        IconButton(
-                          tooltip: isFullscreen ? 'Toka skrini nzima' : 'Skrini nzima',
-                          onPressed: () {
+                        _ControlButton(
+                          icon: isFullscreen ? Icons.fullscreen_exit_rounded : Icons.fullscreen_rounded,
+                          onTap: () {
                             onUserInteraction?.call();
                             onToggleFullscreen!();
                           },
-                          icon: Icon(
-                            isFullscreen ? Icons.fullscreen_exit : Icons.fullscreen,
-                            size: 22,
-                          ),
                         ),
                     ],
                   ),
                 ],
               ),
             ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _SeekBar extends StatelessWidget {
+  const _SeekBar({
+    required this.progress,
+    required this.onSeek,
+    this.onUserInteraction,
+  });
+
+  final double progress;
+  final ValueChanged<double> onSeek;
+  final VoidCallback? onUserInteraction;
+
+  @override
+  Widget build(BuildContext context) {
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        return GestureDetector(
+          onTapDown: (d) {
+            onUserInteraction?.call();
+            onSeek((d.localPosition.dx / constraints.maxWidth).clamp(0, 1));
+          },
+          onHorizontalDragUpdate: (d) {
+            onUserInteraction?.call();
+            onSeek((d.localPosition.dx / constraints.maxWidth).clamp(0, 1));
+          },
+          child: SizedBox(
+            height: 20,
+            child: Stack(
+              alignment: Alignment.centerLeft,
+              children: [
+                Container(
+                  height: 3,
+                  decoration: BoxDecoration(
+                    color: AppTheme.white10,
+                    borderRadius: BorderRadius.circular(2),
+                  ),
+                ),
+                FractionallySizedBox(
+                  widthFactor: progress.clamp(0, 1),
+                  child: Container(
+                    height: 3,
+                    decoration: BoxDecoration(
+                      gradient: AppTheme.primaryGradient,
+                      borderRadius: BorderRadius.circular(2),
+                      boxShadow: [
+                        BoxShadow(
+                          color: AppTheme.cyan.withValues(alpha: 0.5),
+                          blurRadius: 6,
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+                Positioned(
+                  left: (progress.clamp(0, 1) * constraints.maxWidth) - 6,
+                  child: Container(
+                    width: 12,
+                    height: 12,
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      color: AppTheme.cyan,
+                      boxShadow: [
+                        BoxShadow(
+                          color: AppTheme.cyan.withValues(alpha: 0.6),
+                          blurRadius: 8,
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+}
+
+class _ControlButton extends StatelessWidget {
+  const _ControlButton({
+    required this.icon,
+    required this.onTap,
+    this.primary = false,
+  });
+
+  final IconData icon;
+  final VoidCallback onTap;
+  final bool primary;
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(12),
+        child: Container(
+          width: primary ? 44 : 40,
+          height: primary ? 44 : 40,
+          decoration: BoxDecoration(
+            shape: BoxShape.circle,
+            gradient: primary ? AppTheme.primaryGradient : null,
+            color: primary ? null : AppTheme.white07,
+            border: primary ? null : Border.all(color: AppTheme.white10),
+          ),
+          child: Icon(
+            icon,
+            size: primary ? 24 : 20,
+            color: primary ? AppTheme.background : AppTheme.textPrimary,
           ),
         ),
       ),

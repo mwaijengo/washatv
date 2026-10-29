@@ -4,10 +4,6 @@ import android.content.Context
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
-import android.view.View
-import android.webkit.CookieManager
-import android.webkit.WebChromeClient
-import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import com.washatv.domain.model.PlaybackState
@@ -38,9 +34,7 @@ class WebViewEngine(
     private var pageLoadGeneration = 0
     private var pageFinishRunnable: Runnable? = null
     private val pendingRunnables = mutableListOf<Runnable>()
-
-    private val DESKTOP_USER_AGENT =
-        "ReactNativeVideo/3.0 (Linux;Android 11) ExoPlayerLib/2.10.4"
+    private var pageReadyPolls = 0
 
     companion object {
         private const val TAG = "EaMaxAudio"
@@ -61,7 +55,7 @@ class WebViewEngine(
         audioLang: String = preferredAudioLanguage,
     ): Map<String, String> {
         val lang = normalizeAudioLanguage(audioLang)
-        val h = LinkedHashMap(session.headers)
+        val h = PlaybackHttpHeaders.merge(session.headers, session.mpdUrl)
         if (session.token.isNotBlank() &&
             !h.keys.any { it.equals("Authorization", ignoreCase = true) }
         ) {
@@ -89,28 +83,10 @@ class WebViewEngine(
             "Accept-Language=${headers["Accept-Language"]}")
 
         try {
+            val ua = headers["User-Agent"]?.takeIf { it.isNotBlank() }
+                ?: GatewayWebViewHelper.browserUserAgent(context)
             webView = WebView(context).apply {
-                setLayerType(View.LAYER_TYPE_HARDWARE, null)
-
-                settings.apply {
-                    javaScriptEnabled = true
-                    domStorageEnabled = true
-                    databaseEnabled = true
-                    allowFileAccess = true
-                    allowContentAccess = true
-                    allowFileAccessFromFileURLs = true
-                    allowUniversalAccessFromFileURLs = true
-                    mediaPlaybackRequiresUserGesture = false
-                    mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
-                    setSupportMultipleWindows(true)
-                    javaScriptCanOpenWindowsAutomatically = true
-                    loadWithOverviewMode = true
-                    useWideViewPort = true
-                    userAgentString = DESKTOP_USER_AGENT
-                }
-
-                CookieManager.getInstance().setAcceptCookie(true)
-                CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
+                GatewayWebViewHelper.applySettings(this, context, ua)
 
                 webViewClient = object : WebViewClient() {
                     override fun onPageStarted(
@@ -130,14 +106,7 @@ class WebViewEngine(
                     override fun onPageFinished(view: WebView?, finishedUrl: String?) {
                         super.onPageFinished(view, finishedUrl)
                         if (!isExternalWebPage) return
-                        val gen = pageLoadGeneration
-                        pageFinishRunnable?.let { mainHandler.removeCallbacks(it) }
-                        val r = Runnable {
-                            if (gen != pageLoadGeneration) return@Runnable
-                            handlePageReady()
-                        }
-                        pageFinishRunnable = r
-                        mainHandler.postDelayed(r, 600)
+                        schedulePageReadyPoll()
                     }
 
                     override fun onReceivedError(
@@ -146,21 +115,29 @@ class WebViewEngine(
                         error: android.webkit.WebResourceError?,
                     ) {
                         if (request?.isForMainFrame == true) {
-                            onError("WebView Error: ${error?.description}")
+                            Log.e(TAG, "main frame error: ${error?.description} url=${request.url}")
+                        }
+                    }
+
+                    override fun onReceivedHttpError(
+                        view: WebView?,
+                        request: android.webkit.WebResourceRequest?,
+                        errorResponse: android.webkit.WebResourceResponse?,
+                    ) {
+                        if (request?.isForMainFrame == true) {
+                            Log.w(
+                                TAG,
+                                "HTTP ${errorResponse?.statusCode} url=${request.url}",
+                            )
                         }
                     }
                 }
 
-                webChromeClient = object : WebChromeClient() {
-                    override fun onConsoleMessage(
-                        consoleMessage: android.webkit.ConsoleMessage?,
-                    ): Boolean {
-                        Log.d(
-                            "ShakaConsole",
-                            "[${consoleMessage?.messageLevel()}] ${consoleMessage?.message()}",
-                        )
-                        return true
-                    }
+                webChromeClient = GatewayWebViewHelper.createChromeClient(this) { msg ->
+                    Log.d(
+                        "ShakaConsole",
+                        "[${msg?.messageLevel()}] ${msg?.message()} — ${msg?.sourceId()}:${msg?.lineNumber()}",
+                    )
                 }
 
                 jsInterface = WebViewJsInterface(
@@ -181,8 +158,9 @@ class WebViewEngine(
             }
 
             val wv = webView ?: return
-            headers["User-Agent"]?.let { wv.settings.userAgentString = it }
+            wv.settings.userAgentString = ua
             if (isExternalWebPage) {
+                Log.d(TAG, "load gateway ua=${ua.take(80)}")
                 wv.loadUrl(url, headers)
                 onPlaybackStateChanged(PlaybackState.BUFFERING)
             } else {
@@ -190,6 +168,41 @@ class WebViewEngine(
             }
         } catch (e: Exception) {
             onError("Failed to initialize WebView: ${e.message}")
+        }
+    }
+
+    private fun schedulePageReadyPoll() {
+        pageReadyPolls = 0
+        pollPageReady()
+    }
+
+    private fun pollPageReady() {
+        val w = webView ?: return
+        val gen = pageLoadGeneration
+        w.evaluateJavascript(GatewayWebViewHelper.PAGE_PROBE_JS) { raw ->
+            if (gen != pageLoadGeneration) return@evaluateJavascript
+            val state = raw?.trim()?.trim('"') ?: "waiting"
+            Log.d(TAG, "page probe=$state poll=$pageReadyPolls")
+            when (state) {
+                "video" -> handlePageReady()
+                "captcha" -> {
+                    pageReadyPolls++
+                    if (pageReadyPolls < 90) {
+                        postDelayed({ pollPageReady() }, 1000L)
+                    } else {
+                        Log.w(TAG, "reCAPTCHA still visible after timeout — continuing anyway")
+                        handlePageReady()
+                    }
+                }
+                else -> {
+                    pageReadyPolls++
+                    if (pageReadyPolls < 45) {
+                        postDelayed({ pollPageReady() }, 1000L)
+                    } else {
+                        handlePageReady()
+                    }
+                }
+            }
         }
     }
 
@@ -306,7 +319,9 @@ class WebViewEngine(
             audioLanguageConfirmed = false
             lastLoadedAudioLanguage = lang
             val headers = buildLoadHeaders(session, lang)
-            headers["User-Agent"]?.let { w.settings.userAgentString = it }
+            val ua = headers["User-Agent"]?.takeIf { it.isNotBlank() }
+                ?: GatewayWebViewHelper.browserUserAgent(context)
+            w.settings.userAgentString = ua
             Log.d(TAG, "Reloading gateway for audio=$lang Accept-Language=${headers["Accept-Language"]}")
             w.loadUrl(session.mpdUrl, headers)
             return
@@ -340,7 +355,9 @@ class WebViewEngine(
         lastLoadedAudioLanguage = preferredAudioLanguage
         val wv = webView ?: return
         val headers = buildLoadHeaders(newSession, preferredAudioLanguage)
-        headers["User-Agent"]?.let { wv.settings.userAgentString = it }
+        val ua = headers["User-Agent"]?.takeIf { it.isNotBlank() }
+            ?: GatewayWebViewHelper.browserUserAgent(context)
+        wv.settings.userAgentString = ua
         if (shouldUseWebView(newSession.mpdUrl)) {
             wv.loadUrl(newSession.mpdUrl, headers)
         }

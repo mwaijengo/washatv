@@ -2,6 +2,7 @@ import 'package:http/http.dart' as http;
 
 import 'gateway_stream_extractor.dart';
 import 'manifest_url_extractor.dart';
+import 'playback_http_headers.dart';
 import 'stream_url_utils.dart';
 import 'web_playback_config.dart';
 
@@ -294,21 +295,11 @@ class WebStreamProbe {
   }
 
   static Map<String, String> _buildRequestHeaders(WebPlaybackConfig config) {
-    final h = Map<String, String>.from(config.headers);
+    final h = mergePlaybackHeaders(config.url, config.headers);
     if (config.token.isNotEmpty && !h.keys.any((k) => k.toLowerCase() == 'authorization')) {
       h['Authorization'] = 'Bearer ${config.token}';
     }
     h.putIfAbsent('User-Agent', () => _browserUa);
-    if (!h.keys.any((k) => k.toLowerCase() == 'referer')) {
-      try {
-        final u = Uri.parse(config.url.trim());
-        if (u.scheme.isNotEmpty && u.host.isNotEmpty) {
-          final port = (u.port <= 0 || u.port == 80 || u.port == 443) ? '' : ':${u.port}';
-          h['Referer'] = '${u.scheme}://${u.host}$port/';
-          h.putIfAbsent('Origin', () => '${u.scheme}://${u.host}$port');
-        }
-      } catch (_) {}
-    }
     return h;
   }
 

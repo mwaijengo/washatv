@@ -14,8 +14,10 @@ import '../models/viewer_profile.dart';
 import 'app_identity.dart';
 import 'payment_config.dart';
 import 'pricing_catalog.dart';
+import 'secure_playback_client.dart';
 
-const _prefsBootstrapCache = 'washatv_bootstrap_cache_v1';
+const _prefsBootstrapCache = 'washatv_bootstrap_cache_v2';
+const _legacyPrefsBootstrapCache = 'washatv_bootstrap_cache_v1';
 const _prefsBootstrapSyncSig = 'washatv_bootstrap_sync_sig_v1';
 
 /// Railway cold starts can exceed 10s; lightweight polls use this limit.
@@ -172,9 +174,16 @@ List<Plan> parsePricingPlansFromJsonList(List<dynamic> rawList) {
 class PublicApiService {
   /// [baseUrl] defaults to the Washa API on Railway unless `--dart-define=WASHA_API_BASE_URL=...` overrides it (e.g. local backend).
   PublicApiService({String? baseUrl})
-      : baseUrl = (baseUrl ?? const String.fromEnvironment('WASHA_API_BASE_URL', defaultValue: 'https://washatv-production.up.railway.app')).replaceAll(RegExp(r'/+$'), '');
+      : baseUrl = (baseUrl ?? const String.fromEnvironment('WASHA_API_BASE_URL', defaultValue: 'https://washatv-production.up.railway.app')).replaceAll(RegExp(r'/+$'), '') {
+    secure = SecurePlaybackClient(baseUrl: this.baseUrl);
+  }
 
   final String baseUrl;
+  late final SecurePlaybackClient secure;
+
+  /// Fetches the stream for [channel] from the server at play time (premium enforced server-side).
+  Future<Channel> resolvePlayback({required String deviceId, required Channel channel}) =>
+      secure.resolve(deviceId: deviceId, channel: channel);
 
   /// True when the app talks to a machine-local Washa API (dev checkout without SonicPesa).
   bool get isLocalDevelopment => PaymentConfig.isLocalApiHost(baseUrl);
@@ -283,9 +292,19 @@ class PublicApiService {
     if (shouldSkipLightweightPoll) return null;
     final uri = Uri.parse('$baseUrl/api/v1/public/user-profile/${Uri.encodeComponent(id)}');
     try {
-      final res = await http.get(uri, headers: _publicGetHeaders).timeout(_lightweightPollTimeout);
+      Future<http.Response> send() async => http
+          .get(uri, headers: {..._publicGetHeaders, ...await secure.authHeadersFor(id)})
+          .timeout(_lightweightPollTimeout);
+      var res = await send();
       if (res.statusCode != 200) return null;
-      final map = jsonDecode(res.body) as Map<String, dynamic>;
+      var map = jsonDecode(res.body) as Map<String, dynamic>;
+      if (map['session_valid'] == false) {
+        // Session is bound to the previous network (e.g. Wi-Fi → mobile data); re-sign once.
+        secure.invalidate();
+        res = await send();
+        if (res.statusCode != 200) return null;
+        map = jsonDecode(res.body) as Map<String, dynamic>;
+      }
       if (map['ok'] != true) return null;
 
       DateTime? parseMs(Object? raw) {
@@ -337,14 +356,27 @@ class PublicApiService {
   Future<void> persistBootstrapCache(PublicBootstrapData data) async {
     try {
       final prefs = await SharedPreferences.getInstance();
+      await prefs.remove(_legacyPrefsBootstrapCache);
       await prefs.setString(_prefsBootstrapCache, jsonEncode(_bootstrapToJson(data)));
       await prefs.setString(_prefsBootstrapSyncSig, data.syncSignature);
+    } catch (_) {}
+  }
+
+  Future<void> clearBootstrapCache() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.remove(_legacyPrefsBootstrapCache);
+      await prefs.remove(_prefsBootstrapCache);
+      await prefs.remove(_prefsBootstrapSyncSig);
     } catch (_) {}
   }
 
   Future<PublicBootstrapData?> loadBootstrapCache() async {
     try {
       final prefs = await SharedPreferences.getInstance();
+      if (prefs.containsKey(_legacyPrefsBootstrapCache)) {
+        await prefs.remove(_legacyPrefsBootstrapCache);
+      }
       final raw = prefs.getString(_prefsBootstrapCache);
       if (raw == null || raw.isEmpty) return null;
       return _parseBootstrapBody(raw);
@@ -457,25 +489,19 @@ class PublicApiService {
       final thumb = (j['thumbnail'] as String?)?.trim();
       final category = (j['category'] as String?)?.trim();
       if (name == null || name.isEmpty || thumb == null || thumb.isEmpty || category == null || category.isEmpty) continue;
-      final stream = (j['stream_url'] as String?)?.trim() ?? (j['streamUrl'] as String?)?.trim() ?? '';
-      final drmRaw = (j['drm'] as String?)?.trim().toLowerCase() ?? 'none';
-      final drmClearKey = (j['drm_clear_key'] as String?)?.trim() ?? (j['drmClearKey'] as String?)?.trim();
-      final drm = switch (drmRaw) {
-        'clearkey' => ChannelDrm.clearkey,
-        'widevine' => ChannelDrm.widevine,
-        _ => ChannelDrm.none,
-      };
+      // Legacy catalogs may still carry stream_url; it only marks availability and is never kept.
+      final legacyStream = (j['stream_url'] as String?)?.trim() ?? '';
       channels.add(
         Channel(
           id: _channelNumericId(j['id']),
+          apiId: j['id']?.toString().trim() ?? '',
           name: name,
           premium: j['premium'] as bool? ?? false,
           imageUrl: thumb,
           live: j['live'] as bool? ?? false,
           category: category,
-          streamUrl: stream,
-          drm: drm,
-          drmClearKey: drmClearKey?.isNotEmpty == true ? drmClearKey : null,
+          streamAvailable: j['has_stream'] as bool? ?? legacyStream.isNotEmpty,
+          drm: parseChannelDrm(j['drm']),
         ),
       );
     }
@@ -568,14 +594,15 @@ class PublicApiService {
         'channels': d.channels
             .map(
               (c) => {
-                'id': c.id,
+                'id': c.apiId.isNotEmpty ? c.apiId : c.id,
                 'name': c.name,
                 'category': c.category,
                 'premium': c.premium,
                 'live': c.live,
                 'status': 'active',
                 'thumbnail': c.imageUrl,
-                'stream_url': c.streamUrl,
+                'has_stream': c.hasStream,
+                'drm': c.drm.name,
               },
             )
             .toList(),

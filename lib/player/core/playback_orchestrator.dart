@@ -6,14 +6,15 @@ import 'package:flutter/material.dart';
 
 import '../../models/channel_playback.dart';
 import '../../models/remote_player_config.dart';
+import '../../services/app_settings_service.dart';
 import '../../services/native_android_player.dart';
 import '../../services/player_config_service.dart';
 import '../../services/player_engine.dart';
-import '../../services/storage_service.dart';
 import '../analytics/playback_analytics.dart';
 import 'playback_session.dart';
 import '../../screens/fullscreen_video_page.dart';
 import '../../player/flutter_playback_mode.dart';
+import '../../player/playback_http_headers.dart';
 import '../../player/stream_url_utils.dart';
 
 typedef ClearKeyExtractor = String Function(Map<String, dynamic>?);
@@ -54,6 +55,7 @@ class PlaybackOrchestrator {
     ));
 
     final policy = session.policy;
+    final userSettings = AppSettingsService.instance;
     unawaited(_syncNativePolicy(policy));
 
     final channelData = session.channelData;
@@ -72,7 +74,7 @@ class PlaybackOrchestrator {
     final drm = normalizeDrm(channelData, ck, url);
     final license = channelData['licenseUrl'] ?? channelData['license_url'];
     final token = extractToken(channelData);
-    final playbackHeaders = extractHeaders(channelData);
+    final playbackHeaders = mergePlaybackHeaders(url, extractHeaders(channelData));
     final audioLanguage = extractAudioLanguage(channelData);
     final merged = Map<String, String>.from(playbackHeaders);
     if (token.isNotEmpty &&
@@ -80,14 +82,12 @@ class PlaybackOrchestrator {
       merged['Authorization'] = 'Bearer $token';
     }
 
-    if (NativeAndroidPlayer.supported && PlayerEngine.usesNativeStack(engine)) {
-      bool dataSaver = true;
-      try {
-        dataSaver = await StorageService().getDataSaverEnabled();
-      } catch (_) {}
-      final defaultQuality = dataSaver
-          ? '360p'
-          : (policy.defaultQuality.trim().isEmpty ? 'AUTO' : policy.defaultQuality);
+    if (NativeAndroidPlayer.supported) {
+      final dataSaver = userSettings.settings.dataSaver;
+      final defaultQuality = userSettings.resolvePlaybackQuality(
+        serverDefault: policy.defaultQuality,
+      );
+      unawaited(_syncUserPlaybackSettings());
       await NativeAndroidPlayer.open(
         url: url,
         channelId: session.channelId,
@@ -105,6 +105,7 @@ class PlaybackOrchestrator {
         playerPolicy: policy,
         dataSaver: dataSaver,
         defaultQuality: defaultQuality,
+        videoZoomMode: userSettings.settings.videoZoom.nativeMode,
       );
       return;
     }
@@ -131,7 +132,9 @@ class PlaybackOrchestrator {
           playbackToken: token,
           playbackMode: effectiveFlutterMode,
           audioLanguage: audioLanguage,
-          defaultQuality: policy.defaultQuality,
+          defaultQuality: userSettings.resolvePlaybackQuality(
+            serverDefault: policy.defaultQuality,
+          ),
         ),
       ),
     );
@@ -199,6 +202,22 @@ class PlaybackOrchestrator {
       extractHeaders: extractHeaders,
       extractAudioLanguage: extractAudioLanguage,
     );
+  }
+
+  Future<void> _syncUserPlaybackSettings() async {
+    if (!NativeAndroidPlayer.supported) return;
+    try {
+      final settings = AppSettingsService.instance;
+      await NativeAndroidPlayer.syncUserPlaybackSettings(
+        dataSaver: settings.settings.dataSaver,
+        defaultQuality: settings.resolvePlaybackQuality(
+          serverDefault: _globalPolicy.defaultQuality,
+        ),
+        videoZoomMode: settings.settings.videoZoom.nativeMode,
+      );
+    } catch (e) {
+      debugPrint('[PlaybackOrchestrator] user playback settings sync: $e');
+    }
   }
 
   Future<void> _syncNativePolicy(RemotePlayerConfig policy) async {

@@ -74,8 +74,20 @@ Paste the printed hash into `.env` as `ADMIN_PASSWORD_HASH=...`.
 | GET | `/api/v1/public/bootstrap?since=` | Full snapshot; returns **304** if `since >= version` |
 | GET | `/api/v1/public/config?since=` | Settings + version |
 | GET | `/api/v1/public/plans` | Enabled pricing plans |
-| GET | `/api/v1/public/channels` | Active channels |
+| GET | `/api/v1/public/channels` | Active channels (metadata + `has_stream`; never stream URLs or DRM keys) |
 | GET | `/api/v1/stream/events` | SSE `config` events with `{ version }` |
+
+### Secure playback (viewer app)
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| POST | `/api/v1/public/session/challenge` | Single-use server challenge (90 s) |
+| POST | `/api/v1/public/session` | Challenge signed natively with `APP_SIGNING_SECRET` + package + signing-cert digest → viewer JWT |
+| POST | `/api/v1/public/playback` | `Bearer <viewer JWT>`, `{ channel_id }` → AES-GCM sealed `{ stream_url, drm, drm_clear_key }`. Premium, suspended devices, force-update and per-device rate limits are enforced here |
+
+Stream URLs exist only in the `channels` table, the admin API, and sealed per-session playback responses.
+
+Viewer and admin tokens are bound to the caller's network (`X-Real-IP`; IPv6 by /64). A token used from another network gets `401` (`session_ip_changed` for viewers — the app re-signs transparently). `ADMIN_ALLOWED_IPS` optionally restricts the whole admin API to listed IPs / CIDRs.
 
 ### Admin
 

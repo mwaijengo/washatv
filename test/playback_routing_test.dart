@@ -105,10 +105,47 @@ void main() {
       expect(extractClearKeyPayload(data), 'kid:key');
     });
 
-    test('mergePlaybackHeaders applies referer from stream host', () {
+    test('direct https media uses player headers without page referer', () {
       final headers = mergePlaybackHeaders('https://cdn.example.com/live.m3u8');
+      expect(headers.containsKey('Referer'), isFalse);
+      expect(headers.containsKey('Origin'), isFalse);
+      expect(headers['Accept'], '*/*');
+      expect(headers['User-Agent'], isNotEmpty);
+    });
+
+    test('https gateway pages keep browser headers', () {
+      final headers = mergePlaybackHeaders('https://cdn.example.com/play.php?id=1');
       expect(headers['Referer'], 'https://cdn.example.com/');
       expect(headers['Origin'], 'https://cdn.example.com');
+      expect(headers['X-Requested-With'], 'com.washatv');
+    });
+
+    test('extension-less https pages keep browser headers', () {
+      final headers = mergePlaybackHeaders('https://cdn.example.com/watch/channel');
+      expect(headers['Referer'], 'https://cdn.example.com/');
+      expect(headers['Origin'], 'https://cdn.example.com');
+    });
+
+    test('same-host referer is dropped for direct https media', () {
+      final headers = mergePlaybackHeaders(
+        'https://cdn.example.com/live.m3u8',
+        {
+          'Referer': 'https://cdn.example.com/player',
+          'Origin': 'https://cdn.example.com',
+          'User-Agent': 'CustomAgent',
+        },
+      );
+      expect(headers.containsKey('Referer'), isFalse);
+      expect(headers.containsKey('Origin'), isFalse);
+      expect(headers['User-Agent'], 'CustomAgent');
+    });
+
+    test('referer for another host is kept on direct https media', () {
+      final headers = mergePlaybackHeaders(
+        'https://cdn.example.com/live.m3u8',
+        {'Referer': 'https://allowed.example/'},
+      );
+      expect(headers['Referer'], 'https://allowed.example/');
     });
 
     test('tokenized cdn urls are detected', () {

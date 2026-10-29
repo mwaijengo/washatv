@@ -83,16 +83,8 @@ class PlayerEngine {
     return e;
   }
 
-  /// Kotlin [PlayerManager] / [EaMaxNativePlayerActivity].
-  static bool usesNativeStack(String engine) {
-    final e = normalize(engine);
-    return e == auto ||
-        e == kotlin ||
-        e == exo ||
-        e == webview ||
-        e == webplayer ||
-        e == shaka;
-  }
+  /// Android always uses [OrizonPlayerActivity] (native Media3).
+  static bool usesNativeStack(String _) => true;
 
   static bool usesExternalApp(String engine) {
     // All engines play in-app; kept for API compatibility.

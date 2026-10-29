@@ -12,8 +12,21 @@ export async function buildApp(env: Env) {
   const sse = new SseHub();
 
   const app = Fastify({
-    logger: { level: env.LOG_LEVEL },
+    logger: {
+      level: env.LOG_LEVEL,
+      redact: ['req.headers.authorization', 'req.headers["x-admin-key"]'],
+    },
     trustProxy: true,
+    bodyLimit: 256 * 1024,
+  });
+
+  app.addHook('onSend', async (_req, reply, payload) => {
+    reply.header('X-Content-Type-Options', 'nosniff');
+    reply.header('X-Frame-Options', 'DENY');
+    reply.header('Referrer-Policy', 'no-referrer');
+    reply.header('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
+    reply.removeHeader('X-Powered-By');
+    return payload;
   });
 
   await app.register(sensible);

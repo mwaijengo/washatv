@@ -9,26 +9,48 @@ class GlassPanel extends StatelessWidget {
     super.key,
     required this.child,
     this.padding,
-    this.radius = 24,
+    this.radius = 20,
     this.color,
+    this.border,
+    this.glowColor,
+    this.glow = false,
   });
 
   final Widget child;
   final EdgeInsetsGeometry? padding;
   final double radius;
   final Color? color;
+  final Border? border;
+  final Color? glowColor;
+  final bool glow;
 
   @override
   Widget build(BuildContext context) {
+    final r = BorderRadius.circular(radius);
     return ClipRRect(
-      borderRadius: BorderRadius.circular(radius),
+      borderRadius: r,
       child: BackdropFilter(
-        filter: ImageFilter.blur(sigmaX: 20, sigmaY: 20),
+        filter: AppTheme.blur24,
         child: Container(
           padding: padding,
           decoration: AppTheme.glass(
-            radius: BorderRadius.circular(radius),
+            radius: r,
             color: color,
+            border: border ??
+                Border.all(
+                  color: glow
+                      ? (glowColor ?? AppTheme.cyan).withValues(alpha: 0.25)
+                      : AppTheme.white07,
+                ),
+            shadow: glow
+                ? [
+                    BoxShadow(
+                      color: (glowColor ?? AppTheme.cyan).withValues(alpha: 0.15),
+                      blurRadius: 24,
+                      spreadRadius: -4,
+                    ),
+                  ]
+                : null,
           ),
           child: child,
         ),

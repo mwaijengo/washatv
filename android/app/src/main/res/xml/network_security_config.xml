@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Release builds trust only system CAs, so user-installed proxy certificates
+  (HTTP Toolkit, Charles, mitmproxy) cannot decrypt API traffic.
+  Cleartext stays permitted because some upstream stream hosts are http-only.
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+    <domain-config cleartextTrafficPermitted="false">
+        <domain includeSubdomains="true">washatv-production.up.railway.app</domain>
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </domain-config>
+    <debug-overrides>
+        <trust-anchors>
+            <certificates src="system" />
+            <certificates src="user" />
+        </trust-anchors>
+    </debug-overrides>
+</network-security-config>

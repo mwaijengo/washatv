@@ -100,6 +100,8 @@ class AdminAuth extends ChangeNotifier {
 
       if (res.statusCode < 200 || res.statusCode >= 300) {
         if (res.statusCode == 401) return 'Barua pepe au neno la siri si sahihi.';
+        if (res.statusCode == 403) return 'Mtandao huu (IP) haujaruhusiwa kuingia admin.';
+        if (res.statusCode == 429) return 'Majaribio mengi sana. Subiri dakika 15 kisha jaribu tena.';
         if (res.statusCode == 503) {
           return 'Seva haijasanidi admin login (ADMIN_EMAIL / ADMIN_PASSWORD_HASH).';
         }

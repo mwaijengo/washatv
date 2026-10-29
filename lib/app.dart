@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:ui';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
@@ -21,16 +20,22 @@ import 'services/pricing_catalog.dart';
 import 'services/public_api_service.dart';
 import 'services/push_notification_service.dart';
 import 'services/payment_config.dart';
+import 'services/secure_playback_client.dart';
 import 'services/sonicpesa_payment_service.dart';
+import 'screens/settings_screen.dart';
+import 'services/app_cache_service.dart';
+import 'services/app_settings_service.dart';
+import 'services/native_android_player.dart';
 import 'services/storage_service.dart';
 import 'services/subscription_service.dart';
 import 'theme/app_theme.dart';
 import 'utils/player_orientation.dart';
 import 'widgets/bottom_nav.dart';
+import 'widgets/cinematic_background.dart';
 import 'widgets/no_internet_modal.dart';
 import 'widgets/notification_permission_dialog.dart';
 
-enum AppScreen { home, player, categories, profile, subscription }
+enum AppScreen { home, player, categories, profile, subscription, settings }
 
 const _secureChannel = MethodChannel('com.washatv/secure');
 
@@ -106,6 +111,9 @@ class _WashaAppState extends State<WashaApp> with WidgetsBindingObserver {
   DateTime? _lastExitBackPress;
   String _premiumPlanLabel = '';
   String _premiumAccessSource = 'none';
+  int _imageCacheBust = 0;
+
+  int get _effectiveImageCacheEpoch => remoteConfigVersion + _imageCacheBust;
 
   bool get premium => subService.isPremium(subEnd);
 
@@ -126,6 +134,7 @@ class _WashaAppState extends State<WashaApp> with WidgetsBindingObserver {
     WidgetsBinding.instance.addObserver(this);
     _lockShellPortrait();
     unawaited(_enableScreenSecurity());
+    unawaited(AppSettingsService.instance.load());
     _init();
     _schedulePremiumExpiryCheck();
     carouselTimer = Timer.periodic(const Duration(seconds: 5), (_) {
@@ -601,13 +610,39 @@ class _WashaAppState extends State<WashaApp> with WidgetsBindingObserver {
     if (s == AppScreen.subscription) {
       unawaited(_syncFromServer(silent: true, forceFull: true));
     }
-    if (s == AppScreen.subscription || s == AppScreen.profile) {
+    if (s == AppScreen.subscription || s == AppScreen.profile || s == AppScreen.settings) {
       unawaited(_syncViewerProfileFromServer());
     }
   }
 
   void _leavePlayer() {
     switchScreen(_returnScreen);
+  }
+
+  Future<Channel?> _resolveChannelStream(Channel channel) async {
+    try {
+      final id = deviceId.isNotEmpty ? deviceId : await storage.getOrCreateDeviceId();
+      return await api.resolvePlayback(deviceId: id, channel: channel);
+    } on PlaybackAccessException catch (e) {
+      if (!mounted) return null;
+      _scaffoldMessengerKey.currentState?.showSnackBar(
+        SnackBar(content: Text(e.userMessage), duration: const Duration(seconds: 4)),
+      );
+      switch (e.reason) {
+        case PlaybackDenial.premiumRequired:
+          unawaited(_syncViewerProfileFromServer());
+          if (subscriptionEnabled) {
+            WidgetsBinding.instance.addPostFrameCallback((_) {
+              if (mounted) switchScreen(AppScreen.subscription);
+            });
+          }
+        case PlaybackDenial.updateRequired:
+          unawaited(_recheckAppUpdate());
+        default:
+          break;
+      }
+      return null;
+    }
   }
 
   void _onSystemBack() {
@@ -633,9 +668,6 @@ class _WashaAppState extends State<WashaApp> with WidgetsBindingObserver {
       SnackBar(
         content: const Text('Bonyeza tena kurudi ili kufunga programu'),
         duration: const Duration(seconds: 2),
-        behavior: SnackBarBehavior.floating,
-        backgroundColor: const Color(0xFF1E293B),
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
       ),
     );
   }
@@ -822,9 +854,7 @@ class _WashaAppState extends State<WashaApp> with WidgetsBindingObserver {
       SnackBar(
         content: const Text('Premium imewashwa! Channels zote zimefunguliwa.'),
         duration: const Duration(seconds: 4),
-        behavior: SnackBarBehavior.floating,
-        backgroundColor: const Color(0xFF166534),
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+        backgroundColor: const Color(0xFF0A3D2E),
       ),
     );
   }
@@ -1299,7 +1329,7 @@ class _WashaAppState extends State<WashaApp> with WidgetsBindingObserver {
         },
         child: Scaffold(
         body: bootLoading
-            ? const Center(child: CircularProgressIndicator())
+            ? _bootLoadingScreen()
             : appUpdate.updateRequired
                 ? ForceUpdateScreen(
                     status: appUpdate,
@@ -1309,7 +1339,7 @@ class _WashaAppState extends State<WashaApp> with WidgetsBindingObserver {
                 ? _maintenanceScreen()
                 : Stack(
                 children: [
-                  const _OrbBackground(),
+                  const CinematicBackground(),
                   SafeArea(
                     top: !_playerFullscreen,
                     bottom: !_playerFullscreen,
@@ -1320,11 +1350,16 @@ class _WashaAppState extends State<WashaApp> with WidgetsBindingObserver {
                         if (syncRefreshing && !_playerFullscreen)
                           const LinearProgressIndicator(
                             minHeight: 2,
-                            backgroundColor: Color(0x33FFFFFF),
-                            color: Color(0xFF6366F1),
+                            backgroundColor: AppTheme.white07,
+                            color: AppTheme.cyan,
                           ),
                         if (bootstrapError != null && !_noInternetVisible && !_playerFullscreen) _bootstrapErrorBanner(),
-                        Expanded(child: _buildScreen()),
+                        Expanded(
+                          child: ListenableBuilder(
+                            listenable: AppSettingsService.instance,
+                            builder: (context, _) => _buildScreen(),
+                          ),
+                        ),
                         if (current != AppScreen.player)
                           BottomNav(
                             current: current,
@@ -1395,25 +1430,25 @@ class _WashaAppState extends State<WashaApp> with WidgetsBindingObserver {
           width: double.infinity,
           padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
           decoration: BoxDecoration(
-            color: const Color(0xE9181820),
-            borderRadius: BorderRadius.circular(14),
-            border: Border.all(color: const Color(0x55FBBF24)),
+            color: AppTheme.surfaceElevated.withValues(alpha: 0.95),
+            borderRadius: BorderRadius.circular(16),
+            border: Border.all(color: AppTheme.amber.withValues(alpha: 0.35)),
           ),
           child: Row(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               const Padding(
                 padding: EdgeInsets.only(top: 1),
-                child: Icon(Icons.cloud_off_rounded, color: Color(0xFFFBBF24), size: 22),
+                child: Icon(Icons.cloud_off_rounded, color: AppTheme.amber, size: 22),
               ),
               const SizedBox(width: 10),
               Expanded(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    const Text('Seva haipatikani', style: TextStyle(fontWeight: FontWeight.w700, fontSize: 14)),
+                    const Text('Seva haipatikani', style: TextStyle(fontWeight: FontWeight.w700, fontSize: 14, color: AppTheme.textPrimary)),
                     const SizedBox(height: 5),
-                    Text(msg, style: const TextStyle(fontSize: 12, height: 1.35, color: Color(0xFFCBD5E1))),
+                    Text(msg, style: AppTheme.bodyMedium.copyWith(fontSize: 12)),
                     const SizedBox(height: 10),
                     const Text(
                       'URL inayotumiwa:',
@@ -1495,18 +1530,20 @@ class _WashaAppState extends State<WashaApp> with WidgetsBindingObserver {
         return HomeScreen(
           channels: channels,
           slides: slides,
-          carouselConfigVersion: remoteConfigVersion,
+          carouselConfigVersion: _effectiveImageCacheEpoch,
           carouselIndex: carousel,
           onCarouselDot: (i) => setState(() => carousel = i),
           onOpenPlayer: _openPlayer,
           onOpenSubscription: () => switchScreen(AppScreen.subscription),
           premium: premium,
           displayName: _displayName,
+          channelDisplay: AppSettingsService.instance.settings.channelDisplay,
         );
       case AppScreen.player:
         return PlayerScreen(
           channels: channels,
           channel: selectedChannel,
+          resolveStream: _resolveChannelStream,
           onBack: _leavePlayer,
           onBackHandlerChanged: (handler) => _playerBackHandler = handler,
           onFullscreenChanged: (value) {
@@ -1518,7 +1555,7 @@ class _WashaAppState extends State<WashaApp> with WidgetsBindingObserver {
       case AppScreen.categories:
         return CategoriesScreen(
           channels: channels,
-          channelImageCacheEpoch: remoteConfigVersion,
+          channelImageCacheEpoch: _effectiveImageCacheEpoch,
           premium: premium,
           onOpenPlayer: _openPlayer,
           onOpenSubscription: () => switchScreen(AppScreen.subscription),
@@ -1560,7 +1597,70 @@ class _WashaAppState extends State<WashaApp> with WidgetsBindingObserver {
           onPlanChange: (p) => setState(() => selectedPlan = p),
           onPay: activateSubscription,
         );
+      case AppScreen.settings:
+        return SettingsScreen(
+          premium: premium,
+          busy: syncRefreshing,
+          onSaveAndRefresh: (_) => _fullAppRefresh(),
+          onUpdateData: (_) => _fullAppRefresh(),
+          onClearCaches: _clearAppCaches,
+          onCheckPayment: _checkPaymentFromSettings,
+        );
     }
+  }
+
+  Future<void> _syncNativePlaybackSettings() async {
+    if (kIsWeb || defaultTargetPlatform != TargetPlatform.android) return;
+    try {
+      final settings = AppSettingsService.instance;
+      await NativeAndroidPlayer.syncUserPlaybackSettings(
+        dataSaver: settings.settings.dataSaver,
+        defaultQuality: settings.resolvePlaybackQuality(
+          serverDefault: 'AUTO',
+        ),
+        videoZoomMode: settings.settings.videoZoom.nativeMode,
+      );
+    } catch (_) {}
+  }
+
+  Future<void> _clearAppCaches() async {
+    await AppCacheService.instance.clearAll(api: api);
+    if (!mounted) return;
+    setState(() => _imageCacheBust++);
+  }
+
+  Future<void> _fullAppRefresh() async {
+    await AppCacheService.instance.clearAll(api: api);
+    if (!mounted) return;
+    setState(() {
+      _imageCacheBust++;
+      pendingConfigSync = false;
+      bootstrapError = null;
+      bootstrapFailureDetail = null;
+    });
+    await AppSettingsService.instance.load();
+    await _syncNativePlaybackSettings();
+    await _syncViewerProfileFromServer();
+    await _recoverPendingPayment(silent: true);
+    await _tryRecoverPremiumFromServer();
+    await _syncFromServer(silent: false, forceFull: true);
+    if (!mounted) return;
+    setState(() {
+      current = AppScreen.home;
+      carousel = 0;
+    });
+  }
+
+  Future<String> _checkPaymentFromSettings() async {
+    await _syncViewerProfileFromServer();
+    await _recoverPendingPayment(silent: false);
+    final recovered = await _tryRecoverPremiumFromServer();
+    if (!mounted) return '';
+    if (premium || recovered) {
+      setState(() {});
+      return 'Premium imethibitishwa! Channels zimefunguliwa.';
+    }
+    return 'Hakuna malipo mapya yaliyothibitishwa. Jaribu tena baada ya dakika chache au wasiliana nasi.';
   }
 
   Future<void> _recheckAppUpdate() async {
@@ -1577,30 +1677,86 @@ class _WashaAppState extends State<WashaApp> with WidgetsBindingObserver {
     await _init();
   }
 
-  Widget _maintenanceScreen() {
-    return Center(
-      child: Padding(
-        padding: const EdgeInsets.all(28),
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            const Icon(Icons.build_circle_outlined, size: 56, color: Color(0xFFFBBF24)),
-            const SizedBox(height: 16),
-            Text(siteName, style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w800)),
-            const SizedBox(height: 10),
-            const Text(
-              'Programu iko katika matengenezo. Tafadhali rudi baadaye.',
-              textAlign: TextAlign.center,
-              style: TextStyle(fontSize: 14, height: 1.4, color: Color(0xFFCBD5E1)),
-            ),
-            const SizedBox(height: 20),
-            FilledButton.tonal(
-              onPressed: () => unawaited(_syncFromServer(silent: false)),
-              child: const Text('Jaribu tena'),
-            ),
-          ],
+  Widget _bootLoadingScreen() {
+    return Stack(
+      fit: StackFit.expand,
+      children: [
+        const CinematicBackground(),
+        Center(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Container(
+                width: 72,
+                height: 72,
+                decoration: BoxDecoration(
+                  borderRadius: BorderRadius.circular(20),
+                  gradient: AppTheme.primaryGradient,
+                  boxShadow: [
+                    BoxShadow(
+                      color: AppTheme.cyan.withValues(alpha: 0.35),
+                      blurRadius: 28,
+                    ),
+                  ],
+                ),
+                child: const Icon(Icons.play_arrow_rounded, color: AppTheme.background, size: 36),
+              ),
+              const SizedBox(height: 28),
+              Text('WASHA TV', style: AppTheme.displayLarge.copyWith(fontSize: 28)),
+              const SizedBox(height: 8),
+              Text('Inapakia...', style: AppTheme.bodyMedium),
+              const SizedBox(height: 24),
+              const SizedBox(
+                width: 32,
+                height: 32,
+                child: CircularProgressIndicator(strokeWidth: 2.5),
+              ),
+            ],
+          ),
         ),
-      ),
+      ],
+    );
+  }
+
+  Widget _maintenanceScreen() {
+    return Stack(
+      fit: StackFit.expand,
+      children: [
+        const CinematicBackground(),
+        Center(
+          child: Padding(
+            padding: const EdgeInsets.all(32),
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Container(
+                  width: 72,
+                  height: 72,
+                  decoration: BoxDecoration(
+                    borderRadius: BorderRadius.circular(20),
+                    color: AppTheme.amber.withValues(alpha: 0.15),
+                    border: Border.all(color: AppTheme.amber.withValues(alpha: 0.3)),
+                  ),
+                  child: const Icon(Icons.build_circle_outlined, size: 36, color: AppTheme.amber),
+                ),
+                const SizedBox(height: 20),
+                Text(siteName, style: AppTheme.displayMedium),
+                const SizedBox(height: 12),
+                Text(
+                  'Programu iko katika matengenezo. Tafadhali rudi baadaye.',
+                  textAlign: TextAlign.center,
+                  style: AppTheme.bodyMedium,
+                ),
+                const SizedBox(height: 24),
+                FilledButton.tonal(
+                  onPressed: () => unawaited(_syncFromServer(silent: false)),
+                  child: const Text('Jaribu tena'),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ],
     );
   }
 
@@ -1619,90 +1775,6 @@ class _WashaAppState extends State<WashaApp> with WidgetsBindingObserver {
       current = AppScreen.player;
     });
     _pauseConfigPoller();
-  }
-}
-
-class _OrbBackground extends StatelessWidget {
-  const _OrbBackground();
-
-  @override
-  Widget build(BuildContext context) {
-    return Positioned.fill(
-      child: IgnorePointer(
-        child: Opacity(
-          opacity: 0.5,
-          child: ImageFiltered(
-            imageFilter: ImageFilter.blur(sigmaX: 90, sigmaY: 90),
-            child: Stack(
-              children: const [
-                _Orb(size: 420, left: 40, top: 120, colors: [Color(0x4D6366F1), Color(0x0FA855F7)]),
-                _Orb(size: 380, left: 220, top: 90, colors: [Color(0x40EC4899), Color(0x0FEF4444)]),
-                _Orb(size: 300, left: 10, top: 540, colors: [Color(0x384ECDC4), Color(0x0F38BDF8)]),
-                _Orb(size: 340, left: 180, top: 620, colors: [Color(0x38FB923C), Color(0x0FFACC15)]),
-              ],
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-class _Orb extends StatefulWidget {
-  const _Orb({
-    required this.size,
-    required this.left,
-    required this.top,
-    required this.colors,
-  });
-
-  final double size;
-  final double left;
-  final double top;
-  final List<Color> colors;
-
-  @override
-  State<_Orb> createState() => _OrbState();
-}
-
-class _OrbState extends State<_Orb> with SingleTickerProviderStateMixin {
-  late final AnimationController c = AnimationController(vsync: this, duration: const Duration(seconds: 24))..repeat(reverse: true);
-
-  @override
-  void dispose() {
-    c.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Positioned(
-      left: widget.left,
-      top: widget.top,
-      child: AnimatedBuilder(
-        animation: c,
-        builder: (_, __) {
-          final t = c.value;
-          return Transform.translate(
-            offset: Offset(30 - 50 * t, -45 + 80 * t),
-            child: Transform.scale(
-              scale: 1 + (t - 0.5) * 0.12,
-              child: Container(
-                width: widget.size,
-                height: widget.size,
-                decoration: BoxDecoration(
-                  shape: BoxShape.circle,
-                  gradient: RadialGradient(
-                    center: const Alignment(-0.2, -0.2),
-                    colors: widget.colors,
-                  ),
-                ),
-              ),
-            ),
-          );
-        },
-      ),
-    );
   }
 }
 

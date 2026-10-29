@@ -1,6 +1,7 @@
 import 'dart:ui';
 
 import 'package:flutter/material.dart';
+import 'package:flutter_animate/flutter_animate.dart';
 
 import '../app.dart';
 import '../theme/app_theme.dart';
@@ -15,53 +16,99 @@ class BottomNav extends StatelessWidget {
   final AppScreen current;
   final ValueChanged<AppScreen> onTap;
 
+  static const _items = [
+    (Icons.home_rounded, 'Nyumbani', AppScreen.home),
+    (Icons.grid_view_rounded, 'Aina', AppScreen.categories),
+    (Icons.diamond_rounded, 'Premium', AppScreen.subscription),
+    (Icons.person_rounded, 'Akaunti', AppScreen.profile),
+    (Icons.settings_rounded, 'Mipangilio', AppScreen.settings),
+  ];
+
   @override
   Widget build(BuildContext context) {
     return Padding(
-      padding: const EdgeInsets.only(left: 14, right: 14, bottom: 14),
+      padding: const EdgeInsets.fromLTRB(20, 0, 20, 20),
       child: ClipRRect(
-        borderRadius: BorderRadius.circular(26),
+        borderRadius: BorderRadius.circular(28),
         child: BackdropFilter(
-          filter: ImageFilter.blur(sigmaX: 28, sigmaY: 28),
+          filter: AppTheme.blur32,
           child: Container(
-            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
-            decoration: AppTheme.glass(
-              radius: BorderRadius.circular(26),
+            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 6),
+            decoration: BoxDecoration(
               color: AppTheme.navPanel,
+              borderRadius: BorderRadius.circular(28),
               border: Border.all(color: AppTheme.white10),
+              boxShadow: [
+                BoxShadow(
+                  color: Colors.black.withValues(alpha: 0.4),
+                  blurRadius: 32,
+                  offset: const Offset(0, -4),
+                ),
+                BoxShadow(
+                  color: AppTheme.cyan.withValues(alpha: 0.06),
+                  blurRadius: 24,
+                ),
+              ],
             ),
             child: Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
-                _item(Icons.home, 'Nyumbani', AppScreen.home),
-                _item(Icons.satellite_alt, 'Aina', AppScreen.categories),
-                _item(Icons.workspace_premium, 'Fungua zote', AppScreen.subscription),
-                _item(Icons.account_circle, 'Mtumiaji', AppScreen.profile),
+                for (var i = 0; i < _items.length; i++)
+                  _NavItem(
+                    icon: _items[i].$1,
+                    label: _items[i].$2,
+                    screen: _items[i].$3,
+                    active: current == _items[i].$3,
+                    onTap: () => onTap(_items[i].$3),
+                    index: i,
+                  ),
               ],
             ),
           ),
         ),
       ),
-    );
+    )
+        .animate()
+        .fadeIn(duration: 500.ms, delay: 200.ms)
+        .slideY(begin: 0.3, end: 0, duration: 500.ms, curve: Curves.easeOutCubic);
   }
+}
 
-  Widget _item(IconData icon, String text, AppScreen s) {
-    final active = current == s;
+class _NavItem extends StatelessWidget {
+  const _NavItem({
+    required this.icon,
+    required this.label,
+    required this.screen,
+    required this.active,
+    required this.onTap,
+    required this.index,
+  });
+
+  final IconData icon;
+  final String label;
+  final AppScreen screen;
+  final bool active;
+  final VoidCallback onTap;
+  final int index;
+
+  @override
+  Widget build(BuildContext context) {
     return Expanded(
       child: GestureDetector(
-        onTap: () => onTap(s),
+        onTap: onTap,
+        behavior: HitTestBehavior.opaque,
         child: AnimatedContainer(
-          duration: const Duration(milliseconds: 300),
+          duration: const Duration(milliseconds: 320),
+          curve: Curves.easeOutCubic,
           padding: const EdgeInsets.symmetric(vertical: 8),
           decoration: BoxDecoration(
-            borderRadius: BorderRadius.circular(18),
-            gradient: active ? const LinearGradient(colors: [AppTheme.indigo, AppTheme.purple]) : null,
+            borderRadius: BorderRadius.circular(22),
+            gradient: active ? AppTheme.primaryGradient : null,
             boxShadow: active
-                ? const [
+                ? [
                     BoxShadow(
-                      color: Color(0x996366F1),
-                      blurRadius: 30,
-                      offset: Offset(0, 10),
+                      color: AppTheme.cyan.withValues(alpha: 0.35),
+                      blurRadius: 20,
+                      offset: const Offset(0, 6),
                     ),
                   ]
                 : null,
@@ -69,8 +116,22 @@ class BottomNav extends StatelessWidget {
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              Icon(icon, size: 19, color: active ? const Color(0xFFC7D2FE) : const Color(0xFF6B7280)),
-              Text(text, style: TextStyle(fontSize: 10, color: active ? const Color(0xFFC7D2FE) : const Color(0xFF6B7280))),
+              Icon(
+                icon,
+                size: 20,
+                color: active ? AppTheme.background : AppTheme.textMuted,
+              ),
+              const SizedBox(height: 3),
+              Text(
+                label,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: AppTheme.labelSmall.copyWith(
+                  fontSize: 8,
+                  color: active ? AppTheme.background : AppTheme.textMuted,
+                  letterSpacing: 0.2,
+                ),
+              ),
             ],
           ),
         ),

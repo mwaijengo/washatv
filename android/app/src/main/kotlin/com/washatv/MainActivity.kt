@@ -6,6 +6,9 @@ import android.view.WindowManager
 import com.washatv.player.EmbeddedPlayerHost
 import com.washatv.player.GatewayWebPlayerFactory
 import com.washatv.player.GatewayWebPlayerRegistry
+import com.washatv.player.PlaybackPreferences
+import com.washatv.security.SecureClient
+import com.washatv.security.SecureClientException
 import android.graphics.Rect
 import android.os.Handler
 import android.os.Looper
@@ -84,6 +87,27 @@ class MainActivity : FlutterActivity() {
                         }
                         result.success(null)
                     }
+                    "signSession" -> {
+                        val challenge = call.argument<String>("challenge").orEmpty()
+                        val deviceId = call.argument<String>("deviceId").orEmpty()
+                        try {
+                            result.success(SecureClient.signSession(applicationContext, challenge, deviceId))
+                        } catch (e: SecureClientException) {
+                            result.error(e.code, e.message, null)
+                        } catch (e: Exception) {
+                            result.error("sign_failed", "Unable to sign session", null)
+                        }
+                    }
+                    "openSealed" -> {
+                        val sessionId = call.argument<String>("sessionId").orEmpty()
+                        val deviceId = call.argument<String>("deviceId").orEmpty()
+                        val sealed = call.argument<String>("sealed").orEmpty()
+                        try {
+                            result.success(SecureClient.openSealed(sessionId, deviceId, sealed))
+                        } catch (e: Exception) {
+                            result.error("open_failed", "Unable to open playback payload", null)
+                        }
+                    }
                     else -> result.notImplemented()
                 }
             }
@@ -99,7 +123,7 @@ class MainActivity : FlutterActivity() {
                             return@setMethodCallHandler
                         }
                         try {
-                            val intent = Intent(this, WashaNativePlayerActivity::class.java)
+                            val intent = Intent(this, OrizonPlayerActivity::class.java)
                             intent.putExtra("url", args["url"]?.toString().orEmpty())
                             intent.putExtra("licenseUrl", args["licenseUrl"]?.toString().orEmpty())
                             intent.putExtra("token", args["token"]?.toString().orEmpty())
@@ -135,6 +159,10 @@ class MainActivity : FlutterActivity() {
                                 "playerPolicyJson",
                                 args["playerPolicyJson"]?.toString().orEmpty(),
                             )
+                            intent.putExtra(
+                                "videoZoomMode",
+                                args["videoZoomMode"]?.toString().orEmpty().ifEmpty { "zoom" },
+                            )
                             nativeOpenResult = result
                             @Suppress("DEPRECATION")
                             startActivityForResult(intent, NATIVE_PLAYER_REQUEST)
@@ -146,6 +174,24 @@ class MainActivity : FlutterActivity() {
                                 null,
                             )
                         }
+                    }
+                    "syncPlaybackPreferences" -> {
+                        @Suppress("UNCHECKED_CAST")
+                        val args = call.arguments as? Map<String, Any?>
+                        if (args == null) {
+                            result.error("bad_args", "Expected map", null)
+                            return@setMethodCallHandler
+                        }
+                        val dataSaver = args["dataSaver"] == true ||
+                            args["dataSaver"]?.toString()?.equals("true", ignoreCase = true) == true
+                        val defaultQuality = args["defaultQuality"]?.toString().orEmpty()
+                        val videoZoomMode = args["videoZoomMode"]?.toString().orEmpty().ifEmpty { "zoom" }
+                        PlaybackPreferences.update(
+                            dataSaver = dataSaver,
+                            defaultQuality = defaultQuality,
+                            videoZoomMode = videoZoomMode,
+                        )
+                        result.success(null)
                     }
                     "updatePlayerConfig" -> result.success(null)
                     else -> result.notImplemented()
