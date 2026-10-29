@@ -92,7 +92,11 @@ class SecurePlaybackClient {
   Future<void> _openSession(String deviceId) async {
     await AppIdentity.ensureLoaded();
     final chalRes = await http
-        .post(Uri.parse('$baseUrl/api/v1/public/session/challenge'))
+        .post(
+          Uri.parse('$baseUrl/api/v1/public/session/challenge'),
+          headers: const {'Content-Type': 'application/json'},
+          body: '{}',
+        )
         .timeout(_timeout);
     _throwForStatus(chalRes);
     final challenge = (jsonDecode(chalRes.body) as Map)['challenge']?.toString() ?? '';
