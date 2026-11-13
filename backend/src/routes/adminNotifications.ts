@@ -20,8 +20,6 @@ import {
   sendReminders,
   type ReminderAudience,
 } from '../lib/reminders.js';
-import { forwardNotificationToSupasoka } from '../lib/supasokaNotifyBridge.js';
-
 type AdminPre = (req: FastifyRequest, reply: FastifyReply) => Promise<unknown>;
 
 const TITLE_MAX = 100;
@@ -97,7 +95,7 @@ export function registerAdminNotificationRoutes(
           failed = out.failed;
           delivery = sent > 0 ? 'sent' : 'failed';
           if (sent === 0) error = 'Ujumbe haukufika — mtumiaji huyu hana token wala amejiandikisha kwa arifa.';
-        } else if (pushConfigured(env)) {
+        } else {
           await sendToAudience(env, {
             audience: target as PushAudience,
             title,
@@ -105,14 +103,6 @@ export function registerAdminNotificationRoutes(
             data: { type: 'admin_message' },
           });
           delivery = 'sent';
-        } else {
-          // No FCM credentials on this server: fall back to the Supasoka bridge for broadcasts.
-          const bridged = await forwardNotificationToSupasoka(env, { title, body: message, target });
-          if (bridged.forwarded) delivery = 'bridge';
-          else {
-            delivery = 'not_configured';
-            error = bridged.error ?? 'FCM haijasanidiwa kwenye seva (weka FCM_SERVICE_ACCOUNT_JSON).';
-          }
         }
       } catch (e) {
         delivery = e instanceof PushNotConfiguredError ? 'not_configured' : 'failed';
@@ -149,7 +139,7 @@ export function registerAdminNotificationRoutes(
     configured: pushConfigured(env),
     auto_reminders: env.REMINDER_AUTO_ENABLED,
     reminder_days: env.REMINDER_DAYS,
-    supasoka_bridge: Boolean(env.SUPASOKA_API_BASE_URL),
+    supasoka_inbound: Boolean(env.SUPA_WASHA_BRIDGE_SECRET.trim()),
   }));
 
   app.get('/api/v1/admin/reminders/summary', { preHandler: adminPre }, async () => {

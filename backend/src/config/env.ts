@@ -30,9 +30,11 @@ const envSchema = z.object({
   SONICPESA_BASE_URL: z.string().default('https://api.sonicpesa.com'),
   /** Optional — if set, webhook requests must send the same value in X-Webhook-Secret header. */
   SONICPESA_WEBHOOK_SECRET: z.string().optional(),
-  /** Optional — forward Washa admin notifications to Supasoka FCM (`POST /api/v1/admin/notify`). */
-  SUPASOKA_API_BASE_URL: z.string().optional(),
-  SUPASOKA_ADMIN_API_KEY: z.string().optional(),
+  /**
+   * Shared secret for `POST /api/partner/supa-push` — Supasoka mirrors its admin broadcasts here
+   * and Washa re-sends them on its own FCM project. Must match Supasoka's WASHA_BRIDGE_SECRET.
+   */
+  SUPA_WASHA_BRIDGE_SECRET: z.string().default(''),
 
   /**
    * Shared with the Android build (`appSigningSecret` in android/key.properties).
@@ -61,9 +63,8 @@ const envSchema = z.object({
   ADMIN_SESSION_TTL_SECONDS: z.coerce.number().int().positive().default(24 * 3600),
 
   /**
-   * Firebase Cloud Messaging (same project as the apps: supasokatv-d238c).
-   * Provide ONE of: FCM_SERVICE_ACCOUNT_JSON (whole JSON), or FCM_PROJECT_ID + FCM_CLIENT_EMAIL + FCM_PRIVATE_KEY.
-   * Without it, broadcast pushes fall back to the Supasoka bridge and per-user reminders are unavailable.
+   * Firebase Cloud Messaging — the Washa app's project (supasoka-18128, see android/app/google-services.json).
+   * Provide ONE of: FCM_SERVICE_ACCOUNT_JSON (whole JSON, or base64 of it), or FCM_PROJECT_ID + FCM_CLIENT_EMAIL + FCM_PRIVATE_KEY.
    */
   FCM_SERVICE_ACCOUNT_JSON: z.string().default(''),
   FCM_PROJECT_ID: z.string().default(''),

@@ -90,7 +90,8 @@ Future<void> _displayLocalNotification(RemoteMessage message) async {
   );
 }
 
-/// Shared Firebase project + topics with Supasoka — pushes from admin reach Washa too.
+/// Washa's own Firebase project. Supasoka admin broadcasts arrive via the Washa backend
+/// (`/api/partner/supa-push`), which re-sends them on these same topics.
 class PushNotificationService {
   PushNotificationService._();
 

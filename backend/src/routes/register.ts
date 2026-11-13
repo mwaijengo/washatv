@@ -33,6 +33,7 @@ import {
 } from '../lib/sonicpesa.js';
 import { MAX_ADMIN_SESSION_SECONDS } from '../config/env.js';
 import { registerAdminNotificationRoutes } from './adminNotifications.js';
+import { registerPartnerPushRoutes } from './partnerPush.js';
 import { fetchAdminStatsOverview, fetchAdminSubscriptions } from '../lib/adminStats.js';
 import {
   buildAppUpdatePayload,
@@ -2239,6 +2240,7 @@ export async function registerRoutes(
 
   // Notification compose, push health and subscription reminders live in adminNotifications.ts.
   registerAdminNotificationRoutes(app, { pool, env, adminPre });
+  registerPartnerPushRoutes(app, { pool, env });
 
   app.get('/api/v1/admin/slides', { preHandler: adminPre }, async () => {
     const r = await pool.query(

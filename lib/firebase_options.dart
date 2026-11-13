@@ -1,4 +1,4 @@
-// Generated from android/app/google-services.json (Firebase project supasokatv-d238c).
+// Generated from android/app/google-services.json (Firebase project supasoka-18128).
 import 'package:firebase_core/firebase_core.dart' show FirebaseOptions;
 import 'package:flutter/foundation.dart'
     show defaultTargetPlatform, kIsWeb, TargetPlatform;
@@ -23,10 +23,10 @@ class DefaultFirebaseOptions {
 
   /// `com.washatv` — must match [android/app/build.gradle.kts] applicationId.
   static const FirebaseOptions android = FirebaseOptions(
-    apiKey: 'AIzaSyA2TKmWfzwCBTVOkfjl8t3DTjobEnaHIFw',
-    appId: '1:88812273490:android:fa7b080cc6c51d9743048b',
-    messagingSenderId: '88812273490',
-    projectId: 'supasokatv-d238c',
-    storageBucket: 'supasokatv-d238c.firebasestorage.app',
+    apiKey: 'AIzaSyCJmMsez-AInf54lyXpVHkbvF9iKX2B-vg',
+    appId: '1:904780930630:android:aabdfad37fe224783bf447',
+    messagingSenderId: '904780930630',
+    projectId: 'supasoka-18128',
+    storageBucket: 'supasoka-18128.firebasestorage.app',
   );
 }
