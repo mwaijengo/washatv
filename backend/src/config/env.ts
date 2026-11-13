@@ -1,6 +1,7 @@
 import { z } from 'zod';
 
 const DEV_JWT_SECRET = 'dev-only-change-this-jwt-secret-please';
+const BCRYPT_HASH = /^\$2[aby]\$\d{2}\$[./A-Za-z0-9]{53}$/;
 export const DEV_APP_SIGNING_SECRET = 'dev-only-washa-app-signing-secret-change-me';
 
 const boolFromEnv = z
@@ -18,7 +19,8 @@ const envSchema = z.object({
   DATABASE_URL: z.string().min(1),
   JWT_SECRET: z.string().min(16).default(DEV_JWT_SECRET),
   ADMIN_EMAIL: z.string().email().optional(),
-  ADMIN_PASSWORD_HASH: z.string().min(20).optional(),
+  /** Validated in loadEnv — a malformed hash disables password login instead of crashing the API. */
+  ADMIN_PASSWORD_HASH: z.string().optional(),
   ADMIN_API_KEY: z.string().optional(),
   LOG_LEVEL: z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace']).default('info'),
   CORS_ORIGIN: z.string().default('*'),
@@ -86,6 +88,17 @@ export function loadEnv(): Env {
     throw new Error('Missing or invalid environment variables');
   }
   const env = parsed.data;
+  const hash = (env.ADMIN_PASSWORD_HASH ?? '').trim();
+  if (hash && !BCRYPT_HASH.test(hash)) {
+    // Typical cause: a dashboard "raw editor" expanded the `$2b$12$…` parts as variables.
+    console.error(
+      `[env] ADMIN_PASSWORD_HASH is not a valid bcrypt hash (got ${hash.length} chars, expected 60 starting with $2b$). ` +
+        'Admin password login is disabled until it is fixed. Set it through the single-variable editor, not the raw editor.',
+    );
+    env.ADMIN_PASSWORD_HASH = undefined;
+  } else {
+    env.ADMIN_PASSWORD_HASH = hash || undefined;
+  }
   if (env.NODE_ENV === 'production') {
     const problems: string[] = [];
     if (env.JWT_SECRET === DEV_JWT_SECRET) problems.push('JWT_SECRET');
