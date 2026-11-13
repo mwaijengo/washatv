@@ -151,6 +151,11 @@ class AdminNotification {
     required this.type,
     required this.read,
     required this.createdAt,
+    this.target = 'all',
+    this.delivery = 'sent',
+    this.sentCount = 0,
+    this.failedCount = 0,
+    this.error,
   });
   final String id;
   final String title;
@@ -158,6 +163,60 @@ class AdminNotification {
   final String type;
   final bool read;
   final DateTime createdAt;
+
+  /// `all`, `premium`, `free`, `user:<deviceId>` or `reminder:<audience>:<source>`.
+  final String target;
+
+  /// `sent`, `bridge`, `failed` or `not_configured`.
+  final String delivery;
+  final int sentCount;
+  final int failedCount;
+  final String? error;
+}
+
+/// A user who should receive a subscription reminder.
+class ReminderUser {
+  ReminderUser({
+    required this.id,
+    required this.name,
+    required this.phone,
+    required this.deviceId,
+    required this.endsAt,
+    required this.remindedAt,
+  });
+  final String id;
+  final String name;
+  final String phone;
+  final String deviceId;
+  final DateTime? endsAt;
+  final DateTime? remindedAt;
+}
+
+class ReminderSummary {
+  const ReminderSummary({
+    this.days = 3,
+    this.expiring = 0,
+    this.expiringUnsent = 0,
+    this.expired = 0,
+    this.expiredUnsent = 0,
+    this.pushConfigured = true,
+    this.autoReminders = true,
+    this.expiringTitle = '',
+    this.expiringBody = '',
+    this.expiredTitle = '',
+    this.expiredBody = '',
+  });
+  final int days;
+  final int expiring;
+  final int expiringUnsent;
+  final int expired;
+  final int expiredUnsent;
+  final bool pushConfigured;
+  final bool autoReminders;
+  final String expiringTitle;
+  final String expiringBody;
+  final String expiredTitle;
+  final String expiredBody;
 }
 
 class AdminLog {

@@ -1,10 +1,13 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
 import 'admin_auth.dart';
 import 'admin_dashboard_app.dart';
 import 'admin_login_screen.dart';
 
-/// Loads saved JWT (or build-time key), then shows login or the dashboard.
+/// Loads the saved session, then shows the password screen or the dashboard.
+/// Watches the clock so the 24-hour session ends even while the app stays open.
 class AdminLaunchGate extends StatefulWidget {
   const AdminLaunchGate({super.key});
 
@@ -12,20 +15,30 @@ class AdminLaunchGate extends StatefulWidget {
   State<AdminLaunchGate> createState() => _AdminLaunchGateState();
 }
 
-class _AdminLaunchGateState extends State<AdminLaunchGate> {
+class _AdminLaunchGateState extends State<AdminLaunchGate> with WidgetsBindingObserver {
   final AdminAuth _auth = AdminAuth();
+  Timer? _expiryTimer;
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _auth.addListener(_onAuthChanged);
     _auth.load();
+    _expiryTimer = Timer.periodic(const Duration(seconds: 20), (_) => unawaited(_auth.expireIfNeeded()));
   }
 
   @override
   void dispose() {
+    _expiryTimer?.cancel();
+    WidgetsBinding.instance.removeObserver(this);
     _auth.removeListener(_onAuthChanged);
     super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) unawaited(_auth.expireIfNeeded());
   }
 
   void _onAuthChanged() {
@@ -42,6 +55,7 @@ class _AdminLaunchGateState extends State<AdminLaunchGate> {
     if (!_auth.hasSession) {
       return AdminLoginScreen(
         auth: _auth,
+        notice: _auth.endedByExpiry ? 'Kikao kimeisha (saa 24). Weka neno la siri tena.' : null,
         onLoggedIn: () => setState(() {}),
       );
     }

@@ -130,6 +130,11 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
   AdminDashboardStats? _dashboardStats;
   DateTime? _statsFetchedAt;
   bool _statsRefreshFailed = false;
+  ReminderSummary? _reminderSummary;
+  List<ReminderUser> _expiringUsers = const [];
+  List<ReminderUser> _expiredUsers = const [];
+  bool _remindersLoading = false;
+  String? _remindersError;
   final _settings = AdminSettings();
   /// Field initializers run on first read — survives hot reload when `initState` does not re-run.
   late final TextEditingController _settingsSiteName = TextEditingController(text: _settings.siteName);
@@ -199,6 +204,11 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
         unawaited(_refreshDashboardStats());
         return;
       }
+      if (_page == AdminPageId.notifications) {
+        unawaited(_loadReminderData());
+        unawaited(_reloadNotifications());
+        return;
+      }
       unawaited(_hydrateFromBackend());
     });
   }
@@ -219,6 +229,7 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
     if (_hasAdminSession) await _refreshDashboardStats();
     if (!mounted) return;
     if (!hydrated) await _loadSavedPricing();
+    if (mounted && _hasAdminSession) unawaited(_loadReminderData());
   }
 
   Future<void> _loadSavedSettings() async {
@@ -241,27 +252,90 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
 
   Future<void> _handleAdminUnauthorized() async {
     if (!mounted) return;
-    _showToast('Session imeisha. Ingia tena.', _ToastType.warning);
-    await widget.auth.logout();
+    // The password screen shows "Kikao kimeisha" because the logout is marked as expired.
+    await widget.auth.logout(expired: true);
+  }
+
+  /// Remaining time of the 24-hour login, e.g. "saa 5 zimebaki".
+  String _sessionRemainingLabel() {
+    final left = widget.auth.remaining;
+    if (left == null) return 'Hujaingia';
+    if (left.inMinutes < 1) return 'Kikao kinaisha sasa hivi';
+    if (left.inHours >= 1) return 'Kikao: saa ${left.inHours} zimebaki';
+    return 'Kikao: dakika ${left.inMinutes} zimebaki';
   }
 
   String _formatRelative(DateTime? dt) {
-    if (dt == null) return 'just now';
+    if (dt == null) return 'sasa hivi';
     final sec = DateTime.now().difference(dt).inSeconds;
-    if (sec < 5) return 'just now';
-    if (sec < 60) return '${sec}s ago';
-    if (sec < 3600) return '${sec ~/ 60}m ago';
-    return '${sec ~/ 3600}h ago';
+    if (sec < 5) return 'sasa hivi';
+    if (sec < 60) return 'sekunde $sec zilizopita';
+    if (sec < 3600) return 'dakika ${sec ~/ 60} zilizopita';
+    return 'saa ${sec ~/ 3600} zilizopita';
   }
 
   String _dashboardSubtitle() {
-    if (!_hasAdminSession) return 'Sign in to load live data';
-    if (_statsRefreshFailed && _dashboardStats == null) return 'Could not load stats · pull down to retry';
-    if (_statsRefreshFailed) return 'Update failed · last ${_formatRelative(_statsFetchedAt)}';
+    if (!_hasAdminSession) return 'Ingia ili kuona data za moja kwa moja';
+    if (_statsRefreshFailed && _dashboardStats == null) return 'Imeshindwa kupakia takwimu · vuta chini ujaribu tena';
+    if (_statsRefreshFailed) return 'Kusasisha kumeshindikana · mwisho ${_formatRelative(_statsFetchedAt)}';
     if (_dashboardStats != null) {
-      return 'Live data · updated ${_formatRelative(_statsFetchedAt)}';
+      return 'Data za moja kwa moja · zilisasishwa ${_formatRelative(_statsFetchedAt)}';
     }
-    return 'Loading live stats…';
+    return 'Inapakia takwimu…';
+  }
+
+  /// English month / weekday abbreviations (from the server or `to_char`) → Swahili.
+  static const _swahiliLabels = {
+    'Jan': 'Jan', 'Feb': 'Feb', 'Mar': 'Mac', 'Apr': 'Apr', 'May': 'Mei', 'Jun': 'Jun',
+    'Jul': 'Jul', 'Aug': 'Ago', 'Sep': 'Sep', 'Oct': 'Okt', 'Nov': 'Nov', 'Dec': 'Des',
+    'Mon': 'Jtt', 'Tue': 'Jnn', 'Wed': 'Jtn', 'Thu': 'Alh', 'Fri': 'Iju', 'Sat': 'Jmo', 'Sun': 'Jpi',
+  };
+
+  String _swLabel(String raw) => _swahiliLabels[raw.trim()] ?? raw;
+
+  /// Status words stored in English in the database → Swahili for display.
+  String _swStatus(String raw) {
+    switch (raw.trim().toLowerCase()) {
+      case 'active':
+        return 'hai';
+      case 'suspended':
+        return 'imezuiwa';
+      case 'inactive':
+        return 'haifanyi kazi';
+      case 'completed':
+        return 'imekamilika';
+      case 'pending':
+        return 'inasubiri';
+      case 'failed':
+        return 'imeshindwa';
+      case 'cancelled':
+      case 'canceled':
+        return 'imeghairiwa';
+      case 'expired':
+        return 'imeisha';
+      case 'premium':
+        return 'premium';
+      case 'free':
+        return 'bure';
+      default:
+        return raw;
+    }
+  }
+
+  /// Admin log action codes → Swahili.
+  String _swLogAction(String raw) {
+    switch (raw.trim()) {
+      case 'grant_premium':
+        return 'Ametoa premium';
+      case 'revoke_premium':
+        return 'Ameondoa premium';
+      case 'bulk_revoke_premium':
+        return 'Ameondoa premium (wengi)';
+      case 'send_reminders':
+        return 'Ametuma vikumbusho';
+      default:
+        return raw.replaceAll('_', ' ');
+    }
   }
 
   /// Lightweight stats poll — keeps dashboard metrics fresh without a full admin sync.
@@ -828,11 +902,11 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
       freeUsers: _toInt(totals['free_users']),
       activeChannels: _toInt(totals['active_channels']),
       revenue: _toDouble(totals['revenue']),
-      monthLabels: ((growth['labels'] as List?) ?? const []).map((e) => e.toString()).toList(),
+      monthLabels: ((growth['labels'] as List?) ?? const []).map((e) => _swLabel(e.toString())).toList(),
       newUsersPerMonth: _numList(growth['new_users']),
       premiumPurchasesPerMonth: _numList(growth['premium_purchases']),
       revenuePerMonth: _numList(revenue['amounts']),
-      dailyLabels: ((daily['labels'] as List?) ?? const []).map((e) => e.toString()).toList(),
+      dailyLabels: ((daily['labels'] as List?) ?? const []).map((e) => _swLabel(e.toString())).toList(),
       dailyRegistrations: _numList(daily['counts']),
       planWeekly: _toInt(mix['weekly']),
       planGold: _toInt(mix['gold']),
@@ -948,19 +1022,7 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
     }
 
     final rawNoti = adminMap['notifications'];
-    if (rawNoti is List) {
-      _notifications = rawNoti.whereType<Map>().map((rawItem) {
-        final j = rawItem.cast<String, dynamic>();
-        return AdminNotification(
-          id: _s(j['id']),
-          title: _s(j['title']),
-          message: _s(j['message']),
-          type: _s(j['type'], fallback: 'info'),
-          read: j['read'] as bool? ?? false,
-          createdAt: _dt(j['created_at']) ?? DateTime.now(),
-        );
-      }).toList();
-    }
+    if (rawNoti is List) _notifications = _parseNotificationsJson(rawNoti);
 
     final stats = _parseStatsJson((adminMap['stats'] as Map?)?.cast<String, dynamic>());
     if (stats != null) {
@@ -1022,7 +1084,7 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
     final month0 = DateTime(now.year, now.month);
     final labels = <String>[];
     final starts = <DateTime>[];
-    const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    const months = ['Jan', 'Feb', 'Mac', 'Apr', 'Mei', 'Jun', 'Jul', 'Ago', 'Sep', 'Okt', 'Nov', 'Des'];
     for (var i = 6; i >= 0; i--) {
       final start = DateTime(month0.year, month0.month - i);
       starts.add(start);
@@ -1073,7 +1135,7 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
         .toList();
     final today = DateTime.now();
     final dayStarts = List.generate(7, (i) => DateTime(today.year, today.month, today.day - (6 - i)));
-    const dayLabels = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+    const dayLabels = ['Jtt', 'Jnn', 'Jtn', 'Alh', 'Iju', 'Jmo', 'Jpi'];
     final daily = dayStarts.map((d) => _users.where((u) => _sameDay(u.createdAt, d)).length.toDouble()).toList();
     final dailyLabels = dayStarts.map((d) => dayLabels[d.weekday - 1]).toList();
     final premium = _users.where((u) => u.effectivePremium).length;
@@ -1169,6 +1231,7 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
       _page = p;
       if (_isMobile) _sidebarOpen = false;
     });
+    if (p == AdminPageId.notifications && _hasAdminSession) unawaited(_loadReminderData());
   }
 
   /// Header "Search..." finds users by Device ID / name / phone / USR id.
@@ -1361,10 +1424,12 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
             clipBehavior: Clip.none,
             children: [
               IconButton(
+                tooltip: 'Arifa na vikumbusho',
                 onPressed: () => _navigate(AdminPageId.notifications),
                 icon: const Icon(Icons.notifications_none_rounded, color: Color(0xFF9CA3AF)),
               ),
-              const Positioned(right: 10, top: 10, child: _PulseDot()),
+              if ((_reminderSummary?.expiringUnsent ?? 0) > 0)
+                const Positioned(right: 10, top: 10, child: _PulseDot()),
             ],
           ),
         ],
@@ -1403,7 +1468,7 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
                         shaderCallback: (r) => const LinearGradient(colors: [Color(0xFF818CF8), Color(0xFFA78BFA)]).createShader(r),
                         child: const Text('WASHA Admin', style: TextStyle(fontWeight: FontWeight.w800, fontSize: 18, color: Colors.white)),
                       ),
-                      const Text('Control Panel v2.0', style: TextStyle(fontSize: 10, color: Color(0xFF6B7280))),
+                      const Text('Paneli ya Usimamizi', style: TextStyle(fontSize: 10, color: Color(0xFF6B7280))),
                     ],
                   ),
                 ),
@@ -1419,17 +1484,17 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
             child: ListView(
               padding: const EdgeInsets.symmetric(horizontal: 12),
               children: [
-                _navRow(AdminPageId.dashboard, Icons.dashboard_rounded, 'Dashboard'),
-                _navRow(AdminPageId.users, Icons.groups_rounded, 'Users'),
-                _navRow(AdminPageId.channels, Icons.satellite_alt_rounded, 'Channels'),
-                _navRow(AdminPageId.slides, Icons.slideshow_rounded, 'Slides'),
-                _navRow(AdminPageId.subscriptions, Icons.workspace_premium_rounded, 'Subscriptions'),
-                _navRow(AdminPageId.pricing, Icons.sell_rounded, 'Pricing Plans'),
-                _navRow(AdminPageId.payments, Icons.credit_card_rounded, 'Payments'),
-                _navRow(AdminPageId.notifications, Icons.notifications_rounded, 'Notifications'),
-                _navRow(AdminPageId.analytics, Icons.show_chart_rounded, 'Analytics'),
-                _navRow(AdminPageId.settings, Icons.settings_rounded, 'Settings'),
-                _navRow(AdminPageId.logs, Icons.history_rounded, 'Activity Logs'),
+                _navRow(AdminPageId.dashboard, Icons.dashboard_rounded, 'Dashibodi'),
+                _navRow(AdminPageId.users, Icons.groups_rounded, 'Watumiaji'),
+                _navRow(AdminPageId.channels, Icons.satellite_alt_rounded, 'Chaneli'),
+                _navRow(AdminPageId.slides, Icons.slideshow_rounded, 'Mabango'),
+                _navRow(AdminPageId.subscriptions, Icons.workspace_premium_rounded, 'Usajili'),
+                _navRow(AdminPageId.pricing, Icons.sell_rounded, 'Bei za vifurushi'),
+                _navRow(AdminPageId.payments, Icons.credit_card_rounded, 'Malipo'),
+                _navRow(AdminPageId.notifications, Icons.notifications_rounded, 'Arifa na vikumbusho'),
+                _navRow(AdminPageId.analytics, Icons.show_chart_rounded, 'Takwimu'),
+                _navRow(AdminPageId.settings, Icons.settings_rounded, 'Mipangilio'),
+                _navRow(AdminPageId.logs, Icons.history_rounded, 'Kumbukumbu za shughuli'),
               ],
             ),
           ),
@@ -1449,16 +1514,17 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
                   child: const Text('SA', style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: Colors.white)),
                 ),
                 const SizedBox(width: 12),
-                const Expanded(
+                Expanded(
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      Text('Super Admin', style: TextStyle(fontWeight: FontWeight.w600, fontSize: 13)),
-                      Text('admin@washatv.com', style: TextStyle(fontSize: 10, color: Color(0xFF6B7280))),
+                      const Text('Msimamizi', style: TextStyle(fontWeight: FontWeight.w600, fontSize: 13)),
+                      Text(_sessionRemainingLabel(), style: const TextStyle(fontSize: 10, color: Color(0xFF6B7280))),
                     ],
                   ),
                 ),
                 IconButton(
+                  tooltip: 'Toka',
                   onPressed: _adminLogout,
                   icon: const Icon(Icons.logout, size: 18, color: Color(0xFF9CA3AF)),
                 ),
@@ -1501,12 +1567,12 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
 
   Widget _bottomNav() {
     const items = <(AdminPageId, IconData, String)>[
-      (AdminPageId.dashboard, Icons.dashboard_rounded, 'Dashboard'),
-      (AdminPageId.users, Icons.groups_rounded, 'Users'),
-      (AdminPageId.channels, Icons.satellite_alt_rounded, 'Channels'),
-      (AdminPageId.slides, Icons.slideshow_rounded, 'Slides'),
-      (AdminPageId.pricing, Icons.sell_rounded, 'Pricing'),
-      (AdminPageId.settings, Icons.settings_rounded, 'Settings'),
+      (AdminPageId.dashboard, Icons.dashboard_rounded, 'Dashibodi'),
+      (AdminPageId.users, Icons.groups_rounded, 'Watumiaji'),
+      (AdminPageId.channels, Icons.satellite_alt_rounded, 'Chaneli'),
+      (AdminPageId.slides, Icons.slideshow_rounded, 'Mabango'),
+      (AdminPageId.pricing, Icons.sell_rounded, 'Bei'),
+      (AdminPageId.settings, Icons.settings_rounded, 'Mipangilio'),
     ];
     return Container(
       padding: EdgeInsets.fromLTRB(4, 8, 4, 8 + MediaQuery.paddingOf(context).bottom),
@@ -1591,11 +1657,12 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         _pageTitleRow(
-          title: 'Admin Dashboard',
+          title: 'Dashibodi ya Admin',
           subtitle: _dashboardSubtitle(),
-          action: _btnPrimary(label: 'Add Channel', icon: Icons.add, onTap: () => _showChannelEditor()),
+          action: _btnPrimary(label: 'Ongeza chaneli', icon: Icons.add, onTap: () => _showChannelEditor()),
         ),
         const SizedBox(height: 16),
+        _dashboardReminderCallout(),
         LayoutBuilder(
           builder: (context, c) {
             final w = c.maxWidth;
@@ -1608,11 +1675,11 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
               mainAxisSpacing: 12,
               childAspectRatio: cols <= 2 ? 1.12 : 1.28,
               children: [
-                _statCard(label: 'Total Users', value: loadingStats ? '…' : '${totalUsers ?? 0}', icon: Icons.groups_rounded, iconBg: const Color(0x336366F1), iconColor: const Color(0xFF818CF8)),
+                _statCard(label: 'Watumiaji wote', value: loadingStats ? '…' : '${totalUsers ?? 0}', icon: Icons.groups_rounded, iconBg: const Color(0x336366F1), iconColor: const Color(0xFF818CF8)),
                 _statCard(label: 'Premium', value: loadingStats ? '…' : '${premiumUsers ?? 0}', icon: Icons.workspace_premium_rounded, iconBg: const Color(0x33F59E0B), iconColor: const Color(0xFFFBBF24)),
-                _statCard(label: 'Free', value: loadingStats ? '…' : '${freeUsers ?? 0}', icon: Icons.person_outline_rounded, iconBg: const Color(0x3394A3B8), iconColor: const Color(0xFFCBD5E1)),
-                _statCard(label: 'Channels', value: loadingStats ? '…' : '${activeChannels ?? 0}', icon: Icons.satellite_alt_rounded, iconBg: const Color(0x3310B981), iconColor: const Color(0xFF34D399)),
-                _statCard(label: "Today's Revenue", value: loadingStats ? '…' : fmtTzs(revenue ?? 0), icon: Icons.attach_money_rounded, iconBg: const Color(0x33A855F7), iconColor: const Color(0xFFC084FC)),
+                _statCard(label: 'Bure', value: loadingStats ? '…' : '${freeUsers ?? 0}', icon: Icons.person_outline_rounded, iconBg: const Color(0x3394A3B8), iconColor: const Color(0xFFCBD5E1)),
+                _statCard(label: 'Chaneli', value: loadingStats ? '…' : '${activeChannels ?? 0}', icon: Icons.satellite_alt_rounded, iconBg: const Color(0x3310B981), iconColor: const Color(0xFF34D399)),
+                _statCard(label: 'Mapato ya leo', value: loadingStats ? '…' : fmtTzs(revenue ?? 0), icon: Icons.attach_money_rounded, iconBg: const Color(0x33A855F7), iconColor: const Color(0xFFC084FC)),
               ],
             );
           },
@@ -1622,8 +1689,8 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
           builder: (context, c) {
             final stacked = c.maxWidth < 1024;
             final charts = [
-              _chartCard('User Growth', 300, _userGrowthChart()),
-              _chartCard('Revenue Overview (TSh)', 300, _revenueBarChart()),
+              _chartCard('Ukuaji wa watumiaji', 300, _userGrowthChart()),
+              _chartCard('Muhtasari wa mapato (TSh)', 300, _revenueBarChart()),
             ];
             if (stacked) {
               return Column(children: [charts[0], const SizedBox(height: 16), charts[1]]);
@@ -1644,26 +1711,26 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
             final stacked = c.maxWidth < 1024;
             final blocks = [
               _recentTableCard(
-                title: 'Recent Users',
+                title: 'Watumiaji wa karibuni',
                 onViewAll: () => _navigate(AdminPageId.users),
                 columnFlex: const [5, 2, 2, 2],
-                columns: const ['User', 'Status', 'Plan', 'Date'],
+                columns: const ['Mtumiaji', 'Hali', 'Kifurushi', 'Tarehe'],
                 rows: recentUsers
                     .map(
                       (u) => [
                         _userCell(u.name),
-                        _compactPill(u.status, u.status == 'active' ? AdminColors.accentSuccess : AdminColors.accentDanger),
-                        _compactPill(u.effectivePremium ? 'premium' : 'free', u.effectivePremium ? AdminColors.accentWarning : const Color(0xFF6B7280)),
+                        _compactPill(_swStatus(u.status), u.status == 'active' ? AdminColors.accentSuccess : AdminColors.accentDanger),
+                        _compactPill(u.effectivePremium ? 'premium' : 'bure', u.effectivePremium ? AdminColors.accentWarning : const Color(0xFF6B7280)),
                         _recentCellText(_fmtDate(u.createdAt), color: AdminColors.textSecondary),
                       ],
                     )
                     .toList(),
               ),
               _recentTableCard(
-                title: 'Recent Payments',
+                title: 'Malipo ya karibuni',
                 onViewAll: () => _navigate(AdminPageId.payments),
                 columnFlex: const [4, 2, 2, 2],
-                columns: const ['User', 'Amount', 'Status', 'Date'],
+                columns: const ['Mtumiaji', 'Kiasi', 'Hali', 'Tarehe'],
                 rows: recentPayments
                     .map(
                       (p) => [
@@ -1690,6 +1757,54 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
           },
         ),
       ],
+    );
+  }
+
+  /// "N vinaisha ndani ya siku 3 · M vimeisha" → opens the reminders page.
+  Widget _dashboardReminderCallout() {
+    final s = _reminderSummary;
+    if (s == null || (s.expiring == 0 && s.expired == 0)) return const SizedBox.shrink();
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 16),
+      child: Material(
+        color: const Color(0x1FF59E0B),
+        borderRadius: BorderRadius.circular(14),
+        child: InkWell(
+          borderRadius: BorderRadius.circular(14),
+          onTap: () => _navigate(AdminPageId.notifications),
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(14),
+              border: Border.all(color: const Color(0x55F59E0B)),
+            ),
+            child: Row(
+              children: [
+                const Icon(Icons.alarm_rounded, color: Color(0xFFFBBF24)),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        'Vifurushi ${s.expiring} vinaisha ndani ya siku ${s.days} · ${s.expired} vimeisha',
+                        style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w700),
+                      ),
+                      Text(
+                        s.expiringUnsent > 0
+                            ? '${s.expiringUnsent} bado hawajakumbushwa — bonyeza kutuma vikumbusho'
+                            : 'Bonyeza kuona watumiaji na kutuma vikumbusho',
+                        style: const TextStyle(fontSize: 11.5, color: AdminColors.textSecondary),
+                      ),
+                    ],
+                  ),
+                ),
+                const Icon(Icons.chevron_right_rounded, color: Color(0xFFFBBF24)),
+              ],
+            ),
+          ),
+        ),
+      ),
     );
   }
 
@@ -1779,7 +1894,7 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
     final stats = _effectiveStats;
     final labels = stats?.monthLabels.isNotEmpty == true
         ? stats!.monthLabels
-        : const ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul'];
+        : const ['Jan', 'Feb', 'Mac', 'Apr', 'Mei', 'Jun', 'Jul'];
     final newUsers = stats?.newUsersPerMonth ?? List<double>.filled(labels.length, 0);
     final premiumBuys = stats?.premiumPurchasesPerMonth ?? List<double>.filled(labels.length, 0);
     final n = labels.length;
@@ -1852,7 +1967,7 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
     final stats = _effectiveStats;
     final labels = stats?.monthLabels.isNotEmpty == true
         ? stats!.monthLabels
-        : const ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul'];
+        : const ['Jan', 'Feb', 'Mac', 'Apr', 'Mei', 'Jun', 'Jul'];
     final vals = stats?.revenuePerMonth ?? List<double>.filled(labels.length, 0);
     final n = labels.length;
     final maxVal = vals.fold<double>(0, (a, b) => b > a ? b : a);
@@ -1934,7 +2049,7 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
               TextButton(
                 onPressed: onViewAll,
                 style: TextButton.styleFrom(padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4), minimumSize: Size.zero, tapTargetSize: MaterialTapTargetSize.shrinkWrap),
-                child: const Text('View All', style: TextStyle(fontSize: 10, color: Color(0xFF818CF8))),
+                child: const Text('Ona zote', style: TextStyle(fontSize: 10, color: Color(0xFF818CF8))),
               ),
             ],
           ),
@@ -2020,7 +2135,7 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
         : status == 'failed'
             ? AdminColors.accentDanger
             : AdminColors.accentWarning;
-    return _compactPill(status, c);
+    return _compactPill(_swStatus(status), c);
   }
 
   Widget _userCell(String name) {
@@ -2117,7 +2232,7 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        const Text('Users', style: TextStyle(fontSize: 24, fontWeight: FontWeight.w800)),
+                        const Text('Watumiaji', style: TextStyle(fontSize: 24, fontWeight: FontWeight.w800)),
                         Text(
                           subtitle,
                           style: const TextStyle(fontSize: 12, color: AdminColors.textSecondary, height: 1.35),
@@ -2163,7 +2278,7 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
                 ],
               )
             else ...[
-              const Text('Users', style: TextStyle(fontSize: 24, fontWeight: FontWeight.w800)),
+              const Text('Watumiaji', style: TextStyle(fontSize: 24, fontWeight: FontWeight.w800)),
               Text(
                 subtitle,
                 style: const TextStyle(fontSize: 12, color: AdminColors.textSecondary, height: 1.35),
@@ -2293,7 +2408,7 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
                     ],
                   ),
                 ),
-                _badge(u.status, u.status == 'active' ? AdminColors.accentSuccess : AdminColors.accentDanger),
+                _badge(_swStatus(u.status), u.status == 'active' ? AdminColors.accentSuccess : AdminColors.accentDanger),
               ],
             ),
             const SizedBox(height: 12),
@@ -2331,6 +2446,13 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
                         ),
                       ),
                     ),
+                  ),
+                  const SizedBox(width: 6),
+                  IconButton(
+                    tooltip: 'Tuma arifa kwa mtumiaji huyu',
+                    visualDensity: VisualDensity.compact,
+                    onPressed: () => _modalSendNotification(deviceId: id),
+                    icon: const Icon(Icons.notifications_active_outlined, size: 18, color: Color(0xFF818CF8)),
                   ),
                 ],
               ),
@@ -3501,7 +3623,7 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
         title: Text(title),
         content: TextField(controller: c, autofocus: true),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Ghairi')),
           FilledButton(onPressed: () => Navigator.pop(ctx, c.text), child: const Text('OK')),
         ],
       ),
@@ -3519,12 +3641,12 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  const Text('Channels', style: TextStyle(fontSize: 24, fontWeight: FontWeight.w800)),
+                  const Text('Chaneli', style: TextStyle(fontSize: 24, fontWeight: FontWeight.w800)),
                   Text('${_channels.length} channels', style: const TextStyle(fontSize: 12, color: AdminColors.textSecondary)),
                 ],
               ),
             ),
-            _btnPrimary(label: 'Add', icon: Icons.add, small: true, onTap: () => _showChannelEditor()),
+            _btnPrimary(label: 'Ongeza', icon: Icons.add, small: true, onTap: () => _showChannelEditor()),
           ],
         ),
         const SizedBox(height: 12),
@@ -3541,7 +3663,7 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
                     SizedBox(height: 48),
                     Icon(Icons.tv_off_outlined, size: 40, color: AdminColors.textSecondary),
                     SizedBox(height: 12),
-                    Text('Hakuna channels', textAlign: TextAlign.center, style: TextStyle(fontSize: 14, color: AdminColors.textSecondary)),
+                    Text('Hakuna chaneli', textAlign: TextAlign.center, style: TextStyle(fontSize: 14, color: AdminColors.textSecondary)),
                   ],
                 );
               }
@@ -3587,7 +3709,7 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
                                       child: Container(
                                         padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
                                         decoration: BoxDecoration(color: const Color(0xE61F2937), borderRadius: BorderRadius.circular(8)),
-                                        child: const Text('INACTIVE', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800, letterSpacing: 0.8, color: Colors.white)),
+                                        child: const Text('IMEZIMWA', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800, letterSpacing: 0.8, color: Colors.white)),
                                       ),
                                     ),
                                   ),
@@ -3641,7 +3763,7 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
                                 IconButton(
                                   onPressed: () => _showChannelEditor(index: i),
                                   icon: const Icon(Icons.edit_outlined, size: 18, color: Color(0xFF818CF8)),
-                                  tooltip: 'Edit channel',
+                                  tooltip: 'Hariri chaneli',
                                   padding: EdgeInsets.zero,
                                   constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
                                   visualDensity: VisualDensity.compact,
@@ -3649,7 +3771,7 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
                                 IconButton(
                                   onPressed: () => _confirmDeleteChannel(ch.id),
                                   icon: const Icon(Icons.delete_outline_rounded, size: 18, color: Color(0xFFF87171)),
-                                  tooltip: 'Delete channel',
+                                  tooltip: 'Futa chaneli',
                                   padding: EdgeInsets.zero,
                                   constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
                                   visualDensity: VisualDensity.compact,
@@ -3717,7 +3839,7 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        Text('Slides', style: TextStyle(fontSize: 17, fontWeight: FontWeight.w700, letterSpacing: -0.3)),
+                        Text('Mabango', style: TextStyle(fontSize: 17, fontWeight: FontWeight.w700, letterSpacing: -0.3)),
                         SizedBox(height: 2),
                         Text('Carousel ya app · haraka kuscan', style: TextStyle(fontSize: 11.5, color: AdminColors.textSecondary, height: 1.3)),
                       ],
@@ -3901,7 +4023,7 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
                         Container(
                           color: const Color(0x77000000),
                           alignment: Alignment.center,
-                          child: const Text('OFF', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: Colors.white)),
+                          child: const Text('IMEZIMWA', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: Colors.white)),
                         ),
                     ],
                   ),
@@ -4208,7 +4330,7 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
                   TextField(
                     controller: subtitle,
                     style: const TextStyle(fontSize: 13),
-                    decoration: _inputDeco().copyWith(labelText: 'Subtitle', isDense: true),
+                    decoration: _inputDeco().copyWith(labelText: 'Maelezo mafupi', isDense: true),
                   ),
                   const SizedBox(height: 8),
                   TextField(
@@ -4514,7 +4636,7 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
                       ),
                     ),
                     const SizedBox(height: 16),
-                    Text('Uapatikaji', style: _channelFormSectionStyle()),
+                    Text('Upatikanaji', style: _channelFormSectionStyle()),
                     const SizedBox(height: 6),
                     SwitchListTile(
                       contentPadding: EdgeInsets.zero,
@@ -4712,10 +4834,15 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        const Text('Subscriptions', style: TextStyle(fontSize: 24, fontWeight: FontWeight.w800)),
+        const Text('Usajili', style: TextStyle(fontSize: 24, fontWeight: FontWeight.w800)),
+        const SizedBox(height: 4),
+        const Text(
+          'Waliobakiza siku 3 au chini wanaonyeshwa kwa rangi ya njano. Tuma vikumbusho kupitia ukurasa wa "Arifa na vikumbusho".',
+          style: TextStyle(fontSize: 12, color: AdminColors.textSecondary),
+        ),
         const SizedBox(height: 12),
         _tableWrap(
-          columns: const ['ID', 'User', 'Plan', 'Price', 'End Date', 'Status'],
+          columns: const ['ID', 'Mtumiaji', 'Kifurushi', 'Bei', 'Tarehe ya kuisha', 'Muda uliobaki', 'Hali'],
           rows: _subscriptions
               .map(
                 (s) => [
@@ -4724,13 +4851,23 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
                   _planBadge(s.plan),
                   Text(fmtTzs(s.price), style: const TextStyle(fontSize: 12)),
                   Text(_fmtDate(s.endDate), style: const TextStyle(fontSize: 12, color: AdminColors.textSecondary)),
-                  _badge(s.status, s.status == 'active' ? AdminColors.accentSuccess : AdminColors.accentDanger),
+                  _subscriptionLeftBadge(s.endDate),
+                  _badge(_swStatus(s.status), s.status == 'active' ? AdminColors.accentSuccess : AdminColors.accentDanger),
                 ],
               )
               .toList(),
         ),
       ],
     );
+  }
+
+  /// "Imeisha" (red), "Siku N" (amber, ≤ 3 days) or "Siku N" (green).
+  Widget _subscriptionLeftBadge(DateTime end) {
+    final left = end.difference(DateTime.now());
+    if (left.isNegative) return _badge('Imeisha', AdminColors.accentDanger);
+    final days = left.inDays;
+    final label = days >= 1 ? 'Siku $days' : 'Saa ${max(1, left.inHours)}';
+    return _badge(label, days <= 3 ? AdminColors.accentWarning : AdminColors.accentSuccess);
   }
 
   Widget _planBadge(String plan) {
@@ -5008,7 +5145,7 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        const Text('Payments', style: TextStyle(fontSize: 24, fontWeight: FontWeight.w800)),
+        const Text('Malipo', style: TextStyle(fontSize: 24, fontWeight: FontWeight.w800)),
         const SizedBox(height: 8),
         Container(
           width: double.infinity,
@@ -5025,7 +5162,7 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
         ),
         const SizedBox(height: 12),
         _tableWrap(
-          columns: const ['Transaction', 'User', 'Amount', 'Status'],
+          columns: const ['Muamala', 'Mtumiaji', 'Kiasi', 'Hali'],
           rows: _payments.take(20).map((p) {
             return [
               Text(p.transactionId, style: const TextStyle(fontSize: 11, color: AdminColors.textSecondary)),
@@ -5039,58 +5176,677 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
     );
   }
 
-  // --- Notifications ---
+  // --- Notifications & subscription reminders ---
+
+  List<AdminNotification> _parseNotificationsJson(List raw) {
+    return raw.whereType<Map>().map((rawItem) {
+      final j = rawItem.cast<String, dynamic>();
+      return AdminNotification(
+        id: _s(j['id']),
+        title: _s(j['title']),
+        message: _s(j['message']),
+        type: _s(j['type'], fallback: 'info'),
+        read: j['read'] as bool? ?? false,
+        createdAt: _dt(j['created_at']) ?? DateTime.now(),
+        target: _s(j['target'], fallback: 'all'),
+        delivery: _s(j['delivery'], fallback: 'unknown'),
+        sentCount: _toInt(j['sent_count']),
+        failedCount: _toInt(j['failed_count']),
+        error: _s(j['error']).isEmpty ? null : _s(j['error']),
+      );
+    }).toList();
+  }
+
+  List<ReminderUser> _parseReminderUsers(http.Response res) {
+    if (res.statusCode < 200 || res.statusCode >= 300) return const [];
+    final list = (jsonDecode(res.body) as Map)['users'];
+    if (list is! List) return const [];
+    return list.whereType<Map>().map((raw) {
+      final j = raw.cast<String, dynamic>();
+      return ReminderUser(
+        id: _s(j['id']),
+        name: _s(j['name']),
+        phone: _s(j['phone']),
+        deviceId: _s(j['device_id']),
+        endsAt: _dt(j['ends_at']),
+        remindedAt: _dt(j['reminded_at']),
+      );
+    }).toList();
+  }
+
+  /// Reminder counts + the users behind them (expiring within N days / already expired).
+  Future<void> _loadReminderData() async {
+    if (!_hasAdminSession || _remindersLoading) return;
+    setState(() {
+      _remindersLoading = true;
+      _remindersError = null;
+    });
+    try {
+      Uri usersUri(String audience) => Uri.parse('$_apiBase/api/v1/admin/reminders/users')
+          .replace(queryParameters: {'audience': audience, 'limit': '200'});
+      final results = await Future.wait([
+        http.get(Uri.parse('$_apiBase/api/v1/admin/reminders/summary'), headers: _adminHeaders()),
+        http.get(usersUri('expiring'), headers: _adminHeaders()),
+        http.get(usersUri('expired'), headers: _adminHeaders()),
+      ]).timeout(const Duration(seconds: 20));
+      if (results.any((r) => r.statusCode == 401 || r.statusCode == 403)) {
+        await _handleAdminUnauthorized();
+        return;
+      }
+      final summaryRes = results[0];
+      if (summaryRes.statusCode == 404) {
+        throw Exception('Seva bado haina vikumbusho. Sasisha (deploy) backend mpya kwanza.');
+      }
+      if (summaryRes.statusCode < 200 || summaryRes.statusCode >= 300) {
+        throw Exception('Seva imejibu ${summaryRes.statusCode}.');
+      }
+      final s = (jsonDecode(summaryRes.body) as Map).cast<String, dynamic>();
+      final templates = (s['templates'] as Map?)?.cast<String, dynamic>() ?? const {};
+      final exp = (templates['expiring'] as Map?)?.cast<String, dynamic>() ?? const {};
+      final gone = (templates['expired'] as Map?)?.cast<String, dynamic>() ?? const {};
+      final summary = ReminderSummary(
+        days: _toInt(s['days']) > 0 ? _toInt(s['days']) : 3,
+        expiring: _toInt(s['expiring']),
+        expiringUnsent: _toInt(s['expiring_unsent']),
+        expired: _toInt(s['expired']),
+        expiredUnsent: _toInt(s['expired_unsent']),
+        pushConfigured: s['push_configured'] != false,
+        autoReminders: s['auto_reminders'] != false,
+        expiringTitle: _s(exp['title']),
+        expiringBody: _s(exp['body']),
+        expiredTitle: _s(gone['title']),
+        expiredBody: _s(gone['body']),
+      );
+      if (!mounted) return;
+      setState(() {
+        _reminderSummary = summary;
+        _expiringUsers = _parseReminderUsers(results[1]);
+        _expiredUsers = _parseReminderUsers(results[2]);
+      });
+    } catch (e) {
+      if (!mounted) return;
+      final msg = e.toString().replaceFirst('Exception: ', '');
+      setState(() => _remindersError = msg.contains('Seva') ? msg : 'Imeshindwa kupakia vikumbusho. Angalia mtandao kisha ujaribu tena.');
+    } finally {
+      if (mounted) setState(() => _remindersLoading = false);
+    }
+  }
+
+  Future<void> _reloadNotifications() async {
+    if (!_hasAdminSession) return;
+    try {
+      final res = await http
+          .get(Uri.parse('$_apiBase/api/v1/admin/notifications'), headers: _adminHeaders())
+          .timeout(const Duration(seconds: 15));
+      if (res.statusCode == 401 || res.statusCode == 403) {
+        await _handleAdminUnauthorized();
+        return;
+      }
+      if (res.statusCode < 200 || res.statusCode >= 300) return;
+      final raw = (jsonDecode(res.body) as Map)['notifications'];
+      if (raw is! List || !mounted) return;
+      setState(() => _notifications = _parseNotificationsJson(raw));
+    } catch (_) {}
+  }
+
+  String? _readApiError(String body) {
+    try {
+      final err = (jsonDecode(body) as Map)['error'];
+      if (err is String && err.trim().isNotEmpty) return err.trim();
+    } catch (_) {}
+    return null;
+  }
+
+  /// "leo" / "kesho" / "baada ya siku N" / "jana" / "siku N zilizopita".
+  String _swDayDistance(DateTime d) {
+    final now = DateTime.now();
+    final days = DateTime(d.year, d.month, d.day).difference(DateTime(now.year, now.month, now.day)).inDays;
+    if (days == 0) return 'leo';
+    if (days == 1) return 'kesho';
+    if (days > 1) return 'baada ya siku $days';
+    if (days == -1) return 'jana';
+    return 'siku ${-days} zilizopita';
+  }
+
+  String _notificationTargetLabel(String target) {
+    if (target == 'all') return 'Wote';
+    if (target == 'premium') return 'Premium';
+    if (target == 'free') return 'Bure';
+    if (target.startsWith('user:')) {
+      final id = target.substring(5);
+      return 'Mtumiaji: ${id.length > 14 ? '${id.substring(0, 14)}…' : id}';
+    }
+    if (target.startsWith('reminder:')) {
+      final parts = target.split(':');
+      final who = parts.length > 1 && parts[1] == 'expired' ? 'walioisha' : 'wanaokaribia kuisha';
+      final how = parts.length > 2 && parts[2] == 'auto' ? 'otomatiki' : 'admin';
+      return 'Kikumbusho · $who · $how';
+    }
+    return target;
+  }
+
+  (String, Color) _deliveryBadge(String delivery) {
+    return switch (delivery) {
+      'sent' => ('Imetumwa', AdminColors.accentSuccess),
+      'partial' => ('Sehemu imefika', const Color(0xFFF59E0B)),
+      'bridge' => ('Kupitia Supasoka', const Color(0xFF3B82F6)),
+      'not_configured' => ('FCM haijasanidiwa', const Color(0xFFF59E0B)),
+      'failed' => ('Imeshindwa', AdminColors.accentDanger),
+      _ => ('Haijulikani', const Color(0xFF6B7280)),
+    };
+  }
+
+  Future<void> _deleteNotification(AdminNotification n) async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: AdminColors.bgSecondary,
+        title: const Text('Futa kwenye historia?'),
+        content: const Text('Hii inafuta rekodi hapa tu — arifa iliyokwisha tumwa haitaondoka kwenye simu za watumiaji.'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Ghairi')),
+          FilledButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Futa')),
+        ],
+      ),
+    );
+    if (ok != true || !mounted) return;
+    try {
+      final res = await http
+          .delete(
+            Uri.parse('$_apiBase/api/v1/admin/notifications/${Uri.encodeComponent(n.id)}'),
+            headers: _adminHeadersForDelete(),
+          )
+          .timeout(const Duration(seconds: 12));
+      if (res.statusCode == 401 || res.statusCode == 403) {
+        await _handleAdminUnauthorized();
+        return;
+      }
+      if (res.statusCode < 200 || res.statusCode >= 300) throw Exception('${res.statusCode}');
+      if (!mounted) return;
+      setState(() => _notifications.removeWhere((x) => x.id == n.id));
+      _showToast('Imefutwa kwenye historia', _ToastType.success);
+    } catch (e) {
+      if (mounted) _showToast('Imeshindwa kufuta: $e', _ToastType.error);
+    }
+  }
+
+  /// Compose + send a subscription reminder to everyone in [audience] (`expiring` / `expired`).
+  Future<void> _openReminderComposer(String audience) async {
+    final s = _reminderSummary ?? const ReminderSummary();
+    final expiring = audience == 'expiring';
+    if (!s.pushConfigured) {
+      _showToast('FCM haijasanidiwa kwenye seva — vikumbusho haviwezi kutumwa.', _ToastType.error);
+      return;
+    }
+    final title = TextEditingController(text: expiring ? s.expiringTitle : s.expiredTitle);
+    final body = TextEditingController(text: expiring ? s.expiringBody : s.expiredBody);
+    // Expiring: skip people already reminded for this subscription. Expired: reach everyone by default.
+    var onlyUnsent = expiring;
+    var sending = false;
+
+    await showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setLocal) {
+          final total = expiring ? s.expiring : s.expired;
+          final unsent = expiring ? s.expiringUnsent : s.expiredUnsent;
+          final recipients = onlyUnsent ? unsent : total;
+          return AlertDialog(
+            backgroundColor: AdminColors.bgSecondary,
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+            title: Text(
+              expiring ? 'Kumbusha wanaokaribia kuisha' : 'Kumbusha walioisha',
+              style: const TextStyle(fontWeight: FontWeight.w800),
+            ),
+            content: SizedBox(
+              width: 460,
+              child: SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      expiring
+                          ? 'Watumiaji ambao kifurushi chao kinaisha ndani ya siku ${s.days}.'
+                          : 'Watumiaji ambao kifurushi chao kimeshaisha.',
+                      style: const TextStyle(fontSize: 12.5, color: AdminColors.textSecondary),
+                    ),
+                    const SizedBox(height: 14),
+                    TextField(
+                      controller: title,
+                      maxLength: 100,
+                      decoration: _inputDeco().copyWith(labelText: 'Kichwa'),
+                    ),
+                    const SizedBox(height: 6),
+                    TextField(
+                      controller: body,
+                      maxLines: 4,
+                      maxLength: 500,
+                      decoration: _inputDeco().copyWith(labelText: 'Ujumbe'),
+                    ),
+                    Text(
+                      expiring
+                          ? '{jina} = jina la mtumiaji · {muda} = "leo", "kesho" au "baada ya siku 3"'
+                          : '{jina} = jina la mtumiaji',
+                      style: const TextStyle(fontSize: 11, color: AdminColors.textSecondary),
+                    ),
+                    const SizedBox(height: 8),
+                    CheckboxListTile(
+                      contentPadding: EdgeInsets.zero,
+                      controlAffinity: ListTileControlAffinity.leading,
+                      value: onlyUnsent,
+                      onChanged: sending ? null : (v) => setLocal(() => onlyUnsent = v ?? false),
+                      title: const Text('Ruka waliokwisha kukumbushwa', style: TextStyle(fontSize: 13)),
+                      subtitle: Text(
+                        'Wote: $total · Hawajakumbushwa: $unsent',
+                        style: const TextStyle(fontSize: 11.5, color: AdminColors.textSecondary),
+                      ),
+                    ),
+                    const SizedBox(height: 4),
+                    Container(
+                      width: double.infinity,
+                      padding: const EdgeInsets.all(10),
+                      decoration: BoxDecoration(
+                        color: const Color(0x226366F1),
+                        borderRadius: BorderRadius.circular(10),
+                      ),
+                      child: Text(
+                        recipients == 0
+                            ? 'Hakuna mtumiaji wa kutumiwa kikumbusho hiki.'
+                            : 'Watumiaji $recipients watapokea kikumbusho hiki.',
+                        style: const TextStyle(fontSize: 12.5, fontWeight: FontWeight.w600),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: sending ? null : () => Navigator.pop(ctx),
+                child: const Text('Ghairi'),
+              ),
+              FilledButton.icon(
+                onPressed: sending || recipients == 0
+                    ? null
+                    : () async {
+                        if (title.text.trim().isEmpty || body.text.trim().isEmpty) {
+                          _showToast('Andika kichwa na ujumbe', _ToastType.error);
+                          return;
+                        }
+                        setLocal(() => sending = true);
+                        final done = await _sendReminders(
+                          audience: audience,
+                          title: title.text.trim(),
+                          body: body.text.trim(),
+                          onlyUnsent: onlyUnsent,
+                        );
+                        if (!ctx.mounted) return;
+                        if (done) {
+                          Navigator.pop(ctx);
+                        } else {
+                          setLocal(() => sending = false);
+                        }
+                      },
+                icon: sending
+                    ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2))
+                    : const Icon(Icons.send_rounded, size: 16),
+                label: Text(sending ? 'Inatuma…' : 'Tuma kikumbusho'),
+              ),
+            ],
+          );
+        },
+      ),
+    );
+  }
+
+  Future<bool> _sendReminders({
+    required String audience,
+    required String title,
+    required String body,
+    required bool onlyUnsent,
+  }) async {
+    try {
+      final res = await http
+          .post(
+            Uri.parse('$_apiBase/api/v1/admin/reminders/send'),
+            headers: _adminHeaders(),
+            body: jsonEncode({'audience': audience, 'title': title, 'body': body, 'only_unsent': onlyUnsent}),
+          )
+          // Large audiences are sent in batches of 500 — give the server time.
+          .timeout(const Duration(seconds: 120));
+      if (res.statusCode == 401 || res.statusCode == 403) {
+        await _handleAdminUnauthorized();
+        return false;
+      }
+      if (res.statusCode < 200 || res.statusCode >= 300) {
+        _showToast(_readApiError(res.body) ?? 'Kutuma kumeshindikana (${res.statusCode}).', _ToastType.error);
+        return false;
+      }
+      final out = (jsonDecode(res.body) as Map).cast<String, dynamic>();
+      final sent = _toInt(out['sent']);
+      final failed = _toInt(out['failed']);
+      final total = _toInt(out['total']);
+      if (total == 0) {
+        _showToast('Hakuna mtumiaji aliyestahili kutumiwa.', _ToastType.info);
+      } else if (sent == 0) {
+        _showToast('Hakuna kikumbusho kilichofika (vimeshindwa $failed). Huenda watumiaji hawajawasha arifa.', _ToastType.error);
+      } else {
+        _showToast(
+          failed == 0 ? 'Vikumbusho $sent vimetumwa!' : 'Vimetumwa $sent, vimeshindwa $failed (jumla $total).',
+          failed == 0 ? _ToastType.success : _ToastType.warning,
+        );
+      }
+      unawaited(_loadReminderData());
+      unawaited(_reloadNotifications());
+      return true;
+    } on TimeoutException {
+      _showToast('Seva inachukua muda mrefu. Angalia historia baada ya dakika moja kabla ya kutuma tena.', _ToastType.warning);
+      unawaited(_reloadNotifications());
+      return true;
+    } catch (e) {
+      _showToast('Hitilafu ya mtandao: $e', _ToastType.error);
+      return false;
+    }
+  }
+
+  Widget _reminderNotice(String text, {Color color = const Color(0xFFF59E0B), IconData icon = Icons.warning_amber_rounded}) {
+    return Container(
+      width: double.infinity,
+      margin: const EdgeInsets.only(bottom: 12),
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.12),
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: color.withValues(alpha: 0.35)),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(icon, size: 18, color: color),
+          const SizedBox(width: 10),
+          Expanded(child: Text(text, style: const TextStyle(fontSize: 12.5, height: 1.4))),
+        ],
+      ),
+    );
+  }
+
+  Widget _reminderCard({
+    required String audience,
+    required String title,
+    required String subtitle,
+    required int count,
+    required int unsent,
+    required List<ReminderUser> users,
+    required Color color,
+    required IconData icon,
+    required String actionLabel,
+  }) {
+    final expiring = audience == 'expiring';
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: AdminColors.bgTertiary,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: color.withValues(alpha: 0.3)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Container(
+                width: 36,
+                height: 36,
+                decoration: BoxDecoration(color: color.withValues(alpha: 0.18), borderRadius: BorderRadius.circular(10)),
+                child: Icon(icon, size: 18, color: color),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(title, style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 14)),
+                    Text(subtitle, style: const TextStyle(fontSize: 11.5, color: AdminColors.textSecondary)),
+                  ],
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 14),
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.end,
+            children: [
+              Text(
+                _remindersLoading && _reminderSummary == null ? '…' : '$count',
+                style: TextStyle(fontSize: 30, fontWeight: FontWeight.w800, color: color),
+              ),
+              const SizedBox(width: 8),
+              Padding(
+                padding: const EdgeInsets.only(bottom: 6),
+                child: Text(
+                  'watumiaji · $unsent hawajakumbushwa',
+                  style: const TextStyle(fontSize: 12, color: AdminColors.textSecondary),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 12),
+          SizedBox(
+            width: double.infinity,
+            child: FilledButton.icon(
+              onPressed: count == 0 ? null : () => unawaited(_openReminderComposer(audience)),
+              style: FilledButton.styleFrom(backgroundColor: color, foregroundColor: Colors.white),
+              icon: const Icon(Icons.notifications_active_rounded, size: 16),
+              label: Text(count == 0 ? 'Hakuna wa kukumbusha' : actionLabel),
+            ),
+          ),
+          if (users.isNotEmpty)
+            Theme(
+              data: Theme.of(context).copyWith(dividerColor: Colors.transparent),
+              child: ExpansionTile(
+                tilePadding: EdgeInsets.zero,
+                childrenPadding: EdgeInsets.zero,
+                title: Text(
+                  'Ona watumiaji (${users.length}${users.length < count ? ' kati ya $count' : ''})',
+                  style: const TextStyle(fontSize: 12.5, fontWeight: FontWeight.w600),
+                ),
+                children: users.take(60).map((u) {
+                  final ends = u.endsAt;
+                  final name = u.name.isEmpty || u.name == 'Viewer' ? 'Mtumiaji' : u.name;
+                  final phone = u.phone.isEmpty || u.phone == 'N/A' ? '' : ' · ${u.phone}';
+                  return Container(
+                    margin: const EdgeInsets.only(bottom: 6),
+                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                    decoration: BoxDecoration(color: const Color(0x0DFFFFFF), borderRadius: BorderRadius.circular(10)),
+                    child: Row(
+                      children: [
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text('$name$phone', style: const TextStyle(fontSize: 12.5, fontWeight: FontWeight.w600)),
+                              if (ends != null)
+                                Text(
+                                  '${expiring ? 'Kinaisha' : 'Kiliisha'} ${_swDayDistance(ends)} · ${_fmtAccessDate(ends)}',
+                                  style: const TextStyle(fontSize: 11, color: AdminColors.textSecondary),
+                                ),
+                            ],
+                          ),
+                        ),
+                        _badge(
+                          u.remindedAt == null ? 'Hajakumbushwa' : 'Amekumbushwa ${_swDayDistance(u.remindedAt!)}',
+                          u.remindedAt == null ? const Color(0xFF94A3B8) : AdminColors.accentSuccess,
+                        ),
+                      ],
+                    ),
+                  );
+                }).toList(),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
+  Widget _notificationHistoryTile(AdminNotification n) {
+    final (label, color) = _deliveryBadge(n.delivery);
+    final isReminder = n.type == 'reminder' || n.target.startsWith('reminder:');
+    return Container(
+      margin: const EdgeInsets.only(bottom: 10),
+      padding: const EdgeInsets.fromLTRB(16, 14, 8, 14),
+      decoration: BoxDecoration(
+        color: AdminColors.bgTertiary,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: const Color(0x0DFFFFFF)),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Container(
+            width: 34,
+            height: 34,
+            decoration: BoxDecoration(color: color.withValues(alpha: 0.18), borderRadius: BorderRadius.circular(9)),
+            child: Icon(isReminder ? Icons.alarm_rounded : Icons.campaign_rounded, size: 16, color: color),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(n.title, style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 13)),
+                const SizedBox(height: 2),
+                Text(n.message, style: const TextStyle(fontSize: 12, height: 1.35, color: AdminColors.textSecondary)),
+                const SizedBox(height: 8),
+                Wrap(
+                  spacing: 6,
+                  runSpacing: 6,
+                  crossAxisAlignment: WrapCrossAlignment.center,
+                  children: [
+                    _badge(label, color),
+                    _badge(_notificationTargetLabel(n.target), AdminColors.accentPrimary),
+                    if (n.sentCount + n.failedCount > 0)
+                      Text(
+                        'imefika ${n.sentCount}${n.failedCount > 0 ? ' · imeshindwa ${n.failedCount}' : ''}',
+                        style: const TextStyle(fontSize: 11, color: AdminColors.textSecondary),
+                      ),
+                    Text(
+                      _formatLogDateTime(n.createdAt),
+                      style: const TextStyle(fontSize: 11, color: AdminColors.textSecondary),
+                    ),
+                  ],
+                ),
+                if (n.error != null) ...[
+                  const SizedBox(height: 6),
+                  Text(n.error!, style: const TextStyle(fontSize: 11.5, color: Color(0xFFF87171))),
+                ],
+              ],
+            ),
+          ),
+          IconButton(
+            tooltip: 'Futa kwenye historia',
+            onPressed: () => unawaited(_deleteNotification(n)),
+            icon: const Icon(Icons.delete_outline_rounded, size: 18, color: Color(0xFF6B7280)),
+          ),
+        ],
+      ),
+    );
+  }
+
   Widget _pageNotifications() {
+    final s = _reminderSummary;
+    final days = s?.days ?? 3;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Row(
-          children: [
-            const Expanded(child: Text('Notifications', style: TextStyle(fontSize: 24, fontWeight: FontWeight.w800))),
-            _btnPrimary(label: 'Send', icon: Icons.send, small: true, onTap: _modalSendNotification),
-          ],
+        _pageTitleRow(
+          title: 'Arifa na vikumbusho',
+          subtitle: 'Tuma ujumbe kwa watumiaji na uwakumbushe kulipia vifurushi vyao',
+          action: Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: [
+              _btnOutline(
+                label: _remindersLoading ? 'Inapakia…' : 'Pakia upya',
+                icon: Icons.refresh_rounded,
+                onTap: () {
+                  unawaited(_loadReminderData());
+                  unawaited(_reloadNotifications());
+                },
+              ),
+              _btnPrimary(label: 'Tuma arifa', icon: Icons.send_rounded, small: true, onTap: _modalSendNotification),
+            ],
+          ),
+        ),
+        const SizedBox(height: 16),
+        if (_remindersError != null)
+          _reminderNotice(_remindersError!, color: AdminColors.accentDanger, icon: Icons.error_outline_rounded),
+        if (s != null && !s.pushConfigured)
+          _reminderNotice(
+            'FCM haijasanidiwa kwenye seva, kwa hiyo vikumbusho havitafika. '
+            'Weka FCM_SERVICE_ACCOUNT_JSON kwenye Railway (Firebase → Project settings → Service accounts).',
+          ),
+        if (s != null && s.pushConfigured)
+          _reminderNotice(
+            s.autoReminders
+                ? 'Vikumbusho otomatiki vimewashwa: kila mtumiaji ambaye kifurushi chake kinaisha ndani ya siku $days '
+                    'hutumiwa kikumbusho mara moja, kati ya saa 2 asubuhi na saa 2 usiku.'
+                : 'Vikumbusho otomatiki vimezimwa (REMINDER_AUTO_ENABLED=false). Tuma kwa mkono hapa chini.',
+            color: s.autoReminders ? AdminColors.accentSuccess : const Color(0xFF94A3B8),
+            icon: s.autoReminders ? Icons.auto_mode_rounded : Icons.pause_circle_outline_rounded,
+          ),
+        LayoutBuilder(
+          builder: (context, c) {
+            final a = _reminderCard(
+              audience: 'expiring',
+              title: 'Vinakaribia kuisha',
+              subtitle: 'Vifurushi vinavyoisha ndani ya siku $days',
+              count: s?.expiring ?? 0,
+              unsent: s?.expiringUnsent ?? 0,
+              users: _expiringUsers,
+              color: const Color(0xFFF59E0B),
+              icon: Icons.hourglass_bottom_rounded,
+              actionLabel: 'Tuma kikumbusho',
+            );
+            final b = _reminderCard(
+              audience: 'expired',
+              title: 'Vimeisha',
+              subtitle: 'Watumiaji ambao vifurushi vyao vimeshaisha',
+              count: s?.expired ?? 0,
+              unsent: s?.expiredUnsent ?? 0,
+              users: _expiredUsers,
+              color: AdminColors.accentDanger,
+              icon: Icons.event_busy_rounded,
+              actionLabel: 'Tuma kwa walioisha',
+            );
+            if (c.maxWidth < 900) return Column(children: [a, const SizedBox(height: 12), b]);
+            return Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [Expanded(child: a), const SizedBox(width: 12), Expanded(child: b)],
+            );
+          },
+        ),
+        const SizedBox(height: 24),
+        const Text('Historia ya arifa', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w800)),
+        const SizedBox(height: 4),
+        const Text(
+          'Kila arifa na kikumbusho kilichotumwa, pamoja na kama kilifika.',
+          style: TextStyle(fontSize: 12, color: AdminColors.textSecondary),
         ),
         const SizedBox(height: 12),
-        ..._notifications.map((n) {
-          final bg = switch (n.type) {
-            'success' => const Color(0x3310B981),
-            'warning' => const Color(0x33F59E0B),
-            'error' => const Color(0x33EF4444),
-            _ => const Color(0x336366F1),
-          };
-          return Opacity(
-            opacity: n.read ? 0.5 : 1,
-            child: Container(
-              margin: const EdgeInsets.only(bottom: 10),
-              padding: const EdgeInsets.all(16),
-              decoration: BoxDecoration(color: AdminColors.bgTertiary, borderRadius: BorderRadius.circular(16), border: Border.all(color: const Color(0x0DFFFFFF))),
-              child: Row(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Container(
-                    width: 32,
-                    height: 32,
-                    decoration: BoxDecoration(color: bg, borderRadius: BorderRadius.circular(8)),
-                    child: Icon(
-                      n.type == 'success' ? Icons.check : n.type == 'error' ? Icons.close : Icons.info_outline,
-                      size: 14,
-                    ),
-                  ),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(n.title, style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 12)),
-                        Text(n.message, style: const TextStyle(fontSize: 10, color: AdminColors.textSecondary)),
-                      ],
-                    ),
-                  ),
-                ],
-              ),
+        if (_notifications.isEmpty)
+          Container(
+            width: double.infinity,
+            padding: const EdgeInsets.all(24),
+            decoration: BoxDecoration(color: AdminColors.bgTertiary, borderRadius: BorderRadius.circular(16)),
+            child: const Text(
+              'Hakuna arifa zilizotumwa bado.',
+              textAlign: TextAlign.center,
+              style: TextStyle(color: AdminColors.textSecondary),
             ),
-          );
-        }),
+          ),
+        ..._notifications.map(_notificationHistoryTile),
       ],
     );
   }
@@ -5100,15 +5856,15 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        const Text('Analytics', style: TextStyle(fontSize: 24, fontWeight: FontWeight.w800)),
+        const Text('Takwimu', style: TextStyle(fontSize: 24, fontWeight: FontWeight.w800)),
         const SizedBox(height: 4),
         Text(_dashboardSubtitle(), style: const TextStyle(fontSize: 12, color: AdminColors.textSecondary)),
         const SizedBox(height: 16),
         LayoutBuilder(
           builder: (context, c) {
             final stacked = c.maxWidth < 1024;
-            final a = _chartCard('Daily Registrations', 250, _dailyRegChart());
-            final b = _chartCard('Subscriptions', 250, _subDoughnut());
+            final a = _chartCard('Usajili wa kila siku', 250, _dailyRegChart());
+            final b = _chartCard('Vifurushi vilivyonunuliwa', 250, _subDoughnut());
             if (stacked) return Column(children: [a, const SizedBox(height: 16), b]);
             return Row(crossAxisAlignment: CrossAxisAlignment.start, children: [Expanded(child: a), const SizedBox(width: 16), Expanded(child: b)]);
           },
@@ -5153,7 +5909,7 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
     final total = gold + plat + week + other;
     if (total <= 0) {
       return const Center(
-        child: Text('No completed plan payments yet', style: TextStyle(color: AdminColors.textSecondary, fontSize: 12)),
+        child: Text('Hakuna malipo ya vifurushi yaliyokamilika bado', style: TextStyle(color: AdminColors.textSecondary, fontSize: 12)),
       );
     }
     return PieChart(
@@ -5162,21 +5918,19 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
         centerSpaceRadius: 44,
         sections: [
           if (gold > 0)
-            PieChartSectionData(value: gold, color: const Color(0xFFF59E0B), title: 'Gold', radius: 48, titleStyle: const TextStyle(fontSize: 10, color: Colors.white)),
+            PieChartSectionData(value: gold, color: const Color(0xFFF59E0B), title: 'Dhahabu', radius: 48, titleStyle: const TextStyle(fontSize: 10, color: Colors.white)),
           if (plat > 0)
-            PieChartSectionData(value: plat, color: const Color(0xFF8B5CF6), title: 'Plat', radius: 48, titleStyle: const TextStyle(fontSize: 10, color: Colors.white)),
+            PieChartSectionData(value: plat, color: const Color(0xFF8B5CF6), title: 'Platinum', radius: 48, titleStyle: const TextStyle(fontSize: 10, color: Colors.white)),
           if (week > 0)
-            PieChartSectionData(value: week, color: const Color(0xFF3B82F6), title: 'Week', radius: 48, titleStyle: const TextStyle(fontSize: 10, color: Colors.white)),
+            PieChartSectionData(value: week, color: const Color(0xFF3B82F6), title: 'Wiki', radius: 48, titleStyle: const TextStyle(fontSize: 10, color: Colors.white)),
           if (other > 0)
-            PieChartSectionData(value: other, color: const Color(0xFF6B7280), title: 'Other', radius: 48, titleStyle: const TextStyle(fontSize: 10, color: Colors.white)),
+            PieChartSectionData(value: other, color: const Color(0xFF6B7280), title: 'Nyingine', radius: 48, titleStyle: const TextStyle(fontSize: 10, color: Colors.white)),
         ],
       ),
     );
   }
 
   Widget _adminSessionCard() {
-    final email = widget.auth.savedEmail;
-    final viaKey = widget.auth.usesBuildTimeKey;
     return Container(
       width: double.infinity,
       padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
@@ -5193,22 +5947,18 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(
-                  viaKey ? 'Umeunganishwa (ufunguo wa build)' : 'Umeunganishwa na seva',
-                  style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w700),
+                const Text(
+                  'Umeunganishwa na seva',
+                  style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700),
                 ),
-                if (email.isNotEmpty)
-                  Text(email, style: const TextStyle(fontSize: 11.5, color: AdminColors.textSecondary)),
-                if (viaKey)
-                  const Text(
-                    'APK iliyojengwa na dev_defines.json — hakuna kuingia tena.',
-                    style: TextStyle(fontSize: 11, height: 1.35, color: AdminColors.textSecondary),
-                  ),
+                Text(
+                  _sessionRemainingLabel(),
+                  style: const TextStyle(fontSize: 11.5, color: AdminColors.textSecondary),
+                ),
               ],
             ),
           ),
-          if (!viaKey)
-            TextButton(onPressed: () => unawaited(_adminLogout()), child: const Text('Toka')),
+          TextButton(onPressed: () => unawaited(_adminLogout()), child: const Text('Toka')),
         ],
       ),
     );
@@ -5269,7 +6019,7 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              const Text('Settings', style: TextStyle(fontSize: 24, fontWeight: FontWeight.w800)),
+              const Text('Mipangilio', style: TextStyle(fontSize: 24, fontWeight: FontWeight.w800)),
               const SizedBox(height: 16),
               _adminSessionCard(),
               const SizedBox(height: 16),
@@ -5324,7 +6074,7 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
                 ),
               ),
               const SizedBox(height: 20),
-              const Text('Site Name', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600)),
+              const Text('Jina la tovuti', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600)),
               const SizedBox(height: 6),
               TextField(
                 controller: _settingsSiteName,
@@ -5333,14 +6083,14 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
               ),
               SwitchListTile(
                 contentPadding: EdgeInsets.zero,
-                title: const Text('Subscription Enabled', style: TextStyle(fontSize: 13)),
+                title: const Text('Usajili wa premium umewashwa', style: TextStyle(fontSize: 13)),
                 value: _settings.subscriptionEnabled,
                 onChanged: (v) => setState(() => _settings.subscriptionEnabled = v),
                 activeThumbColor: AdminColors.accentPrimary,
               ),
               SwitchListTile(
                 contentPadding: EdgeInsets.zero,
-                title: const Text('Maintenance Mode', style: TextStyle(fontSize: 13)),
+                title: const Text('Hali ya matengenezo', style: TextStyle(fontSize: 13)),
                 value: _settings.maintenanceMode,
                 onChanged: (v) => setState(() => _settings.maintenanceMode = v),
                 activeThumbColor: AdminColors.accentPrimary,
@@ -5396,7 +6146,7 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
                       contentPadding: EdgeInsets.zero,
                       value: _settings.forceUpdateEnabled,
                       onChanged: (v) => setState(() => _settings.forceUpdateEnabled = v),
-                      title: const Text('Lazima ku update app', style: TextStyle(fontSize: 13)),
+                      title: const Text('Lazimisha kusasisha app', style: TextStyle(fontSize: 13)),
                       activeThumbColor: const Color(0xFFFB7185),
                     ),
                     TextField(
@@ -5532,15 +6282,15 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        const Text('Activity Logs', style: TextStyle(fontSize: 24, fontWeight: FontWeight.w800)),
+        const Text('Kumbukumbu za shughuli', style: TextStyle(fontSize: 24, fontWeight: FontWeight.w800)),
         const SizedBox(height: 12),
         _tableWrap(
-          columns: const ['ID', 'Admin', 'Action', 'Date'],
+          columns: const ['ID', 'Msimamizi', 'Kitendo', 'Tarehe'],
           rows: _logs.take(30).map((l) {
             return [
               Text(l.id, style: const TextStyle(fontSize: 12, color: AdminColors.textSecondary)),
               Text(l.adminName, style: const TextStyle(fontSize: 12)),
-              _badge(l.action, AdminColors.accentPrimary),
+              _badge(_swLogAction(l.action), AdminColors.accentPrimary),
               Text(_formatLogDateTime(l.createdAt), style: const TextStyle(fontSize: 12, color: AdminColors.textSecondary)),
             ];
           }).toList(),
@@ -5646,72 +6396,163 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
     );
   }
 
-  void _modalSendNotification() {
+  /// Compose a push. [deviceId] pre-selects "one user" (opened from a user's card).
+  void _modalSendNotification({String? deviceId}) {
     final title = TextEditingController();
     final msg = TextEditingController();
+    final device = TextEditingController(text: deviceId ?? '');
+    var target = deviceId == null || deviceId.isEmpty ? 'all' : 'user';
+    var sending = false;
+    const targets = <(String, String)>[
+      ('all', 'Wote'),
+      ('premium', 'Premium'),
+      ('free', 'Bure'),
+      ('user', 'Mtumiaji mmoja'),
+    ];
+
     showDialog<void>(
       context: context,
-      builder: (ctx) => AlertDialog(
-        backgroundColor: AdminColors.bgSecondary,
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-        title: const Text('Send Notification', style: TextStyle(fontWeight: FontWeight.w800)),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            TextField(controller: title, decoration: _inputDeco().copyWith(hintText: 'Title')),
-            const SizedBox(height: 10),
-            TextField(controller: msg, maxLines: 3, decoration: _inputDeco().copyWith(hintText: 'Message')),
+      barrierDismissible: false,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setLocal) => AlertDialog(
+          backgroundColor: AdminColors.bgSecondary,
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+          title: const Text('Tuma arifa', style: TextStyle(fontWeight: FontWeight.w800)),
+          content: SizedBox(
+            width: 460,
+            child: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text('Tuma kwa', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600)),
+                  const SizedBox(height: 8),
+                  Wrap(
+                    spacing: 8,
+                    runSpacing: 8,
+                    children: targets.map((t) {
+                      return ChoiceChip(
+                        label: Text(t.$2),
+                        selected: target == t.$1,
+                        onSelected: sending ? null : (_) => setLocal(() => target = t.$1),
+                      );
+                    }).toList(),
+                  ),
+                  if (target == 'user') ...[
+                    const SizedBox(height: 12),
+                    TextField(
+                      controller: device,
+                      decoration: _inputDeco().copyWith(labelText: 'Device ID au USR id ya mtumiaji'),
+                    ),
+                  ],
+                  const SizedBox(height: 12),
+                  TextField(
+                    controller: title,
+                    maxLength: 100,
+                    decoration: _inputDeco().copyWith(labelText: 'Kichwa'),
+                  ),
+                  const SizedBox(height: 6),
+                  TextField(
+                    controller: msg,
+                    maxLines: 4,
+                    maxLength: 500,
+                    decoration: _inputDeco().copyWith(labelText: 'Ujumbe'),
+                  ),
+                ],
+              ),
+            ),
+          ),
+          actions: [
+            TextButton(onPressed: sending ? null : () => Navigator.pop(ctx), child: const Text('Ghairi')),
+            FilledButton.icon(
+              onPressed: sending
+                  ? null
+                  : () async {
+                      if (title.text.trim().isEmpty || msg.text.trim().isEmpty) {
+                        _showToast('Andika kichwa na ujumbe', _ToastType.error);
+                        return;
+                      }
+                      if (target == 'user' && device.text.trim().isEmpty) {
+                        _showToast('Weka Device ID ya mtumiaji', _ToastType.error);
+                        return;
+                      }
+                      if (!_hasAdminSession) {
+                        _showToast('Hakuna kikao cha msimamizi', _ToastType.error);
+                        return;
+                      }
+                      setLocal(() => sending = true);
+                      final done = await _sendNotification(
+                        target: target,
+                        title: title.text.trim(),
+                        message: msg.text.trim(),
+                        deviceId: device.text.trim(),
+                      );
+                      if (!ctx.mounted) return;
+                      if (done) {
+                        Navigator.pop(ctx);
+                      } else {
+                        setLocal(() => sending = false);
+                      }
+                    },
+              icon: sending
+                  ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2))
+                  : const Icon(Icons.send_rounded, size: 16),
+              label: Text(sending ? 'Inatuma…' : 'Tuma'),
+            ),
           ],
         ),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
-          FilledButton(
-            onPressed: () async {
-              if (title.text.trim().isEmpty || msg.text.trim().isEmpty) {
-                _showToast('Fill all fields', _ToastType.error);
-                return;
-              }
-              final newNotification = AdminNotification(
-                id: 'NOT-${_notifications.length + 1}',
-                title: title.text.trim(),
-                message: msg.text.trim(),
-                type: 'info',
-                read: false,
-                createdAt: DateTime.now(),
-              );
-              setState(() {
-                _notifications.insert(0, newNotification);
-              });
-              if (_hasAdminSession) {
-                try {
-                  final res = await http
-                      .post(
-                        Uri.parse('$_apiBase/api/v1/admin/notifications'),
-                        headers: _adminHeaders(),
-                        body: jsonEncode({
-                          'id': newNotification.id,
-                          'title': newNotification.title,
-                          'message': newNotification.message,
-                          'type': newNotification.type,
-                          'read': false,
-                        }),
-                      )
-                      .timeout(const Duration(seconds: 12));
-                  if (res.statusCode < 200 || res.statusCode >= 300) {
-                    throw Exception('notification sync ${res.statusCode}');
-                  }
-                } catch (_) {
-                  _showToast('Notification local only, server sync failed.', _ToastType.warning);
-                }
-              }
-              Navigator.pop(ctx);
-              _showToast('Sent!', _ToastType.success);
-            },
-            child: const Text('Send'),
-          ),
-        ],
       ),
     );
+  }
+
+  /// Returns true when the dialog can close (the server stored the attempt, even if delivery failed).
+  Future<bool> _sendNotification({
+    required String target,
+    required String title,
+    required String message,
+    required String deviceId,
+  }) async {
+    try {
+      final res = await http
+          .post(
+            Uri.parse('$_apiBase/api/v1/admin/notifications'),
+            headers: _adminHeaders(),
+            body: jsonEncode({
+              'title': title,
+              'message': message,
+              'type': 'info',
+              'target': target,
+              if (target == 'user') 'device_id': deviceId,
+            }),
+          )
+          .timeout(const Duration(seconds: 30));
+      if (res.statusCode == 401 || res.statusCode == 403) {
+        await _handleAdminUnauthorized();
+        return false;
+      }
+      if (res.statusCode < 200 || res.statusCode >= 300) {
+        _showToast(_readApiError(res.body) ?? 'Kutuma kumeshindikana (${res.statusCode}).', _ToastType.error);
+        return false;
+      }
+      final out = (jsonDecode(res.body) as Map).cast<String, dynamic>();
+      final delivery = _s(out['delivery'], fallback: 'sent');
+      final err = _s(out['error']);
+      switch (delivery) {
+        case 'sent':
+          _showToast(target == 'user' ? 'Arifa imemfikia mtumiaji.' : 'Arifa imetumwa!', _ToastType.success);
+        case 'bridge':
+          _showToast('Arifa imetumwa kupitia Supasoka.', _ToastType.success);
+        case 'not_configured':
+          _showToast(err.isNotEmpty ? err : 'FCM haijasanidiwa kwenye seva.', _ToastType.warning);
+        default:
+          _showToast(err.isNotEmpty ? 'Haikufika: $err' : 'Arifa haikufika.', _ToastType.error);
+      }
+      unawaited(_reloadNotifications());
+      return true;
+    } catch (e) {
+      _showToast('Hitilafu ya mtandao: $e', _ToastType.error);
+      return false;
+    }
   }
 }
 

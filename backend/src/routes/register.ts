@@ -31,7 +31,8 @@ import {
   sonicpesaCreateOrder,
   sonicpesaOrderStatus,
 } from '../lib/sonicpesa.js';
-import { forwardNotificationToSupasoka } from '../lib/supasokaNotifyBridge.js';
+import { MAX_ADMIN_SESSION_SECONDS } from '../config/env.js';
+import { registerAdminNotificationRoutes } from './adminNotifications.js';
 import { fetchAdminStatsOverview, fetchAdminSubscriptions } from '../lib/adminStats.js';
 import {
   buildAppUpdatePayload,
@@ -256,7 +257,9 @@ export async function registerRoutes(
 ) {
   const { pool, sse, env } = deps;
 
-  const adminLoginConfigured = Boolean(env.ADMIN_EMAIL && env.ADMIN_PASSWORD_HASH);
+  /** Admin signs in with the password only — ADMIN_EMAIL is no longer needed (nor shown anywhere). */
+  const adminLoginConfigured = Boolean(env.ADMIN_PASSWORD_HASH);
+  const adminSessionSeconds = Math.min(env.ADMIN_SESSION_TTL_SECONDS, MAX_ADMIN_SESSION_SECONDS);
   const adminLoginLimiter = new FixedWindowLimiter(10, 15 * 60_000);
   const adminAllowList = parseIpAllowList(env.ADMIN_ALLOWED_IPS);
   const adminIpSecret = `${env.JWT_SECRET}|admin-ip-binding`;
@@ -589,6 +592,11 @@ export async function registerRoutes(
       }
 
       const userId = `USR-${nanoid(10)}`;
+      // One phone = one token: never leave the same token on another device row (duplicate pushes).
+      await pool.query(`UPDATE users SET fcm_token = NULL WHERE fcm_token = $1 AND device_id IS DISTINCT FROM $2`, [
+        fcmToken,
+        deviceId,
+      ]);
       await pool.query(
         `INSERT INTO users (id, name, phone, device_id, status, subscription, fcm_token, fcm_updated_at, created_at)
          VALUES ($1, 'Viewer', 'N/A', $2, 'active', 'free', $3, now(), now())
@@ -1421,11 +1429,11 @@ export async function registerRoutes(
   });
 
   /** --- Admin auth --- */
-  app.post<{ Body: { email: string; password: string } }>('/api/v1/admin/auth/login', async (req, reply) => {
+  app.post<{ Body: { email?: string; password: string } }>('/api/v1/admin/auth/login', async (req, reply) => {
     if (!adminLoginConfigured) {
       return reply.code(503).send({
         error: 'Admin login not configured',
-        hint: 'Set ADMIN_EMAIL and ADMIN_PASSWORD_HASH or use ADMIN_API_KEY',
+        hint: 'Set ADMIN_PASSWORD_HASH (generate with node scripts/hash-password.mjs) or use ADMIN_API_KEY',
       });
     }
     const ip = clientIp(req);
@@ -1439,21 +1447,25 @@ export async function registerRoutes(
       reply.header('Retry-After', String(wait));
       return reply.code(429).send({ error: 'Too many login attempts. Try again later.' });
     }
-    const { email, password } = req.body ?? { email: '', password: '' };
-    const emailOk = typeof email === 'string' && safeEqual(email.trim().toLowerCase(), env.ADMIN_EMAIL!.toLowerCase());
-    const ok = typeof password === 'string' && password.length > 0
+    // Password only. A legacy `email` field from older admin builds is ignored.
+    const password = req.body?.password;
+    const ok = typeof password === 'string' && password.length > 0 && password.length <= 256
       ? await bcrypt.compare(password, env.ADMIN_PASSWORD_HASH!)
       : false;
-    if (!emailOk || !ok) {
+    if (!ok) {
       req.log.warn({ ip }, 'admin login: invalid credentials');
       return reply.code(401).send({ error: 'Invalid credentials' });
     }
     req.log.info({ ip }, 'admin login: success');
     const token = await reply.jwtSign(
-      { role: 'admin', sub: env.ADMIN_EMAIL, ipt: ipTag(adminIpSecret, ip) } as Record<string, unknown>,
-      { expiresIn: env.ADMIN_SESSION_TTL_SECONDS },
+      { role: 'admin', sub: 'admin', ipt: ipTag(adminIpSecret, ip) } as Record<string, unknown>,
+      { expiresIn: adminSessionSeconds },
     );
-    return { token, expiresIn: env.ADMIN_SESSION_TTL_SECONDS };
+    return {
+      token,
+      expiresIn: adminSessionSeconds,
+      expiresAt: new Date(Date.now() + adminSessionSeconds * 1000).toISOString(),
+    };
   });
 
   const adminPre = async (req: import('fastify').FastifyRequest, reply: import('fastify').FastifyReply) => {
@@ -2225,36 +2237,8 @@ export async function registerRoutes(
     };
   });
 
-  app.get('/api/v1/admin/notifications', { preHandler: adminPre }, async () => {
-    const r = await pool.query(`SELECT * FROM notifications ORDER BY created_at DESC LIMIT 100`);
-    return { notifications: r.rows };
-  });
-
-  app.post<{ Body: Record<string, unknown> }>('/api/v1/admin/notifications', { preHandler: adminPre }, async (req, reply) => {
-    const b = req.body ?? {};
-    const title = String(b.title ?? '').trim();
-    const message = String(b.message ?? '').trim();
-    if (!title || !message) return reply.code(400).send({ error: 'title and message required' });
-    const id = (b.id as string) ?? `NOT-${nanoid(10)}`;
-    const type = String(b.type ?? 'info');
-    const read = Boolean(b.read ?? false);
-    await pool.query(
-      `INSERT INTO notifications (id, title, message, type, read, created_at)
-       VALUES ($1,$2,$3,$4,$5, now())`,
-      [id, title, message, type, read],
-    );
-    const row = await pool.query(`SELECT * FROM notifications WHERE id = $1`, [id]);
-    const push = await forwardNotificationToSupasoka(env, {
-      title,
-      body: message,
-      target: String(b.target ?? 'all'),
-    });
-    return reply.code(201).send({
-      notification: row.rows[0],
-      supasoka_push: push.forwarded ? 'sent' : 'skipped',
-      ...(push.error ? { supasoka_push_error: push.error } : {}),
-    });
-  });
+  // Notification compose, push health and subscription reminders live in adminNotifications.ts.
+  registerAdminNotificationRoutes(app, { pool, env, adminPre });
 
   app.get('/api/v1/admin/slides', { preHandler: adminPre }, async () => {
     const r = await pool.query(

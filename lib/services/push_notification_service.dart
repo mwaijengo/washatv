@@ -26,6 +26,10 @@ const _prefsDirectTopic = 'washa_direct_user_topic_v1';
 const _prefsPushPremium = 'washa_push_premium_v1';
 const _prefsPushDeviceId = 'washa_push_device_id_v1';
 const _prefsLastFcmToken = 'washa_last_fcm_token_v1';
+const _prefsLastFcmTokenAt = 'washa_last_fcm_token_at_v1';
+
+/// Re-send an unchanged token at least this often so the server never keeps a stale/cleared one.
+const _tokenReRegisterAfter = Duration(hours: 24);
 
 final FlutterLocalNotificationsPlugin _localNotifications = FlutterLocalNotificationsPlugin();
 bool _backgroundLocalPluginReady = false;
@@ -228,7 +232,8 @@ class PushNotificationService {
   }) async {
     final prefs = await SharedPreferences.getInstance();
     final last = prefs.getString(_prefsLastFcmToken);
-    if (last == token) return;
+    final lastAt = DateTime.fromMillisecondsSinceEpoch(prefs.getInt(_prefsLastFcmTokenAt) ?? 0);
+    if (last == token && DateTime.now().difference(lastAt) < _tokenReRegisterAfter) return;
 
     final api = _api;
     if (api == null) return;
@@ -236,6 +241,7 @@ class PushNotificationService {
     try {
       await api.registerFcmToken(deviceId: deviceId, fcmToken: token);
       await prefs.setString(_prefsLastFcmToken, token);
+      await prefs.setInt(_prefsLastFcmTokenAt, DateTime.now().millisecondsSinceEpoch);
     } catch (e) {
       if (kDebugMode) debugPrint('Washa FCM server register: $e');
     }

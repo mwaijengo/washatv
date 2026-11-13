@@ -55,8 +55,27 @@ const envSchema = z.object({
   ADMIN_IP_BINDING: boolFromEnv.default('true'),
   /** Optional comma-separated IPs / CIDRs allowed to use the admin API at all (login, JWT and X-Admin-Key). */
   ADMIN_ALLOWED_IPS: z.string().default(''),
-  ADMIN_SESSION_TTL_SECONDS: z.coerce.number().int().positive().default(8 * 3600),
+  /** Admin login lasts 24 hours (hard cap — see MAX_ADMIN_SESSION_SECONDS). */
+  ADMIN_SESSION_TTL_SECONDS: z.coerce.number().int().positive().default(24 * 3600),
+
+  /**
+   * Firebase Cloud Messaging (same project as the apps: supasokatv-d238c).
+   * Provide ONE of: FCM_SERVICE_ACCOUNT_JSON (whole JSON), or FCM_PROJECT_ID + FCM_CLIENT_EMAIL + FCM_PRIVATE_KEY.
+   * Without it, broadcast pushes fall back to the Supasoka bridge and per-user reminders are unavailable.
+   */
+  FCM_SERVICE_ACCOUNT_JSON: z.string().default(''),
+  FCM_PROJECT_ID: z.string().default(''),
+  FCM_CLIENT_EMAIL: z.string().default(''),
+  FCM_PRIVATE_KEY: z.string().default(''),
+
+  /** Automatically remind users whose subscription ends soon (once per subscription window). */
+  REMINDER_AUTO_ENABLED: boolFromEnv.default('true'),
+  /** "Soon" = this many days before the subscription ends. */
+  REMINDER_DAYS: z.coerce.number().int().min(1).max(30).default(3),
 });
+
+/** Admin sessions never outlive 24 hours, whatever ADMIN_SESSION_TTL_SECONDS says. */
+export const MAX_ADMIN_SESSION_SECONDS = 24 * 3600;
 
 export type Env = z.infer<typeof envSchema>;
 
