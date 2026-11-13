@@ -88,12 +88,17 @@ export function loadEnv(): Env {
     throw new Error('Missing or invalid environment variables');
   }
   const env = parsed.data;
-  const hash = (env.ADMIN_PASSWORD_HASH ?? '').trim();
+  let hash = (env.ADMIN_PASSWORD_HASH ?? '').trim();
+  // Also accept the hash base64-encoded: it has no `$`, so dashboards cannot mangle it.
+  if (hash && !BCRYPT_HASH.test(hash)) {
+    const decoded = Buffer.from(hash, 'base64').toString('utf8').trim();
+    if (BCRYPT_HASH.test(decoded)) hash = decoded;
+  }
   if (hash && !BCRYPT_HASH.test(hash)) {
     // Typical cause: a dashboard "raw editor" expanded the `$2b$12$…` parts as variables.
     console.error(
       `[env] ADMIN_PASSWORD_HASH is not a valid bcrypt hash (got ${hash.length} chars, expected 60 starting with $2b$). ` +
-        'Admin password login is disabled until it is fixed. Set it through the single-variable editor, not the raw editor.',
+        'Admin password login is disabled until it is fixed. Paste the hash base64-encoded (no `$` signs) to avoid this.',
     );
     env.ADMIN_PASSWORD_HASH = undefined;
   } else {
