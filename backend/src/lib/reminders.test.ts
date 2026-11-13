@@ -43,10 +43,10 @@ assert.equal(isReasonableHourEat(new Date('2026-11-13T16:59:00Z')), true); // 19
 assert.equal(isReasonableHourEat(new Date('2026-11-13T17:00:00Z')), false); // 20:00 EAT
 
 // Topics must match the viewer app (push_notification_service.dart).
-assert.equal(topicForAudience('all'), 'all_users');
-assert.equal(topicForAudience('premium'), 'premium_users');
-assert.equal(topicForAudience('free'), 'free_users');
-assert.equal(topicForDevice('WTV-AB12-CD34'), 'user_WTV-AB12-CD34');
-assert.equal(topicForDevice('a b/c'), 'user_a_b_c');
+assert.equal(topicForAudience('all'), 'washa_all_users');
+assert.equal(topicForAudience('premium'), 'washa_premium_users');
+assert.equal(topicForAudience('free'), 'washa_free_users');
+assert.equal(topicForDevice('WTV-AB12-CD34'), 'washa_user_WTV-AB12-CD34');
+assert.equal(topicForDevice('a b/c'), 'washa_user_a_b_c');
 
 console.log('reminders.test.ts ok');

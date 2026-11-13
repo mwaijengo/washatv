@@ -21,15 +21,22 @@ const androidConfig = {
 
 export type PushAudience = 'all' | 'premium' | 'free';
 
+/**
+ * Topics are shared by every app in the Firebase project (Supasoka, EaMax, JamboPlus, Leotena live there too),
+ * so Washa topics carry a `washa_` prefix: Washa pushes must never reach Supasoka. Supasoka → Washa goes only
+ * through /api/partner/supa-push.
+ */
+const TOPIC_PREFIX = 'washa_';
+
 export function topicForAudience(audience: PushAudience): string {
-  if (audience === 'premium') return 'premium_users';
-  if (audience === 'free') return 'free_users';
-  return 'all_users';
+  if (audience === 'premium') return `${TOPIC_PREFIX}premium_users`;
+  if (audience === 'free') return `${TOPIC_PREFIX}free_users`;
+  return `${TOPIC_PREFIX}all_users`;
 }
 
-/** Same rule as the app: `user_` + device id with unsupported characters replaced by `_`. */
+/** Same rule as the app: `washa_user_` + device id with unsupported characters replaced by `_`. */
 export function topicForDevice(deviceId: string): string {
-  return `user_${deviceId.trim().replace(/[^a-zA-Z0-9\-_.~%]/g, '_')}`;
+  return `${TOPIC_PREFIX}user_${deviceId.trim().replace(/[^a-zA-Z0-9\-_.~%]/g, '_')}`;
 }
 
 type ServiceAccountLike = { project_id?: string; client_email?: string; private_key?: string };

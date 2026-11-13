@@ -11,11 +11,17 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../firebase_options.dart';
 import 'public_api_service.dart';
 
-/// Must match Supasoka backend [pushNotifications.ts] `channelId` and FCM topics.
+/// Must match the Washa backend [pushNotifications.ts] `ANDROID_CHANNEL_ID`.
 const String kSupasokaFcmAndroidChannelId = 'supasoka_high_importance';
-const String kSupasokaTopicAllUsers = 'all_users';
-const String kSupasokaTopicPremiumUsers = 'premium_users';
-const String kSupasokaTopicFreeUsers = 'free_users';
+
+/// Topics are shared by every app in the Firebase project, so Washa's carry a `washa_` prefix:
+/// Washa pushes never reach Supasoka, and Supasoka reaches Washa only via the Washa backend.
+/// Must match the Washa backend [pushNotifications.ts] topic helpers.
+const String kWashaTopicPrefix = 'washa_';
+const String kWashaTopicAllUsers = '${kWashaTopicPrefix}all_users';
+const String kWashaTopicPremiumUsers = '${kWashaTopicPrefix}premium_users';
+const String kWashaTopicFreeUsers = '${kWashaTopicPrefix}free_users';
+const List<String> _legacySharedTopics = ['all_users', 'premium_users', 'free_users'];
 
 const _androidChannelName = 'Washa TV Alerts';
 const _androidChannelDescription =
@@ -27,6 +33,7 @@ const _prefsPushPremium = 'washa_push_premium_v1';
 const _prefsPushDeviceId = 'washa_push_device_id_v1';
 const _prefsLastFcmToken = 'washa_last_fcm_token_v1';
 const _prefsLastFcmTokenAt = 'washa_last_fcm_token_at_v1';
+const _prefsLegacyTopicsDropped = 'washa_legacy_topics_dropped_v1';
 
 /// Re-send an unchanged token at least this often so the server never keeps a stale/cleared one.
 const _tokenReRegisterAfter = Duration(hours: 24);
@@ -90,8 +97,8 @@ Future<void> _displayLocalNotification(RemoteMessage message) async {
   );
 }
 
-/// Washa's own Firebase project. Supasoka admin broadcasts arrive via the Washa backend
-/// (`/api/partner/supa-push`), which re-sends them on these same topics.
+/// Washa's own `washa_*` topics. One-way: Supasoka admin broadcasts arrive via the Washa backend
+/// (`/api/partner/supa-push`); Washa never pushes to Supasoka.
 class PushNotificationService {
   PushNotificationService._();
 
@@ -197,17 +204,38 @@ class PushNotificationService {
     if (!_fcmSupported) return;
     final messaging = FirebaseMessaging.instance;
 
-    await messaging.subscribeToTopic(kSupasokaTopicAllUsers);
+    await _dropLegacySharedTopics();
+
+    await messaging.subscribeToTopic(kWashaTopicAllUsers);
 
     if (isPremium) {
-      await messaging.subscribeToTopic(kSupasokaTopicPremiumUsers);
-      await messaging.unsubscribeFromTopic(kSupasokaTopicFreeUsers);
+      await messaging.subscribeToTopic(kWashaTopicPremiumUsers);
+      await messaging.unsubscribeFromTopic(kWashaTopicFreeUsers);
     } else {
-      await messaging.subscribeToTopic(kSupasokaTopicFreeUsers);
-      await messaging.unsubscribeFromTopic(kSupasokaTopicPremiumUsers);
+      await messaging.subscribeToTopic(kWashaTopicFreeUsers);
+      await messaging.unsubscribeFromTopic(kWashaTopicPremiumUsers);
     }
 
     await syncDirectUserTopic(deviceId);
+  }
+
+  /// Leave the un-prefixed topics other apps in the project broadcast on (once per install).
+  static Future<void> _dropLegacySharedTopics() async {
+    final prefs = await SharedPreferences.getInstance();
+    if (prefs.getBool(_prefsLegacyTopicsDropped) == true) return;
+    final messaging = FirebaseMessaging.instance;
+    for (final topic in _legacySharedTopics) {
+      try {
+        await messaging.unsubscribeFromTopic(topic);
+      } catch (_) {}
+    }
+    final oldDirect = prefs.getString(_prefsDirectTopic);
+    if (oldDirect != null && oldDirect.isNotEmpty && !oldDirect.startsWith(kWashaTopicPrefix)) {
+      try {
+        await messaging.unsubscribeFromTopic(oldDirect);
+      } catch (_) {}
+    }
+    await prefs.setBool(_prefsLegacyTopicsDropped, true);
   }
 
   static Future<void> _onTokenRefreshed(String token) async {
@@ -293,7 +321,7 @@ class PushNotificationService {
 
   static Future<void> messagingSubscribeAllUsersOnly() async {
     if (!_fcmSupported) return;
-    await FirebaseMessaging.instance.subscribeToTopic(kSupasokaTopicAllUsers);
+    await FirebaseMessaging.instance.subscribeToTopic(kWashaTopicAllUsers);
   }
 
   static Future<void> markPermissionPromptSeen() async {
@@ -313,12 +341,12 @@ class PushNotificationService {
     await ensureRegistered(deviceId: deviceId, isPremium: isPremium);
   }
 
-  /// Per-device topic for targeted admin pushes (`user_{deviceId}` — same rule as Supasoka).
+  /// Per-device topic for targeted admin pushes (`washa_user_{deviceId}`).
   static Future<void> syncDirectUserTopic(String deviceId) async {
     if (!_fcmSupported) return;
     final raw = deviceId.trim();
     if (raw.isEmpty) return;
-    final topic = 'user_${raw.replaceAll(RegExp(r'[^a-zA-Z0-9\-_.~%]'), '_')}';
+    final topic = '${kWashaTopicPrefix}user_${raw.replaceAll(RegExp(r'[^a-zA-Z0-9\-_.~%]'), '_')}';
     final prefs = await SharedPreferences.getInstance();
     final old = prefs.getString(_prefsDirectTopic);
     final messaging = FirebaseMessaging.instance;
