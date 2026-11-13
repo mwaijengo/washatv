@@ -63,6 +63,16 @@
 
          In particular, this is used by the Flutter engine in io.flutter.plugin.text.ProcessTextPlugin. -->
     <queries>
+        <!-- Explicit visibility for traffic-capture apps checked by CaptureProtection. -->
+        <package android:name="com.reqable.android" />
+        <package android:name="com.guoshi.httpcanary" />
+        <package android:name="com.guoshi.httpcanary.premium" />
+        <package android:name="com.guoshi.httpcanary.premium.pro" />
+        <package android:name="com.emanuelef.remote_capture" />
+        <package android:name="app.greyshirts.sslcapture" />
+        <package android:name="tech.httptoolkit.android.v1" />
+        <package android:name="com.minhui.networkcapture" />
+        <package android:name="com.egorovandreyrm.pcapremote" />
         <intent>
             <action android:name="android.intent.action.PROCESS_TEXT"/>
             <data android:mimeType="text/plain"/>

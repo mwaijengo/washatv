@@ -8,10 +8,26 @@ import 'package:media_kit/media_kit.dart';
 import 'app.dart';
 import 'register_webview_stub.dart'
     if (dart.library.js_interop) 'register_webview_web.dart';
+import 'screens/capture_guard_screen.dart';
+import 'services/capture_guard.dart';
 import 'services/push_notification_service.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  // Refuse to start (no API calls, no player) while a traffic-capture app
+  // such as HttpCanary or Reqable is installed and enabled.
+  final captureApps = await CaptureGuard.findCaptureApps();
+  if (captureApps.isNotEmpty) {
+    runApp(CaptureGuardScreen(
+      initialApps: captureApps,
+      onAllowed: _startWasha,
+    ));
+    return;
+  }
+  await _startWasha();
+}
+
+Future<void> _startWasha() async {
   MediaKit.ensureInitialized();
   // just_audio has no built-in Linux/Windows backend — media_kit bridges it.
   JustAudioMediaKit.ensureInitialized();

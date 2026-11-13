@@ -78,6 +78,27 @@ class MainActivity : FlutterActivity() {
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, secureChannel)
             .setMethodCallHandler { call, result ->
                 when (call.method) {
+                    "findCaptureApps" -> result.success(
+                        CaptureProtection.findEnabledCaptureApps(this).map {
+                            mapOf("packageName" to it.packageName, "label" to it.label)
+                        },
+                    )
+                    "openCaptureAppSettings" -> {
+                        val packageName = call.argument<String>("packageName")
+                        if (packageName == null || CaptureProtection.findEnabledCaptureApps(this)
+                                .none { it.packageName == packageName }
+                        ) {
+                            result.error("invalid_package", "No enabled capture app found", null)
+                        } else {
+                            val intent = Intent(
+                                android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                                android.net.Uri.parse("package:$packageName"),
+                            )
+                            runCatching { startActivity(intent) }
+                                .onSuccess { result.success(null) }
+                                .onFailure { result.error("settings_failed", it.message, null) }
+                        }
+                    }
                     "setSecure" -> {
                         val secure = call.argument<Boolean>("secure") ?: true
                         if (secure) {

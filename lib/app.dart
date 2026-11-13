@@ -9,6 +9,7 @@ import 'models/channel.dart';
 import 'models/hero_slide.dart';
 import 'models/plan.dart';
 import 'models/viewer_profile.dart';
+import 'screens/capture_guard_screen.dart';
 import 'screens/categories_screen.dart';
 import 'screens/force_update_screen.dart';
 import 'screens/home_screen.dart';
@@ -16,6 +17,7 @@ import 'screens/player_screen.dart';
 import 'screens/profile_screen.dart';
 import 'screens/subscription_screen.dart';
 import 'services/app_identity.dart';
+import 'services/capture_guard.dart';
 import 'services/pricing_catalog.dart';
 import 'services/public_api_service.dart';
 import 'services/push_notification_service.dart';
@@ -100,6 +102,10 @@ class _WashaAppState extends State<WashaApp> with WidgetsBindingObserver {
   String? bootstrapFailureDetail;
   bool _noInternetVisible = false;
   bool _noInternetRetrying = false;
+  /// Non-empty while a traffic-capture app (HttpCanary, Reqable, ...) is enabled.
+  /// The whole UI is replaced by [CaptureGuardScreen] and background sync is paused.
+  List<Map<String, String>> _captureApps = const [];
+  bool get _captureBlocked => _captureApps.isNotEmpty;
   Timer? _premiumExpiryTimer;
   Timer? carouselTimer;
   Timer? configPoller;
@@ -379,6 +385,7 @@ class _WashaAppState extends State<WashaApp> with WidgetsBindingObserver {
   }
 
   Future<void> _pollConfigMeta() async {
+    if (_captureBlocked) return;
     if (bootLoading || metaPollInFlight || api.shouldSkipLightweightPoll) return;
     if (current == AppScreen.player) return;
     metaPollInFlight = true;
@@ -412,6 +419,7 @@ class _WashaAppState extends State<WashaApp> with WidgetsBindingObserver {
   }
 
   Future<void> _syncViewerProfileFromServer() async {
+    if (_captureBlocked) return;
     if (deviceId.isEmpty || api.shouldSkipLightweightPoll) return;
     try {
       await api.syncViewer(
@@ -496,7 +504,7 @@ class _WashaAppState extends State<WashaApp> with WidgetsBindingObserver {
   }
 
   Future<void> _syncFromServer({bool silent = false, bool forceFull = false}) async {
-    if (bootLoading) return;
+    if (bootLoading || _captureBlocked) return;
     if (current == AppScreen.player && silent && !forceFull) return;
     if (syncInFlight) {
       if (forceFull) pendingConfigSync = true;
@@ -567,15 +575,32 @@ class _WashaAppState extends State<WashaApp> with WidgetsBindingObserver {
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
-      _lockShellPortrait();
-      unawaited(_enableScreenSecurity());
-      unawaited(_reconcileDeviceIdFromStorage());
-      if (current != AppScreen.player) {
-        unawaited(_syncFromServer(silent: true, forceFull: true));
-      }
-      unawaited(_syncViewerProfileFromServer());
-      unawaited(_recoverPendingPayment(silent: true));
+      unawaited(_resumeIfNoCaptureApps());
     }
+  }
+
+  /// Re-checks for capture apps every time the app returns to the foreground
+  /// (they may have been installed or enabled while we were backgrounded).
+  Future<void> _resumeIfNoCaptureApps() async {
+    final apps = await CaptureGuard.findCaptureApps();
+    if (!mounted) return;
+    if (apps.isNotEmpty) {
+      setState(() => _captureApps = apps);
+      return;
+    }
+    if (_captureBlocked) setState(() => _captureApps = const []);
+    _runResumeTasks();
+  }
+
+  void _runResumeTasks() {
+    _lockShellPortrait();
+    unawaited(_enableScreenSecurity());
+    unawaited(_reconcileDeviceIdFromStorage());
+    if (current != AppScreen.player) {
+      unawaited(_syncFromServer(silent: true, forceFull: true));
+    }
+    unawaited(_syncViewerProfileFromServer());
+    unawaited(_recoverPendingPayment(silent: true));
   }
 
   /// Keeps the same device id after app updates / OS restore (never rotate silently).
@@ -1317,6 +1342,16 @@ class _WashaAppState extends State<WashaApp> with WidgetsBindingObserver {
 
   @override
   Widget build(BuildContext context) {
+    if (_captureBlocked) {
+      return CaptureGuardScreen(
+        initialApps: _captureApps,
+        onAllowed: () async {
+          if (!mounted || !_captureBlocked) return;
+          setState(() => _captureApps = const []);
+          _runResumeTasks();
+        },
+      );
+    }
     return MaterialApp(
       debugShowCheckedModeBanner: false,
       title: 'WASHA TV',

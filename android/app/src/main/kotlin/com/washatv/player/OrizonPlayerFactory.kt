@@ -2,6 +2,7 @@ package com.washatv.player
 
 import android.content.Context
 import android.util.Log
+import com.washatv.safeUrlForLogs
 import androidx.annotation.OptIn
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem
@@ -85,7 +86,7 @@ class OrizonPlayerFactory(private val context: Context) {
         if (format == Format.GATEWAY) {
             throw IllegalArgumentException("Gateway URL must use WebView")
         }
-        Log.i(TAG, "play format=$format url=${url.take(160)}")
+        Log.i(TAG, "play format=$format url=${safeUrlForLogs(url)}")
         if (format == Format.HLS) {
             HlsPlaylistStitcher.reset()
         }

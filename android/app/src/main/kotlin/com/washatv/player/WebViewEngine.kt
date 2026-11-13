@@ -4,6 +4,7 @@ import android.content.Context
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
+import com.washatv.safeUrlForLogs
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import com.washatv.domain.model.PlaybackState
@@ -79,7 +80,7 @@ class WebViewEngine(
         val headers = buildLoadHeaders(streamSession, preferredAudioLanguage)
         val isExternalWebPage = shouldUseWebView(url)
 
-        Log.d(TAG, "initialize url=${url.take(60)} audio=$preferredAudioLanguage " +
+        Log.d(TAG, "initialize url=${safeUrlForLogs(url)} audio=$preferredAudioLanguage " +
             "Accept-Language=${headers["Accept-Language"]}")
 
         try {
@@ -115,7 +116,7 @@ class WebViewEngine(
                         error: android.webkit.WebResourceError?,
                     ) {
                         if (request?.isForMainFrame == true) {
-                            Log.e(TAG, "main frame error: ${error?.description} url=${request.url}")
+                            Log.e(TAG, "main frame error: ${error?.description} url=${safeUrlForLogs(request.url.toString())}")
                         }
                     }
 
@@ -127,7 +128,7 @@ class WebViewEngine(
                         if (request?.isForMainFrame == true) {
                             Log.w(
                                 TAG,
-                                "HTTP ${errorResponse?.statusCode} url=${request.url}",
+                                "HTTP ${errorResponse?.statusCode} url=${safeUrlForLogs(request.url.toString())}",
                             )
                         }
                     }
