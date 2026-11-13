@@ -144,10 +144,14 @@ export type DeviceTarget = {
 
 export type DeviceResult = { key: string; ok: boolean; via?: 'token' | 'topic'; error?: string };
 
-/** FCM error codes meaning the stored token is dead (app uninstalled / data cleared / token rotated). */
+/**
+ * FCM error codes meaning the stored token is dead (app uninstalled / data cleared / token rotated),
+ * or belongs to another Firebase project (tokens saved before Washa moved to its own project).
+ */
 const STALE_TOKEN_ERRORS = new Set([
   'messaging/registration-token-not-registered',
   'messaging/invalid-registration-token',
+  'messaging/mismatched-credential',
 ]);
 
 const BATCH = 500;

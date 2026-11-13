@@ -225,6 +225,12 @@ export function registerAdminNotificationRoutes(
         return out;
       } catch (e) {
         req.log.error({ err: errorText(e) }, 'reminder send failed');
+        await pool
+          .query(
+            `INSERT INTO admin_logs (id, admin_name, action, details, created_at) VALUES ($1,$2,$3,$4,now())`,
+            [`LOG-${nanoid(10)}`, 'admin', 'send_reminders_failed', `${audience}: ${errorText(e)}`.slice(0, 500)],
+          )
+          .catch(() => {});
         return reply.code(502).send({ error: `Kutuma vikumbusho kumeshindikana: ${errorText(e)}` });
       } finally {
         reminderRunInFlight = false;

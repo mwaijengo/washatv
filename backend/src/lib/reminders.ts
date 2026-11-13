@@ -53,6 +53,14 @@ const ENDS_AT_SQL = `GREATEST(
   COALESCE(admin_access_until, '-infinity'::timestamptz)
 )`;
 
+/**
+ * "Not yet reminded for this subscription window". Postgres keeps microseconds but the stored marker
+ * round-trips through a JS Date (milliseconds), so compare both at millisecond precision.
+ */
+function unsentSql(remindedCol: string): string {
+  return `date_trunc('milliseconds', ${remindedCol}) IS DISTINCT FROM date_trunc('milliseconds', ends_at)`;
+}
+
 type CandidateRow = {
   id: string;
   name: string | null;
@@ -77,10 +85,10 @@ export async function reminderSummary(pool: DbPool, days: number): Promise<Remin
     `SELECT
        count(*) FILTER (WHERE ends_at > now() AND ends_at <= now() + make_interval(days => $1::int))::int AS expiring,
        count(*) FILTER (WHERE ends_at > now() AND ends_at <= now() + make_interval(days => $1::int)
-                          AND expiry_reminder_for IS DISTINCT FROM ends_at)::int AS expiring_unsent,
+                          AND ${unsentSql('expiry_reminder_for')})::int AS expiring_unsent,
        count(*) FILTER (WHERE ends_at > '-infinity'::timestamptz AND ends_at <= now())::int AS expired,
        count(*) FILTER (WHERE ends_at > '-infinity'::timestamptz AND ends_at <= now()
-                          AND expired_reminder_for IS DISTINCT FROM ends_at)::int AS expired_unsent
+                          AND ${unsentSql('expired_reminder_for')})::int AS expired_unsent
      FROM (
        SELECT status, device_id, fcm_token, expiry_reminder_for, expired_reminder_for, ${ENDS_AT_SQL} AS ends_at
        FROM users
@@ -109,7 +117,7 @@ export async function listReminderCandidates(
     : `ends_at > '-infinity'::timestamptz AND ends_at <= now()`;
   const remindedCol = expiring ? 'expiry_reminder_for' : 'expired_reminder_for';
   const sentAtCol = expiring ? 'expiry_reminder_sent_at' : 'expired_reminder_sent_at';
-  const unsentSql = opts.onlyUnsent ? `AND ${remindedCol} IS DISTINCT FROM ends_at` : '';
+  const onlyUnsentSql = opts.onlyUnsent ? `AND ${unsentSql(remindedCol)}` : '';
   const order = expiring ? 'ends_at ASC' : 'ends_at DESC';
   const limit = Math.max(1, Math.min(opts.limit ?? 100000, 100000));
 
@@ -123,7 +131,7 @@ export async function listReminderCandidates(
      WHERE status = 'active'
        AND (device_id IS NOT NULL OR fcm_token IS NOT NULL)
        AND ${windowSql}
-       ${unsentSql}
+       ${onlyUnsentSql}
      ORDER BY ${order}
      LIMIT ${limit}`,
     [opts.days],
