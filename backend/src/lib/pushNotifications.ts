@@ -34,9 +34,40 @@ export function topicForDevice(deviceId: string): string {
 
 type ServiceAccountLike = { project_id?: string; client_email?: string; private_key?: string };
 
+function stripQuotes(value: string): string {
+  let v = value.trim();
+  while (v.length >= 2 && ((v.startsWith('"') && v.endsWith('"')) || (v.startsWith("'") && v.endsWith("'")))) {
+    v = v.slice(1, -1).trim();
+  }
+  return v;
+}
+
+function decodeBase64IfMatches(value: string, looksRight: (decoded: string) => boolean): string {
+  if (!value || !/^[A-Za-z0-9+/=_\-\s]+$/.test(value)) return value;
+  const decoded = Buffer.from(value.replace(/\s+/g, ''), 'base64').toString('utf8').trim();
+  return looksRight(decoded) ? decoded : value;
+}
+
+/**
+ * Dashboards mangle PEM keys in many ways: surrounding quotes, literal `\n`, `\r\n`,
+ * or newlines collapsed into spaces. Rebuild a clean PEM from whatever survived.
+ */
+export function normalizePrivateKey(input: string): string {
+  let key = stripQuotes(input);
+  key = decodeBase64IfMatches(key, (d) => d.includes('PRIVATE KEY-----'));
+  key = key.replace(/\\\\n/g, '\n').replace(/\\r/g, '').replace(/\\n/g, '\n').replace(/\r/g, '');
+  const match = key.match(/-----BEGIN ([A-Z ]*PRIVATE KEY)-----([\s\S]*?)-----END \1-----/);
+  if (!match) return key.trim();
+  const label = match[1];
+  const body = match[2].replace(/[^A-Za-z0-9+/=]/g, '');
+  const lines = body.match(/.{1,64}/g) ?? [];
+  return `-----BEGIN ${label}-----\n${lines.join('\n')}\n-----END ${label}-----\n`;
+}
+
 function loadCredentials(env: Env): { projectId: string; clientEmail: string; privateKey: string } | null {
   let fromJson: ServiceAccountLike | null = null;
-  const raw = env.FCM_SERVICE_ACCOUNT_JSON.trim();
+  let raw = stripQuotes(env.FCM_SERVICE_ACCOUNT_JSON);
+  raw = decodeBase64IfMatches(raw, (d) => d.startsWith('{'));
   if (raw) {
     try {
       fromJson = JSON.parse(raw) as ServiceAccountLike;
@@ -44,9 +75,9 @@ function loadCredentials(env: Env): { projectId: string; clientEmail: string; pr
       throw new Error('FCM_SERVICE_ACCOUNT_JSON is not valid JSON');
     }
   }
-  const projectId = (fromJson?.project_id ?? env.FCM_PROJECT_ID).trim();
-  const clientEmail = (fromJson?.client_email ?? env.FCM_CLIENT_EMAIL).trim();
-  const privateKey = (fromJson?.private_key ?? env.FCM_PRIVATE_KEY).replace(/\\n/g, '\n').trim();
+  const projectId = stripQuotes(fromJson?.project_id ?? env.FCM_PROJECT_ID);
+  const clientEmail = stripQuotes(fromJson?.client_email ?? env.FCM_CLIENT_EMAIL);
+  const privateKey = normalizePrivateKey(fromJson?.private_key ?? env.FCM_PRIVATE_KEY);
   if (!projectId || !clientEmail || !privateKey) return null;
   return { projectId, clientEmail, privateKey };
 }
