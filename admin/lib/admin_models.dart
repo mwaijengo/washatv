@@ -13,6 +13,7 @@ class AdminUser {
   final String id;
   String name;
   final String phone;
+
   /// Matches client app `StorageService` format (e.g. WTV-AB12-CD34).
   /// Nullable defensively: web hot reload can leave stale instances without this field.
   final String? deviceId;
@@ -26,7 +27,8 @@ class AdminUser {
   /// Extra premium window granted from admin (extends smartly when stacked).
   DateTime? adminAccessUntil;
 
-  bool get adminAccessActive => adminAccessUntil != null && adminAccessUntil!.isAfter(DateTime.now());
+  bool get adminAccessActive =>
+      adminAccessUntil != null && adminAccessUntil!.isAfter(DateTime.now());
 
   /// Matches viewer API premium logic (real future expiry only — never NULL forever).
   bool get effectivePremium {
@@ -41,7 +43,9 @@ class AdminUser {
     final v = deviceId;
     if (v != null && v.isNotEmpty) return v;
     final tail = id.replaceAll(RegExp(r'\D'), '');
-    final pad = tail.length >= 4 ? tail.substring(tail.length - 4) : tail.padLeft(4, '0');
+    final pad = tail.length >= 4
+        ? tail.substring(tail.length - 4)
+        : tail.padLeft(4, '0');
     return 'WTV-$pad-FALL';
   }
 }
@@ -66,13 +70,16 @@ class AdminChannel {
   String category;
   bool premium;
   bool live;
+
   /// `active` or `inactive` — inactive channels can be hidden from the viewer app when wired to API.
   String status;
   String thumbnail;
+
   /// HLS / m3u8 / mp4 playback URL for the viewer player.
   String streamUrl;
   int viewers;
   String rating;
+
   /// `none` | `clearkey` | `widevine` — nullable so web hot reload does not leave stale null under non-null `String`.
   String? drm;
 
@@ -132,6 +139,10 @@ class AdminPayment {
     required this.transactionId,
     required this.createdAt,
     this.planKey,
+    this.phone = '',
+    this.provider = '',
+    this.verifiedAt,
+    this.remoteStatus,
   });
   final String id;
   final String userName;
@@ -141,6 +152,17 @@ class AdminPayment {
   final String transactionId;
   final DateTime createdAt;
   final String? planKey;
+  final String phone;
+  final String provider;
+
+  /// Last time the order was checked against SonicPesa (by the server or an admin).
+  DateTime? verifiedAt;
+
+  /// Status SonicPesa reported on that check (SUCCESS / PENDING / FAILED …).
+  String? remoteStatus;
+
+  bool get isSonicpesa =>
+      provider == 'sonicpesa' || transactionId.startsWith('sp_');
 }
 
 class AdminNotification {
@@ -275,6 +297,9 @@ class AdminDashboardStats {
     required this.planGold,
     required this.planPlatinum,
     required this.planOther,
+    this.live = const AdminLiveStats(),
+    this.days14 = const [],
+    this.recentPayments = const [],
   });
 
   final int totalUsers;
@@ -292,12 +317,72 @@ class AdminDashboardStats {
   final int planGold;
   final int planPlatinum;
   final int planOther;
+  final AdminLiveStats live;
+
+  /// Last 14 Tanzania days, oldest first.
+  final List<AdminDayStat> days14;
+  final List<AdminRecentPayment> recentPayments;
+}
+
+/// Right-now activity from `stats.live`.
+class AdminLiveStats {
+  const AdminLiveStats({
+    this.onlineNow = 0,
+    this.activeToday = 0,
+    this.active7d = 0,
+    this.newUsersToday = 0,
+    this.pendingPayments = 0,
+    this.failedToday = 0,
+    this.revenue7d = 0,
+    this.revenue30d = 0,
+  });
+  final int onlineNow;
+  final int activeToday;
+  final int active7d;
+  final int newUsersToday;
+  final int pendingPayments;
+  final int failedToday;
+  final double revenue7d;
+  final double revenue30d;
+}
+
+class AdminDayStat {
+  const AdminDayStat({
+    required this.day,
+    required this.registrations,
+    required this.purchases,
+    required this.revenue,
+  });
+  final DateTime day;
+  final int registrations;
+  final int purchases;
+  final double revenue;
+}
+
+class AdminRecentPayment {
+  const AdminRecentPayment({
+    required this.id,
+    required this.orderId,
+    required this.userName,
+    required this.amount,
+    required this.planKey,
+    required this.status,
+    required this.at,
+  });
+  final String id;
+  final String? orderId;
+  final String userName;
+  final double amount;
+  final String? planKey;
+  final String status;
+  final DateTime at;
 }
 
 class AdminSettings {
   String siteName = 'WASHA TV';
   bool subscriptionEnabled = true;
   bool maintenanceMode = false;
+
   /// E.164-style or local digits; shown on user Profile → WhatsApp.
   String whatsappNumber = '';
 
@@ -307,7 +392,8 @@ class AdminSettings {
   String minAndroidVersion = '';
   String latestAndroidVersion = '';
   int latestAndroidBuild = 0;
-  String playStoreUrl = 'https://play.google.com/store/apps/details?id=com.washatv';
+  String playStoreUrl =
+      'https://play.google.com/store/apps/details?id=com.washatv';
   String updateTitle = 'Sasisha WASHA TV';
   String updateMessage =
       'Toleo jipya linahitajika ili kuendelea kutumia app. Pakua kutoka Play Store kisha fungua tena.';

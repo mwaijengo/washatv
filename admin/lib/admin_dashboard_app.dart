@@ -4,6 +4,7 @@ import 'dart:math';
 import 'dart:ui';
 
 import 'package:fl_chart/fl_chart.dart';
+import 'package:flutter/cupertino.dart' show CupertinoPageTransitionsBuilder;
 import 'package:flutter/foundation.dart' show compute, kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -16,6 +17,7 @@ import 'admin_currency.dart';
 import 'admin_data.dart';
 import 'admin_models.dart';
 import 'admin_prefs_keys.dart';
+import 'admin_ui.dart';
 import 'channel_categories.dart';
 
 /// Off-main-isolate JSON parse for large admin sync payloads (prevents UI freezes).
@@ -57,6 +59,7 @@ class WashaAdminApp extends StatelessWidget {
     final base = ThemeData(brightness: Brightness.dark, useMaterial3: true);
     // System fonts only — no GoogleFonts network fetch (avoids startup ANR on device).
     return MaterialApp(
+      title: 'Waisa',
       debugShowCheckedModeBanner: false,
       theme: base.copyWith(
         scaffoldBackgroundColor: AdminColors.bgPrimary,
@@ -67,6 +70,83 @@ class WashaAdminApp extends StatelessWidget {
         colorScheme: const ColorScheme.dark(
           primary: AdminColors.accentPrimary,
           surface: AdminColors.bgSecondary,
+        ),
+        pageTransitionsTheme: const PageTransitionsTheme(
+          builders: {
+            TargetPlatform.android: ZoomPageTransitionsBuilder(),
+            TargetPlatform.iOS: CupertinoPageTransitionsBuilder(),
+            TargetPlatform.windows: FadeUpwardsPageTransitionsBuilder(),
+            TargetPlatform.macOS: CupertinoPageTransitionsBuilder(),
+            TargetPlatform.linux: FadeUpwardsPageTransitionsBuilder(),
+          },
+        ),
+        dialogTheme: DialogThemeData(
+          backgroundColor: AdminColors.bgSecondary,
+          surfaceTintColor: Colors.transparent,
+          elevation: 24,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(22),
+            side: const BorderSide(color: Color(0x14FFFFFF)),
+          ),
+          titleTextStyle: const TextStyle(
+            fontSize: 18,
+            fontWeight: FontWeight.w800,
+            color: AdminColors.textPrimary,
+          ),
+        ),
+        tooltipTheme: TooltipThemeData(
+          decoration: BoxDecoration(
+            color: AdminColors.bgTertiary,
+            borderRadius: BorderRadius.circular(8),
+            border: Border.all(color: const Color(0x1AFFFFFF)),
+          ),
+          textStyle: const TextStyle(
+            fontSize: 11.5,
+            color: AdminColors.textPrimary,
+          ),
+          waitDuration: const Duration(milliseconds: 400),
+        ),
+        scrollbarTheme: ScrollbarThemeData(
+          thumbColor: WidgetStateProperty.all(const Color(0x33FFFFFF)),
+          radius: const Radius.circular(8),
+          thickness: WidgetStateProperty.all(6),
+        ),
+        filledButtonTheme: FilledButtonThemeData(
+          style: FilledButton.styleFrom(
+            backgroundColor: AdminColors.accentPrimary,
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(12),
+            ),
+            padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 12),
+            textStyle: const TextStyle(fontWeight: FontWeight.w700),
+          ),
+        ),
+        textButtonTheme: TextButtonThemeData(
+          style: TextButton.styleFrom(
+            foregroundColor: const Color(0xFF818CF8),
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(10),
+            ),
+          ),
+        ),
+        chipTheme: ChipThemeData(
+          backgroundColor: AdminColors.bgTertiary,
+          selectedColor: const Color(0x336366F1),
+          side: const BorderSide(color: Color(0x1AFFFFFF)),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(10),
+          ),
+          labelStyle: const TextStyle(
+            fontSize: 12,
+            fontWeight: FontWeight.w600,
+          ),
+        ),
+        progressIndicatorTheme: const ProgressIndicatorThemeData(
+          color: Color(0xFF818CF8),
+        ),
+        dividerTheme: const DividerThemeData(
+          color: Color(0x14FFFFFF),
+          space: 1,
         ),
       ),
       home: home,
@@ -102,6 +182,15 @@ class _AdminScaffoldState extends State<AdminScaffold>
   final _rand = Random();
   final _globalSearch = TextEditingController();
   final _userSearch = TextEditingController();
+  final _subsSearch = TextEditingController();
+  final _paySearch = TextEditingController();
+  int _subsFilter = 0;
+  int _payFilter = 0;
+  int _analyticsMetric = 0;
+  int _historyFilter = 0;
+  int _historyShown = 30;
+  final Set<String> _verifyingRefs = {};
+  bool _bulkVerifying = false;
   Timer? _userSearchDebounce;
 
   /// Authoritative DB count (may exceed loaded list length when filtered).
@@ -111,13 +200,28 @@ class _AdminScaffoldState extends State<AdminScaffold>
   int _usersMatched = 0;
   bool _usersSearchLoading = false;
 
+  /// Index into [_userFilterKeys]; the server filters and counts each bucket.
+  int _usersFilter = 0;
+  static const _userFilterKeys = [
+    'all',
+    'premium',
+    'expired',
+    'free',
+    'blocked',
+  ];
+
+  /// Which filter the rows in [_users] were loaded with (older servers ignore `filter`).
+  String _usersLoadedFilter = 'all';
+  Map<String, int>? _userCounts;
+  int _usersLimit = _usersBrowseLimit;
+  final Set<String> _userBusy = {};
+
   /// Prevents overlapping full syncs from racing / freezing the UI.
   int _hydrateSeq = 0;
   Future<bool>? _hydrateInFlight;
 
   /// Browse page size — keep modest; search uses the server `q` path to find any user.
   static const int _usersBrowseLimit = 200;
-  static const int _usersSearchLimit = 50;
 
   /// Pause background polls while the OS reports the app is not visible.
   bool _appLifecyclePaused = false;
@@ -177,8 +281,9 @@ class _AdminScaffoldState extends State<AdminScaffold>
   String? _slideQuery = '';
   String? _slideFilter = 'all';
 
-  /// Desktop: whether sidebar is open (main gets left margin). HTML starts with main `full-width` → sidebar closed.
+  /// Desktop: whether sidebar is open (main gets left margin). Starts open on wide screens.
   bool _sidebarOpen = false;
+  bool _sidebarInitialized = false;
   final List<_Toast> _toasts = [];
   Timer? _adminRefreshTimer;
   Timer? _statsRefreshTimer;
@@ -209,11 +314,13 @@ class _AdminScaffoldState extends State<AdminScaffold>
     _logs = generateLogs(_rand);
     unawaited(_bootstrapAdminData());
     // Stats only matter on dashboard — polling every page rebuilds Users/Channels and causes ANRs.
-    _statsRefreshTimer = Timer.periodic(const Duration(seconds: 20), (_) {
+    // Takwimu refreshes every 10s (live view), the dashboard every 20s.
+    _statsRefreshTimer = Timer.periodic(const Duration(seconds: 10), (t) {
       if (!mounted || !_hasAdminSession || _appLifecyclePaused) return;
-      if (_page != AdminPageId.dashboard && _page != AdminPageId.analytics)
-        return;
-      unawaited(_refreshDashboardStats());
+      if (_page == AdminPageId.analytics ||
+          (_page == AdminPageId.dashboard && t.tick.isEven)) {
+        unawaited(_refreshDashboardStats());
+      }
     });
     // Full sync is expensive; keep it rare and page-aware.
     _adminRefreshTimer = Timer.periodic(const Duration(seconds: 60), (_) {
@@ -222,7 +329,7 @@ class _AdminScaffoldState extends State<AdminScaffold>
       // Never interrupt an active user search with a full dashboard sync.
       if (_normalizedUserSearchQuery().isNotEmpty) return;
       if (_page == AdminPageId.users) {
-        unawaited(_searchUsersFromBackend());
+        unawaited(_searchUsersFromBackend(silent: true));
         return;
       }
       if (_page == AdminPageId.dashboard || _page == AdminPageId.analytics) {
@@ -232,6 +339,10 @@ class _AdminScaffoldState extends State<AdminScaffold>
       if (_page == AdminPageId.notifications) {
         unawaited(_loadReminderData());
         unawaited(_reloadNotifications());
+        return;
+      }
+      if (_page == AdminPageId.payments) {
+        unawaited(_reloadPayments());
         return;
       }
       unawaited(_hydrateFromBackend());
@@ -278,7 +389,7 @@ class _AdminScaffoldState extends State<AdminScaffold>
 
   Future<void> _handleAdminUnauthorized() async {
     if (!mounted) return;
-    // The password screen shows "Kikao kimeisha" because the logout is marked as expired.
+    // The password screen shows "Login imeisha" because the logout is marked as expired.
     await widget.auth.logout(expired: true);
   }
 
@@ -286,9 +397,9 @@ class _AdminScaffoldState extends State<AdminScaffold>
   String _sessionRemainingLabel() {
     final left = widget.auth.remaining;
     if (left == null) return 'Hujaingia';
-    if (left.inMinutes < 1) return 'Kikao kinaisha sasa hivi';
-    if (left.inHours >= 1) return 'Kikao: saa ${left.inHours} zimebaki';
-    return 'Kikao: dakika ${left.inMinutes} zimebaki';
+    if (left.inMinutes < 1) return 'Login Expired';
+    if (left.inHours >= 1) return 'Login: saa ${left.inHours} zimebaki';
+    return 'login: dakika ${left.inMinutes} zimebaki';
   }
 
   String _formatRelative(DateTime? dt) {
@@ -302,10 +413,12 @@ class _AdminScaffoldState extends State<AdminScaffold>
 
   String _dashboardSubtitle() {
     if (!_hasAdminSession) return 'Ingia ili kuona data za moja kwa moja';
-    if (_statsRefreshFailed && _dashboardStats == null)
+    if (_statsRefreshFailed && _dashboardStats == null) {
       return 'Imeshindwa kupakia takwimu · vuta chini ujaribu tena';
-    if (_statsRefreshFailed)
+    }
+    if (_statsRefreshFailed) {
       return 'Kusasisha kumeshindikana · mwisho ${_formatRelative(_statsFetchedAt)}';
+    }
     if (_dashboardStats != null) {
       return 'Data za moja kwa moja · zilisasishwa ${_formatRelative(_statsFetchedAt)}';
     }
@@ -376,7 +489,13 @@ class _AdminScaffoldState extends State<AdminScaffold>
       case 'bulk_revoke_premium':
         return 'Ameondoa premium (wengi)';
       case 'send_reminders':
-        return 'Ametuma vikumbusho';
+        return 'Ametuma reminder';
+      case 'send_reminders_failed':
+        return 'Kutuma reminder kumeshindikana';
+      case 'verify_payment':
+        return 'Amehakiki malipo (SonicPesa)';
+      case 'verify_pending_payments':
+        return 'Amehakiki malipo yanayosubiri';
       default:
         return raw.replaceAll('_', ' ');
     }
@@ -413,21 +532,13 @@ class _AdminScaffoldState extends State<AdminScaffold>
         return false;
       }
       if (!mounted) return false;
-      final unchanged =
-          _dashboardStats != null &&
-          _dashboardStats!.totalUsers == stats.totalUsers &&
-          _dashboardStats!.premiumUsers == stats.premiumUsers &&
-          _dashboardStats!.freeUsers == stats.freeUsers &&
-          _dashboardStats!.activeChannels == stats.activeChannels &&
-          _dashboardStats!.revenue == stats.revenue;
+      final onStatsPage =
+          _page == AdminPageId.dashboard || _page == AdminPageId.analytics;
       if (notify) {
-        // Avoid rebuilding heavy pages when numbers did not change.
-        if (unchanged && !_statsRefreshFailed) {
+        // Only the stats pages show live numbers; elsewhere skip the rebuild.
+        if (!onStatsPage && !_statsRefreshFailed) {
+          _dashboardStats = stats;
           _statsFetchedAt = DateTime.now();
-          if (_page == AdminPageId.dashboard ||
-              _page == AdminPageId.analytics) {
-            setState(() {});
-          }
         } else {
           setState(() {
             _dashboardStats = stats;
@@ -617,7 +728,10 @@ class _AdminScaffoldState extends State<AdminScaffold>
   Future<bool> _hydrateFromBackendImpl(int seq) async {
     try {
       final searchQ = _normalizedUserSearchQuery();
-      final browsingUsers = searchQ.isEmpty;
+      final browsingUsers =
+          searchQ.isEmpty &&
+          _usersFilter == 0 &&
+          _usersLimit == _usersBrowseLimit;
       final bootstrapUri = Uri.parse(
         '$_apiBase/api/v1/public/bootstrap',
       ).replace(queryParameters: const {'since': '0'});
@@ -786,20 +900,26 @@ class _AdminScaffoldState extends State<AdminScaffold>
   }
 
   /// Lightweight users-only fetch — used for search so we never rebuild the whole dashboard.
-  Future<void> _searchUsersFromBackend() async {
+  Future<void> _searchUsersFromBackend({bool silent = false}) async {
     if (!_hasAdminSession) return;
     final q = _normalizedUserSearchQuery();
+    final filter = _userFilterKeys[_usersFilter];
+    final limit = _usersLimit;
     if (!mounted) return;
-    setState(() => _usersSearchLoading = true);
+    if (!silent) setState(() => _usersSearchLoading = true);
+    bool stale() =>
+        _normalizedUserSearchQuery() != q ||
+        _userFilterKeys[_usersFilter] != filter ||
+        _usersLimit != limit;
     try {
       final res = await http
           .get(
             Uri.parse('$_apiBase/api/v1/admin/users').replace(
               queryParameters: {
-                'limit': q.isEmpty
-                    ? '$_usersBrowseLimit'
-                    : '$_usersSearchLimit',
+                'limit': '$limit',
                 if (q.isNotEmpty) 'q': q,
+                if (filter != 'all') 'filter': filter,
+                if (filter == 'premium') 'premium': '1',
               },
             ),
             headers: _adminHeaders(),
@@ -810,39 +930,40 @@ class _AdminScaffoldState extends State<AdminScaffold>
         await _handleAdminUnauthorized();
         return;
       }
-      // Ignore stale responses if the query changed while in flight.
-      if (_normalizedUserSearchQuery() != q) return;
+      if (stale()) return;
       if (res.statusCode < 200 || res.statusCode >= 300) {
         setState(() => _usersSearchLoading = false);
         return;
       }
       final map = await _decodeJsonMapSafe(res.body);
-      if (map == null) {
+      if (map == null || stale()) {
         if (mounted) setState(() => _usersSearchLoading = false);
         return;
       }
       final rawUsers = map['users'];
       final totalRaw = map['total'] ?? map['users_total'];
-      final matchedRaw = map['matched'] ?? map['total'];
+      final matchedRaw = map['matched'] ?? map['premium_total'];
+      final countsRaw = map['counts'];
+      final serverFilter = _s(map['filter']);
       setState(() {
         if (rawUsers is List) {
           _users = _parseUsersJson(rawUsers);
           _sortAdminLists();
+          _usersLoadedFilter = serverFilter.isNotEmpty
+              ? serverFilter
+              : (filter == 'premium' && map['premium_only'] == true
+                    ? 'premium'
+                    : 'all');
         }
         if (totalRaw is num) {
           _usersTotal = totalRaw.toInt();
         } else if (totalRaw is String) {
           _usersTotal = int.tryParse(totalRaw) ?? _users.length;
         }
-        if (q.isEmpty) {
-          _usersMatched = 0;
-        } else if (matchedRaw is num) {
-          _usersMatched = matchedRaw.toInt();
-        } else if (matchedRaw is String) {
-          _usersMatched = int.tryParse(matchedRaw) ?? _users.length;
-        } else {
-          _usersMatched = _users.length;
-        }
+        _usersMatched = matchedRaw == null ? _users.length : _toInt(matchedRaw);
+        _userCounts = countsRaw is Map
+            ? {for (final k in _userFilterKeys) k: _toInt(countsRaw[k])}
+            : null;
         _usersSearchLoading = false;
       });
     } catch (_) {
@@ -1013,7 +1134,54 @@ class _AdminScaffoldState extends State<AdminScaffold>
     final daily =
         (s['daily_registrations'] as Map?)?.cast<String, dynamic>() ?? const {};
     final mix = (s['plan_mix'] as Map?)?.cast<String, dynamic>() ?? const {};
+    final live = (s['live'] as Map?)?.cast<String, dynamic>() ?? const {};
+    final d14 = (s['daily_14'] as Map?)?.cast<String, dynamic>() ?? const {};
+    final d14Labels = ((d14['labels'] as List?) ?? const [])
+        .map((e) => e.toString())
+        .toList();
+    final d14Regs = _numList(d14['registrations']);
+    final d14Buys = _numList(d14['purchases']);
+    final d14Rev = _numList(d14['revenue']);
+    final days14 = <AdminDayStat>[
+      for (var i = 0; i < d14Labels.length; i++)
+        if (DateTime.tryParse(d14Labels[i]) case final day?)
+          AdminDayStat(
+            day: day,
+            registrations: i < d14Regs.length ? d14Regs[i].round() : 0,
+            purchases: i < d14Buys.length ? d14Buys[i].round() : 0,
+            revenue: i < d14Rev.length ? d14Rev[i] : 0,
+          ),
+    ];
+    final recent = ((s['recent_payments'] as List?) ?? const [])
+        .whereType<Map>()
+        .map((raw) {
+          final j = raw.cast<String, dynamic>();
+          final order = _s(j['order_id']);
+          final plan = _s(j['plan_key']);
+          return AdminRecentPayment(
+            id: _s(j['id']),
+            orderId: order.isEmpty ? null : order,
+            userName: _s(j['user_name'], fallback: 'Viewer'),
+            amount: _toDouble(j['amount']),
+            planKey: plan.isEmpty ? null : plan,
+            status: _s(j['status'], fallback: 'pending'),
+            at: _dt(j['at']) ?? DateTime.now(),
+          );
+        })
+        .toList();
     return AdminDashboardStats(
+      live: AdminLiveStats(
+        onlineNow: _toInt(live['online_now']),
+        activeToday: _toInt(live['active_today']),
+        active7d: _toInt(live['active_7d']),
+        newUsersToday: _toInt(live['new_users_today']),
+        pendingPayments: _toInt(live['pending_payments']),
+        failedToday: _toInt(live['failed_today']),
+        revenue7d: _toDouble(live['revenue_7d']),
+        revenue30d: _toDouble(live['revenue_30d']),
+      ),
+      days14: days14,
+      recentPayments: recent,
       totalUsers: _toInt(totals['users']),
       premiumUsers: _toInt(totals['premium_users']),
       freeUsers: _toInt(totals['free_users']),
@@ -1151,7 +1319,8 @@ class _AdminScaffoldState extends State<AdminScaffold>
       } else if (rawUsers is List) {
         _usersTotal = _users.length;
       }
-      _usersMatched = 0;
+      _usersMatched = _usersTotal;
+      if (rawUsers is List) _usersLoadedFilter = 'all';
     } else {
       // Still refresh authoritative total when present so header stays honest.
       final totalRaw = adminMap['users_total'] ?? adminMap['total'];
@@ -1170,22 +1339,7 @@ class _AdminScaffoldState extends State<AdminScaffold>
     if (rawSlides is List) _slides = _parseAdminSlidesJson(rawSlides);
 
     final rawTx = adminMap['transactions'];
-    if (rawTx is List) {
-      _payments = rawTx.take(100).whereType<Map>().map((rawItem) {
-        final j = rawItem.cast<String, dynamic>();
-        return AdminPayment(
-          id: _s(j['id']),
-          userName: _s(j['user_name'], fallback: 'Viewer'),
-          amount: (j['amount'] as num?)?.toDouble() ?? 0,
-          method: _s(j['method'], fallback: 'N/A'),
-          status: _s(j['status'], fallback: 'completed'),
-          transactionId: _s(j['provider_ref'], fallback: _s(j['id'])),
-          createdAt:
-              _dt(j['completed_at']) ?? _dt(j['created_at']) ?? DateTime.now(),
-          planKey: _s(j['plan_key']).isEmpty ? null : _s(j['plan_key']),
-        );
-      }).toList();
-    }
+    if (rawTx is List) _payments = _parsePaymentsJson(rawTx);
 
     final rawNoti = adminMap['notifications'];
     if (rawNoti is List) _notifications = _parseNotificationsJson(rawNoti);
@@ -1231,9 +1385,59 @@ class _AdminScaffoldState extends State<AdminScaffold>
     _sortAdminLists();
   }
 
+  AdminPayment _parsePaymentJson(Map<String, dynamic> j) {
+    final meta = j['metadata'] is Map
+        ? (j['metadata'] as Map).cast<String, dynamic>()
+        : const <String, dynamic>{};
+    final remote = _s(meta['sonicpesa_status']);
+    return AdminPayment(
+      id: _s(j['id']),
+      userName: _s(j['user_name'], fallback: 'Viewer'),
+      amount:
+          (j['amount'] as num?)?.toDouble() ??
+          double.tryParse(_s(j['amount'])) ??
+          0,
+      method: _s(j['method'], fallback: 'N/A'),
+      status: _s(j['status'], fallback: 'completed'),
+      transactionId: _s(j['provider_ref'], fallback: _s(j['id'])),
+      createdAt:
+          _dt(j['completed_at']) ?? _dt(j['created_at']) ?? DateTime.now(),
+      planKey: _s(j['plan_key']).isEmpty ? null : _s(j['plan_key']),
+      phone: _s(j['phone']),
+      provider: _s(j['provider']),
+      verifiedAt: _dt(meta['verified_at']),
+      remoteStatus: remote.isEmpty ? null : remote,
+    );
+  }
+
+  List<AdminPayment> _parsePaymentsJson(List<dynamic> raw) => raw
+      .whereType<Map>()
+      .map((m) => _parsePaymentJson(m.cast<String, dynamic>()))
+      .toList();
+
+  Future<void> _reloadPayments() async {
+    if (!_hasAdminSession) return;
+    try {
+      final res = await http
+          .get(
+            Uri.parse('$_apiBase/api/v1/admin/transactions'),
+            headers: _adminHeaders(),
+          )
+          .timeout(const Duration(seconds: 15));
+      if (res.statusCode == 401 || res.statusCode == 403) {
+        await _handleAdminUnauthorized();
+        return;
+      }
+      if (res.statusCode < 200 || res.statusCode >= 300) return;
+      final map = await _decodeJsonMapSafe(res.body);
+      final raw = map?['transactions'];
+      if (raw is! List || !mounted) return;
+      setState(() => _payments = _parsePaymentsJson(raw));
+    } catch (_) {}
+  }
+
   Future<void> _onPullRefresh() async {
-    final q = _normalizedUserSearchQuery();
-    if (q.isNotEmpty && _page == AdminPageId.users) {
+    if (_page == AdminPageId.users) {
       await Future.wait([_searchUsersFromBackend(), _refreshDashboardStats()]);
       return;
     }
@@ -1417,6 +1621,8 @@ class _AdminScaffoldState extends State<AdminScaffold>
     _globalSearch.dispose();
     _userSearchDebounce?.cancel();
     _userSearch.dispose();
+    _subsSearch.dispose();
+    _paySearch.dispose();
     super.dispose();
   }
 
@@ -1425,8 +1631,12 @@ class _AdminScaffoldState extends State<AdminScaffold>
       _page = p;
       if (_isMobile) _sidebarOpen = false;
     });
-    if (p == AdminPageId.notifications && _hasAdminSession)
+    if (p == AdminPageId.notifications && _hasAdminSession) {
       unawaited(_loadReminderData());
+    }
+    if (p == AdminPageId.users && _hasAdminSession) {
+      unawaited(_searchUsersFromBackend(silent: _users.isNotEmpty));
+    }
   }
 
   /// Header "Search..." finds users by Device ID / name / phone / USR id.
@@ -1437,6 +1647,8 @@ class _AdminScaffoldState extends State<AdminScaffold>
     _globalSearch.clear();
     setState(() {
       _page = AdminPageId.users;
+      _usersFilter = 0;
+      _usersLimit = _usersBrowseLimit;
       if (_isMobile) _sidebarOpen = false;
     });
     if (_hasAdminSession) unawaited(_searchUsersFromBackend());
@@ -1451,6 +1663,15 @@ class _AdminScaffoldState extends State<AdminScaffold>
       if (!mounted) return;
       setState(() => _toasts.remove(toast));
     });
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    if (!_sidebarInitialized) {
+      _sidebarInitialized = true;
+      _sidebarOpen = !_isMobile;
+    }
   }
 
   @override
@@ -1471,6 +1692,7 @@ class _AdminScaffoldState extends State<AdminScaffold>
             bottom: false,
             child: Stack(
               children: [
+                const Positioned.fill(child: AdminAmbientBackground()),
                 Row(
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
@@ -1494,31 +1716,46 @@ class _AdminScaffoldState extends State<AdminScaffold>
                               onRefresh: _onPullRefresh,
                               // Users + Channels own their scroll views (virtualized). Nested
                               // shrinkWrap grids/lists of many tiles caused Android ANRs.
-                              child:
-                                  (_page == AdminPageId.users ||
-                                      _page == AdminPageId.channels)
-                                  ? Padding(
-                                      padding: EdgeInsets.fromLTRB(
-                                        16,
-                                        16,
-                                        16,
-                                        mobile ? 88 : 16,
-                                      ),
-                                      child: _page == AdminPageId.users
-                                          ? _pageUsers()
-                                          : _pageChannels(),
-                                    )
-                                  : SingleChildScrollView(
-                                      physics:
-                                          const AlwaysScrollableScrollPhysics(),
-                                      padding: EdgeInsets.fromLTRB(
-                                        16,
-                                        16,
-                                        16,
-                                        mobile ? 88 : 16,
-                                      ),
-                                      child: _buildPage(),
-                                    ),
+                              // New key per page → the entrance animation replays on every navigation.
+                              child: KeyedSubtree(
+                                key: ValueKey(_page),
+                                child: FadeSlideIn(
+                                  offset: 18,
+                                  child: _page == AdminPageId.channels
+                                      ? Padding(
+                                          padding: EdgeInsets.fromLTRB(
+                                            16,
+                                            16,
+                                            16,
+                                            mobile ? 100 : 16,
+                                          ),
+                                          child: _pageChannels(),
+                                        )
+                                      : (_page == AdminPageId.users ||
+                                            _page ==
+                                                AdminPageId.subscriptions ||
+                                            _page == AdminPageId.payments)
+                                      ? _ownScrollPage(mobile, switch (_page) {
+                                          AdminPageId.users => _userSlivers(),
+                                          AdminPageId.subscriptions =>
+                                            _subscriptionSlivers(),
+                                          _ => _paymentSlivers(),
+                                        })
+                                      : SingleChildScrollView(
+                                          physics:
+                                              const AlwaysScrollableScrollPhysics(
+                                                parent: BouncingScrollPhysics(),
+                                              ),
+                                          padding: EdgeInsets.fromLTRB(
+                                            16,
+                                            16,
+                                            16,
+                                            mobile ? 100 : 24,
+                                          ),
+                                          child: _buildPage(),
+                                        ),
+                                ),
+                              ),
                             ),
                           ),
                         ],
@@ -1552,6 +1789,7 @@ class _AdminScaffoldState extends State<AdminScaffold>
               ],
             ),
           ),
+          extendBody: mobile,
           bottomNavigationBar: mobile ? _bottomNav() : null,
         ),
       ),
@@ -1568,123 +1806,274 @@ class _AdminScaffoldState extends State<AdminScaffold>
           _ToastType.warning => const Color(0xFFF59E0B),
           _ToastType.info => const Color(0xFF6366F1),
         };
-        return Container(
-          margin: const EdgeInsets.only(bottom: 8),
-          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-          decoration: BoxDecoration(
-            color: bg,
-            borderRadius: BorderRadius.circular(12),
-            boxShadow: const [
-              BoxShadow(color: Color(0x66000000), blurRadius: 20),
-            ],
+        final icon = switch (t.type) {
+          _ToastType.success => Icons.check_circle_rounded,
+          _ToastType.error => Icons.error_rounded,
+          _ToastType.warning => Icons.warning_amber_rounded,
+          _ToastType.info => Icons.info_rounded,
+        };
+        return TweenAnimationBuilder<double>(
+          key: ObjectKey(t),
+          tween: Tween(begin: 0, end: 1),
+          duration: const Duration(milliseconds: 320),
+          curve: Curves.easeOutBack,
+          builder: (context, v, child) => Opacity(
+            opacity: v.clamp(0.0, 1.0),
+            child: Transform.translate(
+              offset: Offset((1 - v) * 40, 0),
+              child: child,
+            ),
           ),
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Icon(
-                t.type == _ToastType.success
-                    ? Icons.check_circle_outline
-                    : t.type == _ToastType.error
-                    ? Icons.cancel_outlined
-                    : Icons.info_outline,
-                color: Colors.white,
-                size: 16,
-              ),
-              const SizedBox(width: 8),
-              Text(
-                t.message,
-                style: const TextStyle(
-                  color: Colors.white,
-                  fontSize: 12,
-                  fontWeight: FontWeight.w600,
+          child: Container(
+            margin: const EdgeInsets.only(bottom: 8),
+            constraints: BoxConstraints(
+              maxWidth: min(380.0, MediaQuery.sizeOf(context).width - 24),
+            ),
+            padding: const EdgeInsets.fromLTRB(10, 10, 16, 10),
+            decoration: BoxDecoration(
+              color: AdminColors.bgSecondary,
+              borderRadius: BorderRadius.circular(14),
+              border: Border.all(color: bg.withValues(alpha: 0.45)),
+              boxShadow: [
+                BoxShadow(color: bg.withValues(alpha: 0.25), blurRadius: 24),
+                const BoxShadow(
+                  color: Color(0x66000000),
+                  blurRadius: 20,
+                  offset: Offset(0, 8),
                 ),
-              ),
-            ],
+              ],
+            ),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Container(
+                  width: 28,
+                  height: 28,
+                  decoration: BoxDecoration(
+                    color: bg.withValues(alpha: 0.18),
+                    borderRadius: BorderRadius.circular(9),
+                  ),
+                  child: Icon(icon, color: bg, size: 17),
+                ),
+                const SizedBox(width: 10),
+                Flexible(
+                  child: Text(
+                    t.message,
+                    style: const TextStyle(
+                      color: AdminColors.textPrimary,
+                      fontSize: 12.5,
+                      fontWeight: FontWeight.w600,
+                      height: 1.3,
+                    ),
+                  ),
+                ),
+              ],
+            ),
           ),
         );
       }).toList(),
     );
   }
 
+  static const _navItems = <AdminPageId, (IconData, String)>{
+    AdminPageId.dashboard: (Icons.space_dashboard_rounded, 'Dashibodi'),
+    AdminPageId.analytics: (Icons.insights_rounded, 'Takwimu'),
+    AdminPageId.users: (Icons.groups_rounded, 'Watumiaji'),
+    AdminPageId.subscriptions: (Icons.workspace_premium_rounded, 'Usajili'),
+    AdminPageId.payments: (Icons.account_balance_wallet_rounded, 'Malipo'),
+    AdminPageId.pricing: (Icons.sell_rounded, 'Bei za vifurushi'),
+    AdminPageId.channels: (Icons.live_tv_rounded, 'Chaneli'),
+    AdminPageId.slides: (Icons.view_carousel_rounded, 'Mabango'),
+    AdminPageId.notifications: (
+      Icons.notifications_active_rounded,
+      'Arifa na Reminder',
+    ),
+    AdminPageId.settings: (Icons.tune_rounded, 'Mipangilio'),
+    AdminPageId.logs: (Icons.history_rounded, 'Kumbukumbu za shughuli'),
+  };
+
+  Widget _headerIconButton({
+    required IconData icon,
+    required String tooltip,
+    required VoidCallback onTap,
+    int badge = 0,
+  }) {
+    return Tooltip(
+      message: tooltip,
+      child: AdminPressable(
+        onTap: onTap,
+        lift: 0,
+        pressedScale: 0.9,
+        child: Stack(
+          clipBehavior: Clip.none,
+          children: [
+            Container(
+              width: 40,
+              height: 40,
+              decoration: BoxDecoration(
+                color: const Color(0x0DFFFFFF),
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(color: const Color(0x14FFFFFF)),
+              ),
+              child: Icon(icon, size: 20, color: const Color(0xFFCBD5E1)),
+            ),
+            if (badge > 0)
+              Positioned(
+                right: -4,
+                top: -4,
+                child: Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 5,
+                    vertical: 1.5,
+                  ),
+                  constraints: const BoxConstraints(minWidth: 18),
+                  decoration: BoxDecoration(
+                    color: AdminColors.accentDanger,
+                    borderRadius: BorderRadius.circular(999),
+                    border: Border.all(color: AdminColors.bgPrimary, width: 2),
+                  ),
+                  child: Text(
+                    badge > 99 ? '99+' : '$badge',
+                    textAlign: TextAlign.center,
+                    style: const TextStyle(
+                      fontSize: 9.5,
+                      fontWeight: FontWeight.w800,
+                      color: Colors.white,
+                    ),
+                  ),
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
   Widget _buildHeader(bool mobile, double width) {
-    final showBrand = width >= 640;
+    final showTitle = width >= 640;
+    final page = _navItems[_page]!;
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+      padding: const EdgeInsets.fromLTRB(16, 12, 16, 12),
       decoration: const BoxDecoration(
-        color: Color(0xF20A0E17),
+        gradient: LinearGradient(
+          begin: Alignment.topCenter,
+          end: Alignment.bottomCenter,
+          colors: [Color(0xF70A0E17), Color(0xE60A0E17)],
+        ),
         border: Border(bottom: BorderSide(color: AdminColors.borderSubtle)),
       ),
       child: Row(
         children: [
           _HamburgerButton(open: _sidebarOpen, onTap: _toggleSidebar),
-          const SizedBox(width: 12),
-          if (showBrand)
-            ShaderMask(
-              blendMode: BlendMode.srcIn,
-              shaderCallback: (r) => const LinearGradient(
-                colors: [Color(0xFF818CF8), Color(0xFFA78BFA)],
-              ).createShader(r),
-              child: const Text(
-                'WASHA TV',
-                style: TextStyle(
-                  fontWeight: FontWeight.w800,
-                  fontSize: 14,
-                  color: Colors.white,
-                ),
+          const SizedBox(width: 14),
+          if (showTitle)
+            AnimatedSwitcher(
+              duration: const Duration(milliseconds: 250),
+              child: Column(
+                key: ValueKey(_page),
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    page.$2,
+                    style: const TextStyle(
+                      fontSize: 16,
+                      fontWeight: FontWeight.w800,
+                      letterSpacing: -0.2,
+                    ),
+                  ),
+                  const SizedBox(height: 2),
+                  Text(
+                    '${adminGreeting()} · ${adminSwahiliDate()}',
+                    style: const TextStyle(
+                      fontSize: 11,
+                      color: AdminColors.textSecondary,
+                    ),
+                  ),
+                ],
               ),
             ),
           Expanded(
-            child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 16),
-              child: TextField(
-                controller: _globalSearch,
-                style: const TextStyle(fontSize: 13),
-                textInputAction: TextInputAction.search,
-                onSubmitted: _onGlobalSearchSubmitted,
-                decoration: InputDecoration(
-                  hintText: 'Tafuta user (Device ID / jina / simu)...',
-                  hintStyle: const TextStyle(
-                    color: Color(0xFF6B7280),
-                    fontSize: 13,
-                  ),
-                  prefixIcon: const Icon(
-                    Icons.search,
-                    size: 18,
-                    color: Color(0xFF6B7280),
-                  ),
-                  filled: true,
-                  fillColor: AdminColors.bgPrimary,
-                  contentPadding: const EdgeInsets.symmetric(
-                    horizontal: 12,
-                    vertical: 10,
-                  ),
-                  enabledBorder: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(12),
-                    borderSide: const BorderSide(color: Color(0x1AFFFFFF)),
-                  ),
-                  focusedBorder: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(12),
-                    borderSide: const BorderSide(color: Color(0xFF6366F1)),
+            child: Align(
+              alignment: Alignment.centerRight,
+              child: ConstrainedBox(
+                constraints: const BoxConstraints(maxWidth: 420),
+                child: Padding(
+                  padding: EdgeInsets.only(left: showTitle ? 20 : 0, right: 12),
+                  child: TextField(
+                    controller: _globalSearch,
+                    style: const TextStyle(fontSize: 13),
+                    textInputAction: TextInputAction.search,
+                    onSubmitted: _onGlobalSearchSubmitted,
+                    decoration: InputDecoration(
+                      isDense: true,
+                      hintText: 'Tafuta mtumiaji (Device ID / jina / simu)…',
+                      hintStyle: const TextStyle(
+                        color: Color(0xFF6B7280),
+                        fontSize: 12.5,
+                      ),
+                      prefixIcon: const Icon(
+                        Icons.search_rounded,
+                        size: 19,
+                        color: Color(0xFF818CF8),
+                      ),
+                      filled: true,
+                      fillColor: const Color(0x99111827),
+                      contentPadding: const EdgeInsets.symmetric(
+                        horizontal: 12,
+                        vertical: 12,
+                      ),
+                      enabledBorder: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(14),
+                        borderSide: const BorderSide(color: Color(0x14FFFFFF)),
+                      ),
+                      focusedBorder: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(14),
+                        borderSide: const BorderSide(
+                          color: Color(0xFF6366F1),
+                          width: 1.4,
+                        ),
+                      ),
+                    ),
                   ),
                 ),
               ),
             ),
           ),
-          Stack(
-            clipBehavior: Clip.none,
-            children: [
-              IconButton(
-                tooltip: 'Arifa na vikumbusho',
-                onPressed: () => _navigate(AdminPageId.notifications),
-                icon: const Icon(
-                  Icons.notifications_none_rounded,
-                  color: Color(0xFF9CA3AF),
+          _headerIconButton(
+            icon: Icons.notifications_none_rounded,
+            tooltip: 'Arifa na Reminder',
+            onTap: () => _navigate(AdminPageId.notifications),
+            badge: _reminderSummary?.expiringUnsent ?? 0,
+          ),
+          if (!mobile) ...[
+            const SizedBox(width: 10),
+            Tooltip(
+              message: _sessionRemainingLabel(),
+              child: Container(
+                width: 40,
+                height: 40,
+                decoration: const BoxDecoration(
+                  shape: BoxShape.circle,
+                  gradient: LinearGradient(
+                    colors: [Color(0xFFFBBF24), Color(0xFFF97316)],
+                  ),
+                  boxShadow: [
+                    BoxShadow(color: Color(0x40F97316), blurRadius: 14),
+                  ],
+                ),
+                alignment: Alignment.center,
+                child: const Text(
+                  'SA',
+                  style: TextStyle(
+                    fontSize: 12,
+                    fontWeight: FontWeight.w800,
+                    color: Colors.white,
+                  ),
                 ),
               ),
-              if ((_reminderSummary?.expiringUnsent ?? 0) > 0)
-                const Positioned(right: 10, top: 10, child: _PulseDot()),
-            ],
-          ),
+            ),
+          ],
         ],
       ),
     );
@@ -1703,15 +2092,26 @@ class _AdminScaffoldState extends State<AdminScaffold>
             child: Row(
               children: [
                 Container(
-                  width: 40,
-                  height: 40,
+                  width: 42,
+                  height: 42,
                   decoration: BoxDecoration(
-                    borderRadius: BorderRadius.circular(12),
+                    borderRadius: BorderRadius.circular(13),
                     gradient: const LinearGradient(
                       colors: [Color(0xFF6366F1), Color(0xFF9333EA)],
                     ),
+                    boxShadow: const [
+                      BoxShadow(
+                        color: Color(0x596366F1),
+                        blurRadius: 18,
+                        offset: Offset(0, 6),
+                      ),
+                    ],
                   ),
-                  child: const Icon(Icons.bolt, color: Colors.white, size: 20),
+                  child: const Icon(
+                    Icons.bolt_rounded,
+                    color: Colors.white,
+                    size: 22,
+                  ),
                 ),
                 const SizedBox(width: 12),
                 Expanded(
@@ -1724,10 +2124,11 @@ class _AdminScaffoldState extends State<AdminScaffold>
                           colors: [Color(0xFF818CF8), Color(0xFFA78BFA)],
                         ).createShader(r),
                         child: const Text(
-                          'WASHA Admin',
+                          'Waisa',
                           style: TextStyle(
-                            fontWeight: FontWeight.w800,
-                            fontSize: 18,
+                            fontWeight: FontWeight.w900,
+                            fontSize: 20,
+                            letterSpacing: -0.3,
                             color: Colors.white,
                           ),
                         ),
@@ -1735,7 +2136,7 @@ class _AdminScaffoldState extends State<AdminScaffold>
                       const Text(
                         'Paneli ya Usimamizi',
                         style: TextStyle(
-                          fontSize: 10,
+                          fontSize: 10.5,
                           color: Color(0xFF6B7280),
                         ),
                       ),
@@ -1745,123 +2146,130 @@ class _AdminScaffoldState extends State<AdminScaffold>
                 if (mobileCloseBtn)
                   IconButton(
                     onPressed: () => setState(() => _sidebarOpen = false),
-                    icon: const Icon(Icons.close, color: Color(0xFF9CA3AF)),
+                    icon: const Icon(
+                      Icons.close_rounded,
+                      color: Color(0xFF9CA3AF),
+                    ),
                   ),
               ],
             ),
           ),
           Expanded(
             child: ListView(
-              padding: const EdgeInsets.symmetric(horizontal: 12),
+              padding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
               children: [
-                _navRow(
-                  AdminPageId.dashboard,
-                  Icons.dashboard_rounded,
-                  'Dashibodi',
-                ),
-                _navRow(AdminPageId.users, Icons.groups_rounded, 'Watumiaji'),
-                _navRow(
-                  AdminPageId.channels,
-                  Icons.satellite_alt_rounded,
-                  'Chaneli',
-                ),
-                _navRow(AdminPageId.slides, Icons.slideshow_rounded, 'Mabango'),
-                _navRow(
-                  AdminPageId.subscriptions,
-                  Icons.workspace_premium_rounded,
-                  'Usajili',
-                ),
-                _navRow(
-                  AdminPageId.pricing,
-                  Icons.sell_rounded,
-                  'Bei za vifurushi',
-                ),
-                _navRow(
-                  AdminPageId.payments,
-                  Icons.credit_card_rounded,
-                  'Malipo',
-                ),
+                const AdminNavSection('Muhtasari'),
+                _navRow(AdminPageId.dashboard),
+                _navRow(AdminPageId.analytics),
+                const AdminNavSection('Wateja na mapato'),
+                _navRow(AdminPageId.users),
+                _navRow(AdminPageId.subscriptions),
+                _navRow(AdminPageId.payments),
+                _navRow(AdminPageId.pricing),
+                const AdminNavSection('Maudhui'),
+                _navRow(AdminPageId.channels),
+                _navRow(AdminPageId.slides),
+                const AdminNavSection('Mawasiliano'),
                 _navRow(
                   AdminPageId.notifications,
-                  Icons.notifications_rounded,
-                  'Arifa na vikumbusho',
+                  badge: _reminderSummary?.expiringUnsent ?? 0,
                 ),
-                _navRow(
-                  AdminPageId.analytics,
-                  Icons.show_chart_rounded,
-                  'Takwimu',
-                ),
-                _navRow(
-                  AdminPageId.settings,
-                  Icons.settings_rounded,
-                  'Mipangilio',
-                ),
-                _navRow(
-                  AdminPageId.logs,
-                  Icons.history_rounded,
-                  'Kumbukumbu za shughuli',
-                ),
+                const AdminNavSection('Mfumo'),
+                _navRow(AdminPageId.settings),
+                _navRow(AdminPageId.logs),
               ],
             ),
           ),
-          Container(
-            padding: const EdgeInsets.all(16),
-            decoration: const BoxDecoration(
-              border: Border(top: BorderSide(color: AdminColors.borderSubtle)),
-            ),
-            child: Row(
-              children: [
-                Container(
-                  width: 36,
-                  height: 36,
-                  decoration: const BoxDecoration(
-                    shape: BoxShape.circle,
-                    gradient: LinearGradient(
-                      colors: [Color(0xFFFBBF24), Color(0xFFF97316)],
-                    ),
-                  ),
-                  alignment: Alignment.center,
-                  child: const Text(
-                    'SA',
-                    style: TextStyle(
-                      fontSize: 11,
-                      fontWeight: FontWeight.bold,
-                      color: Colors.white,
-                    ),
+          _sidebarSessionCard(),
+        ],
+      ),
+    );
+  }
+
+  /// Who is signed in, and how much of the 24-hour login is left (progress bar).
+  Widget _sidebarSessionCard() {
+    final left = widget.auth.remaining ?? Duration.zero;
+    final fraction = (left.inSeconds / const Duration(hours: 24).inSeconds)
+        .clamp(0.0, 1.0);
+    final barColor = fraction > 0.25
+        ? AdminColors.accentSuccess
+        : AdminColors.accentWarning;
+    return Container(
+      margin: const EdgeInsets.fromLTRB(12, 0, 12, 12),
+      padding: const EdgeInsets.all(12),
+      decoration: adminCardDecoration(radius: 16, shadow: false),
+      child: Column(
+        children: [
+          Row(
+            children: [
+              Container(
+                width: 36,
+                height: 36,
+                decoration: const BoxDecoration(
+                  shape: BoxShape.circle,
+                  gradient: LinearGradient(
+                    colors: [Color(0xFFFBBF24), Color(0xFFF97316)],
                   ),
                 ),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      const Text(
-                        'Msimamizi',
-                        style: TextStyle(
-                          fontWeight: FontWeight.w600,
-                          fontSize: 13,
-                        ),
+                alignment: Alignment.center,
+                child: const Text(
+                  'SA',
+                  style: TextStyle(
+                    fontSize: 11,
+                    fontWeight: FontWeight.bold,
+                    color: Colors.white,
+                  ),
+                ),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text(
+                      'Msimamizi',
+                      style: TextStyle(
+                        fontWeight: FontWeight.w700,
+                        fontSize: 13,
                       ),
-                      Text(
-                        _sessionRemainingLabel(),
-                        style: const TextStyle(
-                          fontSize: 10,
-                          color: Color(0xFF6B7280),
-                        ),
+                    ),
+                    Text(
+                      _sessionRemainingLabel(),
+                      style: const TextStyle(
+                        fontSize: 10.5,
+                        color: AdminColors.textSecondary,
                       ),
-                    ],
-                  ),
+                    ),
+                  ],
                 ),
-                IconButton(
-                  tooltip: 'Toka',
-                  onPressed: _adminLogout,
-                  icon: const Icon(
-                    Icons.logout,
-                    size: 18,
-                    color: Color(0xFF9CA3AF),
-                  ),
+              ),
+              IconButton(
+                tooltip: 'Toka',
+                onPressed: _adminLogout,
+                style: IconButton.styleFrom(
+                  backgroundColor: const Color(0x14EF4444),
                 ),
-              ],
+                icon: const Icon(
+                  Icons.logout_rounded,
+                  size: 17,
+                  color: Color(0xFFF87171),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          ClipRRect(
+            borderRadius: BorderRadius.circular(999),
+            child: TweenAnimationBuilder<double>(
+              tween: Tween(begin: 0, end: fraction),
+              duration: const Duration(milliseconds: 900),
+              curve: Curves.easeOutCubic,
+              builder: (context, v, _) => LinearProgressIndicator(
+                value: v,
+                minHeight: 5,
+                backgroundColor: const Color(0x14FFFFFF),
+                color: barColor,
+              ),
             ),
           ),
         ],
@@ -1869,51 +2277,97 @@ class _AdminScaffoldState extends State<AdminScaffold>
     );
   }
 
-  Widget _navRow(AdminPageId id, IconData icon, String label) {
+  Widget _navRow(AdminPageId id, {int badge = 0}) {
+    final (icon, label) = _navItems[id]!;
     final active = _page == id;
     return Padding(
-      padding: const EdgeInsets.only(bottom: 4),
+      padding: const EdgeInsets.only(bottom: 3),
       child: Material(
-        color: active ? const Color(0x1F6366F1) : Colors.transparent,
-        borderRadius: BorderRadius.circular(10),
+        color: Colors.transparent,
         child: InkWell(
-          borderRadius: BorderRadius.circular(10),
+          borderRadius: BorderRadius.circular(12),
+          hoverColor: const Color(0x0AFFFFFF),
           onTap: () => _navigate(id),
-          child: Container(
+          child: AnimatedContainer(
+            duration: const Duration(milliseconds: 260),
+            curve: Curves.easeOutCubic,
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 9),
             decoration: BoxDecoration(
-              border: Border(
-                left: BorderSide(
-                  color: active
-                      ? AdminColors.accentPrimary
-                      : Colors.transparent,
-                  width: 3,
-                ),
+              borderRadius: BorderRadius.circular(12),
+              gradient: active
+                  ? const LinearGradient(
+                      colors: [Color(0x336366F1), Color(0x0A6366F1)],
+                    )
+                  : null,
+              border: Border.all(
+                color: active ? const Color(0x336366F1) : Colors.transparent,
               ),
-              borderRadius: BorderRadius.circular(10),
             ),
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
             child: Row(
               children: [
-                SizedBox(
-                  width: 24,
+                AnimatedContainer(
+                  duration: const Duration(milliseconds: 260),
+                  width: 30,
+                  height: 30,
+                  decoration: BoxDecoration(
+                    borderRadius: BorderRadius.circular(9),
+                    gradient: active
+                        ? const LinearGradient(
+                            colors: [Color(0xFF6366F1), Color(0xFF9333EA)],
+                          )
+                        : null,
+                    color: active ? null : const Color(0x0AFFFFFF),
+                    boxShadow: active
+                        ? const [
+                            BoxShadow(
+                              color: Color(0x4D6366F1),
+                              blurRadius: 12,
+                              offset: Offset(0, 4),
+                            ),
+                          ]
+                        : null,
+                  ),
                   child: Icon(
                     icon,
-                    size: 18,
-                    color: active
-                        ? AdminColors.accentPrimary
-                        : const Color(0xFF94A3B8),
+                    size: 16,
+                    color: active ? Colors.white : const Color(0xFF94A3B8),
                   ),
                 ),
-                const SizedBox(width: 8),
-                Text(
-                  label,
-                  style: TextStyle(
-                    fontSize: 13,
-                    color: active
-                        ? AdminColors.accentPrimary
-                        : AdminColors.textPrimary,
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Text(
+                    label,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      fontSize: 13,
+                      fontWeight: active ? FontWeight.w700 : FontWeight.w500,
+                      color: active ? Colors.white : AdminColors.textPrimary,
+                    ),
                   ),
                 ),
+                if (badge > 0) ...[
+                  const _PulseDot(),
+                  const SizedBox(width: 6),
+                  Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 7,
+                      vertical: 2,
+                    ),
+                    decoration: BoxDecoration(
+                      color: const Color(0x33EF4444),
+                      borderRadius: BorderRadius.circular(999),
+                    ),
+                    child: Text(
+                      '$badge',
+                      style: const TextStyle(
+                        fontSize: 10,
+                        fontWeight: FontWeight.w800,
+                        color: Color(0xFFF87171),
+                      ),
+                    ),
+                  ),
+                ],
               ],
             ),
           ),
@@ -1922,67 +2376,116 @@ class _AdminScaffoldState extends State<AdminScaffold>
     );
   }
 
+  /// Floating bottom bar for phones; the active tab grows a pill behind its icon.
   Widget _bottomNav() {
-    const items = <(AdminPageId, IconData, String)>[
-      (AdminPageId.dashboard, Icons.dashboard_rounded, 'Dashibodi'),
-      (AdminPageId.users, Icons.groups_rounded, 'Watumiaji'),
-      (AdminPageId.channels, Icons.satellite_alt_rounded, 'Chaneli'),
-      (AdminPageId.slides, Icons.slideshow_rounded, 'Mabango'),
-      (AdminPageId.pricing, Icons.sell_rounded, 'Bei'),
-      (AdminPageId.settings, Icons.settings_rounded, 'Mipangilio'),
+    const items = <(AdminPageId, String)>[
+      (AdminPageId.dashboard, 'Dashibodi'),
+      (AdminPageId.users, 'Watumiaji'),
+      (AdminPageId.channels, 'Chaneli'),
+      (AdminPageId.notifications, 'Arifa'),
+      (AdminPageId.payments, 'Malipo'),
+      (AdminPageId.settings, 'Mipangilio'),
     ];
-    return Container(
+    final unsent = _reminderSummary?.expiringUnsent ?? 0;
+    return Padding(
       padding: EdgeInsets.fromLTRB(
-        4,
-        8,
-        4,
-        8 + MediaQuery.paddingOf(context).bottom,
+        12,
+        0,
+        12,
+        10 + MediaQuery.paddingOf(context).bottom,
       ),
-      decoration: const BoxDecoration(
-        color: Color(0xF2111827),
-        border: Border(top: BorderSide(color: Color(0x14FFFFFF))),
-      ),
-      child: Row(
-        mainAxisAlignment: MainAxisAlignment.spaceAround,
-        children: items.map((e) {
-          final active = _page == e.$1;
-          return Expanded(
-            child: InkWell(
-              onTap: () => _navigate(e.$1),
-              borderRadius: BorderRadius.circular(12),
-              child: Container(
-                padding: const EdgeInsets.symmetric(vertical: 6),
-                decoration: BoxDecoration(
-                  color: active ? const Color(0x1F6366F1) : Colors.transparent,
-                  borderRadius: BorderRadius.circular(12),
-                ),
+      child: Container(
+        height: 66,
+        padding: const EdgeInsets.symmetric(horizontal: 4),
+        decoration: BoxDecoration(
+          color: const Color(0xF2111827),
+          borderRadius: BorderRadius.circular(22),
+          border: Border.all(color: const Color(0x1AFFFFFF)),
+          boxShadow: const [
+            BoxShadow(
+              color: Color(0x80000000),
+              blurRadius: 28,
+              offset: Offset(0, 10),
+            ),
+          ],
+        ),
+        child: Row(
+          children: items.map((e) {
+            final active = _page == e.$1;
+            final color = active ? Colors.white : const Color(0xFF6B7280);
+            return Expanded(
+              child: GestureDetector(
+                behavior: HitTestBehavior.opaque,
+                onTap: () => _navigate(e.$1),
                 child: Column(
-                  mainAxisSize: MainAxisSize.min,
+                  mainAxisAlignment: MainAxisAlignment.center,
                   children: [
-                    Icon(
-                      e.$2,
-                      size: 16,
-                      color: active
-                          ? AdminColors.accentPrimary
-                          : const Color(0xFF6B7280),
+                    Stack(
+                      clipBehavior: Clip.none,
+                      children: [
+                        AnimatedContainer(
+                          duration: const Duration(milliseconds: 300),
+                          curve: Curves.easeOutCubic,
+                          padding: EdgeInsets.symmetric(
+                            horizontal: active ? 14 : 6,
+                            vertical: 5,
+                          ),
+                          decoration: BoxDecoration(
+                            borderRadius: BorderRadius.circular(999),
+                            gradient: active
+                                ? const LinearGradient(
+                                    colors: [
+                                      Color(0xFF6366F1),
+                                      Color(0xFF9333EA),
+                                    ],
+                                  )
+                                : null,
+                            boxShadow: active
+                                ? const [
+                                    BoxShadow(
+                                      color: Color(0x596366F1),
+                                      blurRadius: 14,
+                                      offset: Offset(0, 4),
+                                    ),
+                                  ]
+                                : null,
+                          ),
+                          child: Icon(
+                            _navItems[e.$1]!.$1,
+                            size: 19,
+                            color: color,
+                          ),
+                        ),
+                        if (e.$1 == AdminPageId.notifications && unsent > 0)
+                          const Positioned(
+                            right: 2,
+                            top: 0,
+                            child: _PulseDot(),
+                          ),
+                      ],
                     ),
                     const SizedBox(height: 4),
-                    Text(
-                      e.$3,
+                    AnimatedDefaultTextStyle(
+                      duration: const Duration(milliseconds: 200),
                       style: TextStyle(
-                        fontSize: 10,
-                        fontWeight: FontWeight.w600,
+                        fontSize: 9.5,
+                        fontWeight: active ? FontWeight.w800 : FontWeight.w600,
                         color: active
-                            ? AdminColors.accentPrimary
+                            ? const Color(0xFFC7D2FE)
                             : const Color(0xFF6B7280),
+                      ),
+                      child: Text(
+                        e.$2,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
                       ),
                     ),
                   ],
                 ),
               ),
-            ),
-          );
-        }).toList(),
+            );
+          }).toList(),
+        ),
       ),
     );
   }
@@ -1991,18 +2494,17 @@ class _AdminScaffoldState extends State<AdminScaffold>
     switch (_page) {
       case AdminPageId.dashboard:
         return _pageDashboard();
-      case AdminPageId.users:
-        return _pageUsers();
       case AdminPageId.channels:
         return _pageChannels();
       case AdminPageId.slides:
         return _pageSlides();
+      case AdminPageId.users:
       case AdminPageId.subscriptions:
-        return _pageSubscriptions();
+      case AdminPageId.payments:
+        // Virtualized pages with their own scroll view, see _ownScrollPage.
+        return const SizedBox.shrink();
       case AdminPageId.pricing:
         return _pagePricing();
-      case AdminPageId.payments:
-        return _pagePayments();
       case AdminPageId.notifications:
         return _pageNotifications();
       case AdminPageId.analytics:
@@ -2050,64 +2552,73 @@ class _AdminScaffoldState extends State<AdminScaffold>
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        _pageTitleRow(
-          title: 'Dashibodi ya Admin',
-          subtitle: _dashboardSubtitle(),
-          action: _btnPrimary(
-            label: 'Ongeza chaneli',
-            icon: Icons.add,
-            onTap: () => _showChannelEditor(),
+        FadeSlideIn(
+          child: _dashboardHero(
+            premiumUsers: premiumUsers,
+            totalUsers: totalUsers,
           ),
         ),
-        const SizedBox(height: 16),
+        const SizedBox(height: 18),
         _dashboardReminderCallout(),
         LayoutBuilder(
           builder: (context, c) {
             final w = c.maxWidth;
             final cols = w < 640 ? 2 : (w < 1100 ? 3 : 5);
-            return GridView.count(
+            final cards = [
+              _statCard(
+                label: 'Watumiaji wote',
+                value: loadingStats ? null : totalUsers ?? 0,
+                icon: Icons.groups_rounded,
+                iconBg: const Color(0x336366F1),
+                iconColor: const Color(0xFF818CF8),
+                onTap: () => _navigate(AdminPageId.users),
+              ),
+              _statCard(
+                label: 'Premium',
+                value: loadingStats ? null : premiumUsers ?? 0,
+                icon: Icons.workspace_premium_rounded,
+                iconBg: const Color(0x33F59E0B),
+                iconColor: const Color(0xFFFBBF24),
+                onTap: () => _navigate(AdminPageId.subscriptions),
+              ),
+              _statCard(
+                label: 'Bure',
+                value: loadingStats ? null : freeUsers ?? 0,
+                icon: Icons.person_outline_rounded,
+                iconBg: const Color(0x3394A3B8),
+                iconColor: const Color(0xFFCBD5E1),
+                onTap: () => _navigate(AdminPageId.users),
+              ),
+              _statCard(
+                label: 'Chaneli hai',
+                value: loadingStats ? null : activeChannels ?? 0,
+                icon: Icons.live_tv_rounded,
+                iconBg: const Color(0x3310B981),
+                iconColor: const Color(0xFF34D399),
+                onTap: () => _navigate(AdminPageId.channels),
+              ),
+              _statCard(
+                label: 'Mapato ya leo',
+                value: loadingStats ? null : revenue ?? 0,
+                format: fmtTzs,
+                icon: Icons.payments_rounded,
+                iconBg: const Color(0x33A855F7),
+                iconColor: const Color(0xFFC084FC),
+                onTap: () => _navigate(AdminPageId.payments),
+              ),
+            ];
+            return GridView(
               shrinkWrap: true,
               physics: const NeverScrollableScrollPhysics(),
-              crossAxisCount: cols,
-              crossAxisSpacing: 12,
-              mainAxisSpacing: 12,
-              childAspectRatio: cols <= 2 ? 1.12 : 1.28,
+              gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+                crossAxisCount: cols,
+                crossAxisSpacing: 12,
+                mainAxisSpacing: 12,
+                mainAxisExtent: 136,
+              ),
               children: [
-                _statCard(
-                  label: 'Watumiaji wote',
-                  value: loadingStats ? '…' : '${totalUsers ?? 0}',
-                  icon: Icons.groups_rounded,
-                  iconBg: const Color(0x336366F1),
-                  iconColor: const Color(0xFF818CF8),
-                ),
-                _statCard(
-                  label: 'Premium',
-                  value: loadingStats ? '…' : '${premiumUsers ?? 0}',
-                  icon: Icons.workspace_premium_rounded,
-                  iconBg: const Color(0x33F59E0B),
-                  iconColor: const Color(0xFFFBBF24),
-                ),
-                _statCard(
-                  label: 'Bure',
-                  value: loadingStats ? '…' : '${freeUsers ?? 0}',
-                  icon: Icons.person_outline_rounded,
-                  iconBg: const Color(0x3394A3B8),
-                  iconColor: const Color(0xFFCBD5E1),
-                ),
-                _statCard(
-                  label: 'Chaneli',
-                  value: loadingStats ? '…' : '${activeChannels ?? 0}',
-                  icon: Icons.satellite_alt_rounded,
-                  iconBg: const Color(0x3310B981),
-                  iconColor: const Color(0xFF34D399),
-                ),
-                _statCard(
-                  label: 'Mapato ya leo',
-                  value: loadingStats ? '…' : fmtTzs(revenue ?? 0),
-                  icon: Icons.attach_money_rounded,
-                  iconBg: const Color(0x33A855F7),
-                  iconColor: const Color(0xFFC084FC),
-                ),
+                for (var i = 0; i < cards.length; i++)
+                  FadeSlideIn(index: i + 1, child: cards[i]),
               ],
             );
           },
@@ -2214,8 +2725,9 @@ class _AdminScaffoldState extends State<AdminScaffold>
   /// "N vinaisha ndani ya siku 3 · M vimeisha" → opens the reminders page.
   Widget _dashboardReminderCallout() {
     final s = _reminderSummary;
-    if (s == null || (s.expiring == 0 && s.expired == 0))
+    if (s == null || (s.expiring == 0 && s.expired == 0)) {
       return const SizedBox.shrink();
+    }
     return Padding(
       padding: const EdgeInsets.only(bottom: 16),
       child: Material(
@@ -2247,8 +2759,8 @@ class _AdminScaffoldState extends State<AdminScaffold>
                       ),
                       Text(
                         s.expiringUnsent > 0
-                            ? '${s.expiringUnsent} bado hawajakumbushwa — bonyeza kutuma vikumbusho'
-                            : 'Bonyeza kuona watumiaji na kutuma vikumbusho',
+                            ? '${s.expiringUnsent} bado hawajapata reminder — bonyeza kutuma'
+                            : 'Bonyeza kuona watumiaji na kutuma reminder',
                         style: const TextStyle(
                           fontSize: 11.5,
                           color: AdminColors.textSecondary,
@@ -2269,98 +2781,321 @@ class _AdminScaffoldState extends State<AdminScaffold>
     );
   }
 
-  Widget _statCard({
-    required String label,
-    required String value,
-    required IconData icon,
-    required Color iconBg,
-    required Color iconColor,
+  /// Greeting card with the day's headline numbers and one-tap shortcuts to the common jobs.
+  Widget _dashboardHero({
+    required int? premiumUsers,
+    required int? totalUsers,
   }) {
-    return Container(
-      padding: const EdgeInsets.all(10),
-      decoration: BoxDecoration(
-        color: AdminColors.bgTertiary,
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: const Color(0x0DFFFFFF)),
+    final premiumShare = (totalUsers ?? 0) > 0
+        ? (premiumUsers ?? 0) / totalUsers!
+        : 0.0;
+    final actions = <(IconData, String, VoidCallback)>[
+      (Icons.add_rounded, 'Ongeza chaneli', () => _showChannelEditor()),
+      (Icons.campaign_rounded, 'Tuma arifa', () => _modalSendNotification()),
+      (
+        Icons.alarm_rounded,
+        'Tuma reminder',
+        () => _navigate(AdminPageId.notifications),
       ),
-      child: LayoutBuilder(
-        builder: (context, c) {
-          const headerH = 30.0;
-          final valueH = max(12.0, c.maxHeight - headerH);
-          return Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              SizedBox(
-                height: headerH,
-                child: Row(
-                  crossAxisAlignment: CrossAxisAlignment.center,
+      (
+        Icons.receipt_long_rounded,
+        'Malipo',
+        () => _navigate(AdminPageId.payments),
+      ),
+    ];
+    return Container(
+      clipBehavior: Clip.antiAlias,
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(24),
+        gradient: adminBrandGradient,
+        boxShadow: const [
+          BoxShadow(
+            color: Color(0x4D6366F1),
+            blurRadius: 32,
+            offset: Offset(0, 14),
+          ),
+        ],
+      ),
+      child: Stack(
+        children: [
+          // Decorative rings — purely visual.
+          Positioned(
+            right: -60,
+            top: -70,
+            child: Container(
+              width: 220,
+              height: 220,
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                border: Border.all(color: const Color(0x1FFFFFFF), width: 28),
+              ),
+            ),
+          ),
+          Positioned(
+            right: 90,
+            bottom: -90,
+            child: Container(
+              width: 170,
+              height: 170,
+              decoration: const BoxDecoration(
+                shape: BoxShape.circle,
+                color: Color(0x0FFFFFFF),
+              ),
+            ),
+          ),
+          Padding(
+            padding: const EdgeInsets.all(20),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
                   children: [
-                    Expanded(
-                      child: Text(
-                        label,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(
-                          color: AdminColors.textSecondary,
-                          fontSize: 11,
-                          fontWeight: FontWeight.w600,
-                          height: 1.15,
-                        ),
-                      ),
-                    ),
-                    const SizedBox(width: 6),
                     Container(
-                      width: 28,
-                      height: 28,
-                      decoration: BoxDecoration(
-                        color: iconBg,
-                        borderRadius: BorderRadius.circular(8),
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 10,
+                        vertical: 4,
                       ),
-                      child: Icon(icon, color: iconColor, size: 16),
+                      decoration: BoxDecoration(
+                        color: const Color(0x26FFFFFF),
+                        borderRadius: BorderRadius.circular(999),
+                      ),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Container(
+                            width: 6,
+                            height: 6,
+                            decoration: const BoxDecoration(
+                              color: Color(0xFF34D399),
+                              shape: BoxShape.circle,
+                            ),
+                          ),
+                          const SizedBox(width: 6),
+                          Text(
+                            _dashboardStats != null
+                                ? 'Moja kwa moja'
+                                : 'Inapakia…',
+                            style: const TextStyle(
+                              fontSize: 10.5,
+                              fontWeight: FontWeight.w700,
+                              color: Colors.white,
+                            ),
+                          ),
+                        ],
+                      ),
                     ),
                   ],
                 ),
-              ),
-              SizedBox(
-                height: valueH,
-                width: double.infinity,
-                child: Align(
-                  alignment: Alignment.bottomLeft,
-                  child: FittedBox(
-                    fit: BoxFit.scaleDown,
-                    alignment: Alignment.bottomLeft,
-                    child: Text(
-                      value,
-                      style: const TextStyle(
-                        fontSize: 22,
-                        fontWeight: FontWeight.w800,
-                        letterSpacing: -0.5,
-                      ),
-                    ),
+                const SizedBox(height: 12),
+                Text(
+                  '${adminGreeting()}, Msimamizi',
+                  style: const TextStyle(
+                    fontSize: 22,
+                    fontWeight: FontWeight.w900,
+                    color: Colors.white,
+                    letterSpacing: -0.4,
                   ),
                 ),
+                const SizedBox(height: 4),
+                Text(
+                  '${adminSwahiliDate()} · ${_dashboardSubtitle()}',
+                  style: const TextStyle(
+                    fontSize: 12,
+                    color: Color(0xD9FFFFFF),
+                  ),
+                ),
+                if ((totalUsers ?? 0) > 0) ...[
+                  const SizedBox(height: 16),
+                  Row(
+                    children: [
+                      Text(
+                        'Premium ${(premiumShare * 100).toStringAsFixed(1)}%',
+                        style: const TextStyle(
+                          fontSize: 11.5,
+                          fontWeight: FontWeight.w700,
+                          color: Colors.white,
+                        ),
+                      ),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: ClipRRect(
+                          borderRadius: BorderRadius.circular(999),
+                          child: TweenAnimationBuilder<double>(
+                            tween: Tween(begin: 0, end: premiumShare),
+                            duration: const Duration(milliseconds: 1100),
+                            curve: Curves.easeOutCubic,
+                            builder: (context, v, _) => LinearProgressIndicator(
+                              value: v,
+                              minHeight: 6,
+                              backgroundColor: const Color(0x33FFFFFF),
+                              color: const Color(0xFFFBBF24),
+                            ),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
+                const SizedBox(height: 18),
+                Wrap(
+                  spacing: 8,
+                  runSpacing: 8,
+                  children: [
+                    for (final a in actions)
+                      AdminPressable(
+                        onTap: a.$3,
+                        lift: 2,
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 12,
+                            vertical: 9,
+                          ),
+                          decoration: BoxDecoration(
+                            color: const Color(0x26FFFFFF),
+                            borderRadius: BorderRadius.circular(12),
+                            border: Border.all(color: const Color(0x33FFFFFF)),
+                          ),
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Icon(a.$1, size: 16, color: Colors.white),
+                              const SizedBox(width: 6),
+                              Text(
+                                a.$2,
+                                style: const TextStyle(
+                                  fontSize: 12,
+                                  fontWeight: FontWeight.w700,
+                                  color: Colors.white,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// [value] null = still loading (shimmer bar). Numbers count up and glide on refresh.
+  Widget _statCard({
+    required String label,
+    required num? value,
+    required IconData icon,
+    required Color iconBg,
+    required Color iconColor,
+    String Function(num v)? format,
+    VoidCallback? onTap,
+  }) {
+    final fmt = format ?? (num v) => v.round().toString();
+    return AdminPressable(
+      onTap: onTap,
+      child: Container(
+        padding: const EdgeInsets.all(14),
+        decoration: adminCardDecoration(glow: iconColor),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Container(
+                  width: 36,
+                  height: 36,
+                  decoration: BoxDecoration(
+                    color: iconBg,
+                    borderRadius: BorderRadius.circular(11),
+                    border: Border.all(
+                      color: iconColor.withValues(alpha: 0.25),
+                    ),
+                  ),
+                  child: Icon(icon, color: iconColor, size: 19),
+                ),
+                const Spacer(),
+                if (onTap != null)
+                  Icon(
+                    Icons.arrow_outward_rounded,
+                    size: 15,
+                    color: iconColor.withValues(alpha: 0.7),
+                  ),
+              ],
+            ),
+            const Spacer(),
+            SizedBox(
+              width: double.infinity,
+              child: FittedBox(
+                fit: BoxFit.scaleDown,
+                alignment: Alignment.centerLeft,
+                child: value == null
+                    ? Container(
+                        width: 70,
+                        height: 22,
+                        margin: const EdgeInsets.symmetric(vertical: 3),
+                        decoration: BoxDecoration(
+                          color: const Color(0x14FFFFFF),
+                          borderRadius: BorderRadius.circular(6),
+                        ),
+                      )
+                    : AnimatedCount(
+                        value: value,
+                        format: fmt,
+                        style: const TextStyle(
+                          fontSize: 24,
+                          fontWeight: FontWeight.w900,
+                          letterSpacing: -0.6,
+                        ),
+                      ),
               ),
-            ],
-          );
-        },
+            ),
+            const SizedBox(height: 2),
+            Text(
+              label,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(
+                color: AdminColors.textSecondary,
+                fontSize: 11.5,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }
 
   Widget _chartCard(String title, double height, Widget chart) {
     return Container(
-      padding: const EdgeInsets.all(16),
-      decoration: BoxDecoration(
-        color: AdminColors.bgTertiary,
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: const Color(0x0DFFFFFF)),
-      ),
+      padding: const EdgeInsets.all(18),
+      decoration: adminCardDecoration(),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text(
-            title,
-            style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 13),
+          Row(
+            children: [
+              Container(
+                width: 4,
+                height: 16,
+                decoration: BoxDecoration(
+                  gradient: adminBrandGradient,
+                  borderRadius: BorderRadius.circular(4),
+                ),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  title,
+                  style: const TextStyle(
+                    fontWeight: FontWeight.w700,
+                    fontSize: 13.5,
+                  ),
+                ),
+              ),
+            ],
           ),
           const SizedBox(height: 16),
           SizedBox(height: height, child: chart),
@@ -2568,11 +3303,7 @@ class _AdminScaffoldState extends State<AdminScaffold>
     }
     return Container(
       padding: const EdgeInsets.all(16),
-      decoration: BoxDecoration(
-        color: AdminColors.bgTertiary,
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: const Color(0x0DFFFFFF)),
-      ),
+      decoration: adminCardDecoration(),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
@@ -2778,7 +3509,7 @@ class _AdminScaffoldState extends State<AdminScaffold>
 
   // --- Users ---
   void _onUserSearchChanged(String _) {
-    setState(() {});
+    setState(() => _usersLimit = _usersBrowseLimit);
     _userSearchDebounce?.cancel();
     _userSearchDebounce = Timer(const Duration(milliseconds: 350), () {
       if (!mounted || !_hasAdminSession) return;
@@ -2786,593 +3517,293 @@ class _AdminScaffoldState extends State<AdminScaffold>
     });
   }
 
-  Widget _pageUsers() {
-    final q = _normalizedUserSearchQuery().toLowerCase();
-    // Prefer server-filtered rows when searching; light local filter is only a safety net.
-    final filtered = q.isEmpty
-        ? List<AdminUser>.from(_users)
-        : _users.where((u) {
-            final blob =
-                '${u.name} ${u.phone} ${u.deviceId ?? ''} ${u.displayDeviceId} ${u.status} ${u.subscription} ${u.id}'
-                    .toLowerCase();
-            return blob.contains(q);
-          }).toList();
-    filtered.sort((a, b) {
-      final c = b.createdAt.compareTo(a.createdAt);
-      if (c != 0) return c;
-      return b.id.compareTo(a.id);
-    });
-    final totalLabel = _usersTotal > 0 ? _usersTotal : _users.length;
-    final subtitle = q.isEmpty
-        ? '$totalLabel total · Device ID = kitambulisho cha Wasifu kwenye app'
-        : _usersSearchLoading
-        ? 'Inatafuta…'
-        : '${filtered.isNotEmpty ? (_usersMatched > 0 ? _usersMatched : filtered.length) : 0} matokeo · $totalLabel jumla';
+  static const _expiredColor = Color(0xFFFB923C);
+  static const _freeColor = Color(0xFF818CF8);
 
-    return LayoutBuilder(
-      builder: (context, constraints) {
-        final wideHeader = constraints.maxWidth >= 560;
-        return Column(
+  bool _userMatchesFilter(AdminUser u, String key) {
+    switch (key) {
+      case 'premium':
+        return u.effectivePremium;
+      case 'expired':
+        return !u.effectivePremium &&
+            (u.premiumUntil != null || u.adminAccessUntil != null);
+      case 'free':
+        return !u.effectivePremium &&
+            u.premiumUntil == null &&
+            u.adminAccessUntil == null;
+      case 'blocked':
+        return u.status == 'suspended';
+      default:
+        return true;
+    }
+  }
+
+  Map<String, int> _localUserCounts() => {
+    for (final k in _userFilterKeys)
+      k: k == 'all'
+          ? (_usersTotal > 0 ? _usersTotal : _users.length)
+          : _users.where((u) => _userMatchesFilter(u, k)).length,
+  };
+
+  /// Latest premium end, paid or admin-granted.
+  DateTime? _userAccessEnd(AdminUser u) {
+    final a = u.premiumUntil;
+    final b = u.adminAccessUntil;
+    if (a == null) return b;
+    if (b == null) return a;
+    return a.isAfter(b) ? a : b;
+  }
+
+  ({String label, Color color, IconData icon}) _userStatusMeta(AdminUser u) {
+    if (u.status == 'suspended') {
+      return (
+        label: 'Imezuiwa',
+        color: AdminColors.accentDanger,
+        icon: Icons.block_rounded,
+      );
+    }
+    final end = _userAccessEnd(u);
+    if (u.effectivePremium && end != null) {
+      final left = end.difference(DateTime.now());
+      final span = left.inDays >= 1
+          ? 'siku ${left.inDays}'
+          : left.inHours >= 1
+          ? 'saa ${left.inHours}'
+          : 'dak ${max(1, left.inMinutes)}';
+      return (
+        label: 'Premium · $span',
+        color: AdminColors.accentWarning,
+        icon: Icons.workspace_premium_rounded,
+      );
+    }
+    if (end != null) {
+      return (
+        label: 'Imeisha · ${_fmtDate(end.toLocal())}',
+        color: _expiredColor,
+        icon: Icons.history_rounded,
+      );
+    }
+    return (label: 'Bure', color: _freeColor, icon: Icons.person_rounded);
+  }
+
+  List<Color>? _userAvatarColors(AdminUser u) {
+    if (u.status == 'suspended') {
+      return const [Color(0xFFEF4444), Color(0xFF991B1B)];
+    }
+    if (u.effectivePremium) {
+      return const [Color(0xFFF59E0B), Color(0xFFD97706)];
+    }
+    if (_userAccessEnd(u) != null) {
+      return const [Color(0xFF64748B), Color(0xFF334155)];
+    }
+    return null;
+  }
+
+  void _setUsersFilter(int i) {
+    if (i == _usersFilter) return;
+    setState(() {
+      _usersFilter = i;
+      _usersLimit = _usersBrowseLimit;
+    });
+    unawaited(_searchUsersFromBackend());
+  }
+
+  void _loadMoreUsers() {
+    setState(() => _usersLimit = min(5000, _usersLimit + _usersBrowseLimit));
+    unawaited(_searchUsersFromBackend());
+  }
+
+  List<Widget> _userSlivers() {
+    final q = _normalizedUserSearchQuery();
+    final ql = q.toLowerCase();
+    final filterKey = _userFilterKeys[_usersFilter];
+    final list = _users.where((u) {
+      if (_usersLoadedFilter != filterKey &&
+          !_userMatchesFilter(u, filterKey)) {
+        return false;
+      }
+      // Rows already come from the server search; this only keeps typing responsive.
+      if (ql.isEmpty || !_usersSearchLoading) return true;
+      return '${u.name} ${u.phone} ${u.deviceId ?? ''} ${u.id}'
+          .toLowerCase()
+          .contains(ql);
+    }).toList();
+    final counts = _userCounts ?? _localUserCounts();
+    int count(String k) => counts[k] ?? 0;
+    final total = _usersTotal > 0 ? _usersTotal : _users.length;
+    final matched = _userCounts != null
+        ? count(filterKey)
+        : (_usersLoadedFilter == filterKey && _usersMatched > list.length
+              ? _usersMatched
+              : list.length);
+    final canLoadMore =
+        _usersLoadedFilter == filterKey &&
+        !_usersSearchLoading &&
+        matched > list.length &&
+        _users.length >= _usersLimit &&
+        _usersLimit < 5000;
+
+    return [
+      SliverToBoxAdapter(
+        child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            if (wideHeader)
-              Row(
-                crossAxisAlignment: CrossAxisAlignment.end,
-                children: [
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        const Text(
-                          'Watumiaji',
-                          style: TextStyle(
-                            fontSize: 24,
-                            fontWeight: FontWeight.w800,
-                          ),
-                        ),
-                        Text(
-                          subtitle,
-                          style: const TextStyle(
-                            fontSize: 12,
-                            color: AdminColors.textSecondary,
-                            height: 1.35,
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                  SizedBox(
-                    width: min(280, constraints.maxWidth * 0.42),
-                    child: TextField(
-                      controller: _userSearch,
-                      onChanged: _onUserSearchChanged,
-                      style: const TextStyle(fontSize: 12),
-                      textInputAction: TextInputAction.search,
-                      decoration: InputDecoration(
-                        hintText: 'Jina, simu, Device ID (WTV-…), USR-…',
-                        filled: true,
-                        fillColor: AdminColors.bgPrimary,
-                        contentPadding: const EdgeInsets.symmetric(
-                          horizontal: 12,
-                          vertical: 10,
-                        ),
-                        suffixIcon: _usersSearchLoading
-                            ? const Padding(
-                                padding: EdgeInsets.all(12),
-                                child: SizedBox(
-                                  width: 16,
-                                  height: 16,
-                                  child: CircularProgressIndicator(
-                                    strokeWidth: 2,
-                                  ),
-                                ),
-                              )
-                            : (q.isNotEmpty
-                                  ? IconButton(
-                                      tooltip: 'Futa',
-                                      icon: const Icon(
-                                        Icons.clear_rounded,
-                                        size: 18,
-                                      ),
-                                      onPressed: () {
-                                        _userSearch.clear();
-                                        _onUserSearchChanged('');
-                                      },
-                                    )
-                                  : null),
-                        enabledBorder: OutlineInputBorder(
-                          borderRadius: BorderRadius.circular(12),
-                          borderSide: const BorderSide(
-                            color: Color(0x1AFFFFFF),
-                          ),
-                        ),
-                      ),
-                    ),
-                  ),
-                ],
-              )
-            else ...[
-              const Text(
-                'Watumiaji',
-                style: TextStyle(fontSize: 24, fontWeight: FontWeight.w800),
-              ),
-              Text(
-                subtitle,
-                style: const TextStyle(
-                  fontSize: 12,
-                  color: AdminColors.textSecondary,
-                  height: 1.35,
-                ),
-              ),
-              const SizedBox(height: 10),
-              TextField(
-                controller: _userSearch,
-                onChanged: _onUserSearchChanged,
-                style: const TextStyle(fontSize: 12),
-                textInputAction: TextInputAction.search,
-                decoration: InputDecoration(
-                  hintText: 'Jina, simu, Device ID (WTV-…), USR-…',
-                  filled: true,
-                  fillColor: AdminColors.bgPrimary,
-                  contentPadding: const EdgeInsets.symmetric(
-                    horizontal: 12,
-                    vertical: 12,
-                  ),
-                  suffixIcon: _usersSearchLoading
-                      ? const Padding(
-                          padding: EdgeInsets.all(12),
-                          child: SizedBox(
-                            width: 16,
-                            height: 16,
-                            child: CircularProgressIndicator(strokeWidth: 2),
-                          ),
-                        )
-                      : (q.isNotEmpty
-                            ? IconButton(
-                                tooltip: 'Futa',
-                                icon: const Icon(Icons.clear_rounded, size: 18),
-                                onPressed: () {
-                                  _userSearch.clear();
-                                  _onUserSearchChanged('');
-                                },
-                              )
-                            : null),
-                  enabledBorder: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(12),
-                    borderSide: const BorderSide(color: Color(0x1AFFFFFF)),
-                  ),
-                ),
-              ),
-            ],
+            _pageTitleRow(
+              title: 'Watumiaji',
+              subtitle:
+                  '$total jumla · ${count('premium')} premium · ${count('blocked')} wamezuiwa',
+              action: _usersMenu(),
+            ),
             const SizedBox(height: 14),
-            Expanded(
-              child: filtered.isEmpty
-                  ? ListView(
-                      physics: const AlwaysScrollableScrollPhysics(),
-                      children: [
-                        const SizedBox(height: 48),
-                        Icon(
-                          q.isEmpty
-                              ? Icons.groups_outlined
-                              : Icons.search_off_rounded,
-                          size: 40,
-                          color: AdminColors.textSecondary,
-                        ),
-                        const SizedBox(height: 12),
-                        Text(
-                          _usersSearchLoading
-                              ? 'Inatafuta mtumiaji…'
-                              : q.isEmpty
-                              ? 'Hakuna watumiaji bado'
-                              : 'Hakuna matokeo ya "$q"',
-                          textAlign: TextAlign.center,
-                          style: const TextStyle(
-                            fontSize: 14,
-                            color: AdminColors.textSecondary,
-                          ),
-                        ),
-                        if (q.isNotEmpty && !_usersSearchLoading) ...[
-                          const SizedBox(height: 8),
-                          const Text(
-                            'Tumia Device ID kamili kutoka Wasifu (WTV-XXXX-XXXXXXXX)\nau ID ya ndani (USR-…).',
-                            textAlign: TextAlign.center,
-                            style: TextStyle(
-                              fontSize: 12,
-                              color: AdminColors.textSecondary,
-                              height: 1.4,
-                            ),
-                          ),
-                        ],
-                      ],
-                    )
-                  : ListView.separated(
-                      physics: const AlwaysScrollableScrollPhysics(),
-                      itemCount: filtered.length,
-                      separatorBuilder: (_, __) => const SizedBox(height: 10),
-                      itemBuilder: (context, i) => _userCard(filtered[i]),
-                    ),
+            AdminSearchField(
+              controller: _userSearch,
+              hint: 'Tafuta jina, simu, Device ID (WTV-…) au USR-…',
+              onChanged: _onUserSearchChanged,
+              loading: _usersSearchLoading,
             ),
-          ],
-        );
-      },
-    );
-  }
-
-  Widget _userCard(AdminUser u) {
-    final id = u.displayDeviceId;
-    return RepaintBoundary(
-      child: Container(
-        decoration: BoxDecoration(
-          borderRadius: BorderRadius.circular(18),
-          gradient: const LinearGradient(
-            begin: Alignment.topLeft,
-            end: Alignment.bottomRight,
-            colors: [Color(0xFF1A2332), Color(0xFF151C28)],
-          ),
-          border: Border.all(color: const Color(0x14FFFFFF)),
-          boxShadow: const [
-            BoxShadow(
-              color: Color(0x28000000),
-              blurRadius: 12,
-              offset: Offset(0, 4),
+            const SizedBox(height: 12),
+            AdminFilterChips(
+              options: [
+                AdminFilterOption('Wote', count: count('all')),
+                AdminFilterOption(
+                  'Premium',
+                  count: count('premium'),
+                  color: AdminColors.accentWarning,
+                ),
+                AdminFilterOption(
+                  'Zimeisha',
+                  count: count('expired'),
+                  color: _expiredColor,
+                ),
+                AdminFilterOption(
+                  'Bure',
+                  count: count('free'),
+                  color: _freeColor,
+                ),
+                AdminFilterOption(
+                  'Wamezuiwa',
+                  count: count('blocked'),
+                  color: AdminColors.accentDanger,
+                ),
+              ],
+              selected: _usersFilter,
+              onSelected: _setUsersFilter,
             ),
-          ],
-        ),
-        child: Padding(
-          padding: const EdgeInsets.all(14),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              Row(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Container(
-                    width: 44,
-                    height: 44,
-                    decoration: BoxDecoration(
-                      borderRadius: BorderRadius.circular(14),
-                      gradient: const LinearGradient(
-                        colors: [Color(0xFF6366F1), Color(0xFF8B5CF6)],
-                      ),
-                    ),
-                    alignment: Alignment.center,
-                    child: Text(
-                      u.name.length >= 2
-                          ? u.name.substring(0, 2).toUpperCase()
-                          : u.name.toUpperCase(),
-                      style: const TextStyle(
-                        fontWeight: FontWeight.w800,
-                        fontSize: 13,
-                        color: Colors.white,
-                      ),
-                    ),
-                  ),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          u.name,
-                          maxLines: 2,
-                          overflow: TextOverflow.ellipsis,
-                          style: const TextStyle(
-                            fontWeight: FontWeight.w700,
-                            fontSize: 15,
-                          ),
-                        ),
-                        const SizedBox(height: 4),
-                        Text(
-                          u.id,
-                          style: const TextStyle(
-                            fontSize: 10,
-                            color: AdminColors.textSecondary,
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                  _badge(
-                    _swStatus(u.status),
-                    u.status == 'active'
-                        ? AdminColors.accentSuccess
-                        : AdminColors.accentDanger,
-                  ),
-                ],
-              ),
-              const SizedBox(height: 12),
-              Container(
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 10,
-                  vertical: 8,
-                ),
-                decoration: BoxDecoration(
-                  color: const Color(0x33000000),
-                  borderRadius: BorderRadius.circular(12),
-                  border: Border.all(color: const Color(0x12FFFFFF)),
-                ),
-                child: Row(
-                  children: [
-                    const Icon(
-                      Icons.smartphone_rounded,
-                      size: 16,
-                      color: Color(0xFF818CF8),
-                    ),
-                    const SizedBox(width: 8),
-                    Expanded(
-                      child: SelectableText(
-                        id,
-                        style: const TextStyle(
-                          fontSize: 12,
-                          color: Color(0xFFE2E8F0),
-                          height: 1.25,
-                        ),
-                      ),
-                    ),
-                    Material(
-                      color: const Color(0x226366F1),
-                      borderRadius: BorderRadius.circular(10),
-                      child: InkWell(
-                        onTap: () {
-                          Clipboard.setData(ClipboardData(text: id));
-                          _showToast(
-                            'Device ID imenakiliwa',
-                            _ToastType.success,
-                          );
-                        },
-                        borderRadius: BorderRadius.circular(10),
-                        child: const Padding(
-                          padding: EdgeInsets.symmetric(
-                            horizontal: 10,
-                            vertical: 6,
-                          ),
-                          child: Row(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              Icon(
-                                Icons.copy_rounded,
-                                size: 14,
-                                color: Color(0xFF818CF8),
-                              ),
-                              SizedBox(width: 4),
-                              Text(
-                                'Nakili',
-                                style: TextStyle(
-                                  fontSize: 11,
-                                  fontWeight: FontWeight.w600,
-                                  color: Color(0xFF818CF8),
-                                ),
-                              ),
-                            ],
-                          ),
-                        ),
-                      ),
-                    ),
-                    const SizedBox(width: 6),
-                    IconButton(
-                      tooltip: 'Tuma arifa kwa mtumiaji huyu',
-                      visualDensity: VisualDensity.compact,
-                      onPressed: () => _modalSendNotification(deviceId: id),
-                      icon: const Icon(
-                        Icons.notifications_active_outlined,
-                        size: 18,
-                        color: Color(0xFF818CF8),
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-              const SizedBox(height: 10),
-              Wrap(
-                spacing: 10,
-                runSpacing: 8,
-                crossAxisAlignment: WrapCrossAlignment.center,
-                children: [
-                  _miniLabel(Icons.phone_rounded, u.phone),
-                  _planBadgeCell(u),
-                  _adminAccessInline(u),
-                ],
-              ),
-              const SizedBox(height: 12),
-              const Divider(height: 1, color: Color(0x14FFFFFF)),
-              const SizedBox(height: 10),
-              Wrap(
-                spacing: 8,
-                runSpacing: 8,
-                alignment: WrapAlignment.start,
-                children: [
-                  _userActionChip(
-                    icon: Icons.edit_outlined,
-                    label: 'Jina',
-                    color: const Color(0xFF818CF8),
-                    onTap: () async {
-                      final n = await _promptText('Badilisha jina', u.name);
-                      if (n != null && n.isNotEmpty) {
-                        setState(() => u.name = n);
-                        try {
-                          await _syncUserToBackend(u, {'name': n});
-                        } catch (_) {}
-                      }
-                      if (n != null && n.isNotEmpty)
-                        _showToast('Imehakikiwa', _ToastType.success);
-                    },
-                  ),
-                  _userActionChip(
-                    icon: Icons.schedule_rounded,
-                    label: 'Muda wa premium',
-                    color: const Color(0xFF34D399),
-                    onTap: u.status == 'suspended'
-                        ? null
-                        : () => _showGrantAccessDialog(u),
-                  ),
-                  _userActionChip(
-                    icon: Icons.workspace_premium_outlined,
-                    label: u.subscription == 'premium'
-                        ? 'Malipo: ON'
-                        : 'Malipo: OFF',
-                    color: u.subscription == 'premium'
-                        ? const Color(0xFFFBBF24)
-                        : const Color(0xFF6B7280),
-                    onTap: () async {
-                      final turningOff = u.subscription == 'premium';
-                      final next = turningOff ? 'free' : 'premium';
-                      try {
-                        if (turningOff) {
-                          await _revokeAllPremiumAccess(u, confirm: false);
-                        } else {
-                          // Backend materializes premium_until (never forever-null).
-                          await _syncUserToBackend(u, {'subscription': next});
-                          if (mounted) {
-                            setState(() {});
-                            _showToast(
-                              'Mfumo: premium (${_fmtAccessDate(u.premiumUntil ?? DateTime.now().add(const Duration(days: 30)))})',
-                              _ToastType.success,
-                            );
-                          }
-                        }
-                      } catch (e) {
-                        _showToast('Imeshindwa: $e', _ToastType.error);
-                      }
-                    },
-                  ),
-                  if (u.effectivePremium)
-                    _userActionChip(
-                      icon: Icons.remove_circle_outline,
-                      label: 'Ondoa premium',
-                      color: const Color(0xFFEF4444),
-                      onTap: () async {
-                        try {
-                          await _revokeAllPremiumAccess(u);
-                        } catch (e) {
-                          if (mounted)
-                            _showToast('Imeshindwa: $e', _ToastType.error);
-                        }
-                      },
-                    ),
-                  _userActionChip(
-                    icon: u.status == 'suspended'
-                        ? Icons.lock_open_rounded
-                        : Icons.block_rounded,
-                    label: u.status == 'suspended'
-                        ? 'Fungua kifaa'
-                        : 'Zuia kifaa',
-                    color: u.status == 'suspended'
-                        ? AdminColors.accentSuccess
-                        : AdminColors.accentDanger,
-                    onTap: () async {
-                      final blocking = u.status != 'suspended';
-                      try {
-                        await _syncUserToBackend(u, {
-                          'status': blocking ? 'suspended' : 'active',
-                        });
-                        if (mounted) {
-                          setState(() {});
-                          _showToast(
-                            blocking
-                                ? 'Kifaa kimezuiwa — hakitaweza kutazama channel yoyote'
-                                : 'Kifaa kimefunguliwa',
-                            _ToastType.success,
-                          );
-                        }
-                      } catch (e) {
-                        if (mounted)
-                          _showToast('Imeshindwa: $e', _ToastType.error);
-                      }
-                    },
-                  ),
-                ],
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-
-  Widget _miniLabel(IconData icon, String text) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-      decoration: BoxDecoration(
-        color: const Color(0x22000000),
-        borderRadius: BorderRadius.circular(10),
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Icon(icon, size: 14, color: AdminColors.textSecondary),
-          const SizedBox(width: 6),
-          Flexible(
-            child: Text(
-              text,
+            const SizedBox(height: 12),
+            Text(
+              list.isEmpty
+                  ? ''
+                  : 'Inaonyesha ${list.length} kati ya $matched · gusa mtumiaji kuona maelezo',
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
               style: const TextStyle(
-                fontSize: 12,
+                fontSize: 11.5,
                 color: AdminColors.textSecondary,
               ),
             ),
-          ),
-        ],
+            const SizedBox(height: 10),
+          ],
+        ),
       ),
+      if (list.isEmpty)
+        SliverToBoxAdapter(
+          child: _emptyListState(
+            q.isEmpty ? Icons.groups_outlined : Icons.search_off_rounded,
+            _usersSearchLoading
+                ? 'Inapakia watumiaji…'
+                : q.isNotEmpty
+                ? 'Hakuna matokeo ya "$q".\nTumia Device ID kamili (WTV-XXXX-XXXXXXXX) au USR-….'
+                : 'Hakuna watumiaji katika kundi hili.',
+          ),
+        )
+      else
+        SliverGrid(
+          gridDelegate: const SliverGridDelegateWithMaxCrossAxisExtent(
+            maxCrossAxisExtent: 640,
+            mainAxisExtent: 68,
+            mainAxisSpacing: 10,
+            crossAxisSpacing: 10,
+          ),
+          delegate: SliverChildBuilderDelegate(
+            (context, i) => _userTile(list[i]),
+            childCount: list.length,
+          ),
+        ),
+      if (canLoadMore)
+        SliverToBoxAdapter(
+          child: Padding(
+            padding: const EdgeInsets.only(top: 16),
+            child: Center(
+              child: _btnOutline(
+                label: 'Onyesha zaidi (${matched - list.length} wamebaki)',
+                icon: Icons.expand_more_rounded,
+                onTap: _loadMoreUsers,
+              ),
+            ),
+          ),
+        ),
+    ];
+  }
+
+  Widget _usersMenu() {
+    PopupMenuItem<String> item(String value, IconData icon, String label) =>
+        PopupMenuItem(
+          value: value,
+          child: Row(
+            children: [
+              Icon(icon, size: 18, color: const Color(0xFF818CF8)),
+              const SizedBox(width: 10),
+              Text(label, style: const TextStyle(fontSize: 13)),
+            ],
+          ),
+        );
+    return PopupMenuButton<String>(
+      tooltip: 'Zaidi',
+      color: AdminColors.bgSecondary,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+      icon: const Icon(
+        Icons.more_vert_rounded,
+        color: AdminColors.textSecondary,
+      ),
+      onSelected: (v) {
+        switch (v) {
+          case 'refresh':
+            unawaited(_searchUsersFromBackend());
+          case 'notify':
+            _modalSendNotification();
+          case 'revoke':
+            unawaited(_showBulkRevokePremiumDialog());
+        }
+      },
+      itemBuilder: (_) => [
+        item('refresh', Icons.refresh_rounded, 'Onyesha upya'),
+        item('notify', Icons.campaign_outlined, 'Tuma arifa kwa wote'),
+        item('revoke', Icons.remove_circle_outline, 'Ondoa premium kwa wengi'),
+      ],
     );
   }
 
-  Widget _adminAccessInline(AdminUser u) {
-    final end = u.adminAccessUntil;
-    if (end == null) {
-      return Container(
-        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-        decoration: BoxDecoration(
-          color: const Color(0x22000000),
-          borderRadius: BorderRadius.circular(10),
-        ),
-        child: const Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(Icons.timer_off_outlined, size: 14, color: Color(0xFF6B7280)),
-            SizedBox(width: 6),
-            Text(
-              'Msimamizi: —',
-              style: TextStyle(fontSize: 11, color: AdminColors.textSecondary),
-            ),
-          ],
-        ),
-      );
-    }
-    if (!end.isAfter(DateTime.now())) {
-      return Container(
-        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-        decoration: BoxDecoration(
-          color: const Color(0x22000000),
-          borderRadius: BorderRadius.circular(10),
-        ),
-        child: const Text(
-          'Msimamizi: Imeisha',
-          style: TextStyle(fontSize: 11, color: Color(0xFF9CA3AF)),
-        ),
-      );
-    }
+  Widget _userStatusPill(({String label, Color color, IconData icon}) meta) {
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
       decoration: BoxDecoration(
-        color: const Color(0x2234D399),
-        borderRadius: BorderRadius.circular(10),
-        border: Border.all(color: const Color(0x2234D399)),
+        color: meta.color.withValues(alpha: 0.14),
+        borderRadius: BorderRadius.circular(999),
       ),
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          const Icon(Icons.timer_rounded, size: 14, color: Color(0xFF34D399)),
-          const SizedBox(width: 6),
+          Icon(meta.icon, size: 11, color: meta.color),
+          const SizedBox(width: 4),
           Flexible(
             child: Text(
-              '${_humanRemaining(end)} · hadi ${_fmtAccessDate(end)}',
-              maxLines: 2,
+              meta.label,
+              maxLines: 1,
               overflow: TextOverflow.ellipsis,
-              style: const TextStyle(
-                fontSize: 11,
-                color: Color(0xFFBEF264),
-                fontWeight: FontWeight.w500,
+              style: TextStyle(
+                fontSize: 10.5,
+                fontWeight: FontWeight.w700,
+                color: meta.color,
               ),
             ),
           ),
@@ -3381,35 +3812,119 @@ class _AdminScaffoldState extends State<AdminScaffold>
     );
   }
 
-  Widget _userActionChip({
-    required IconData icon,
-    required String label,
-    required Color color,
-    VoidCallback? onTap,
-  }) {
+  Widget _userTile(AdminUser u) {
+    final blocked = u.status == 'suspended';
+    return RepaintBoundary(
+      child: AdminPressable(
+        lift: 1,
+        pressedScale: 0.99,
+        onTap: () => _openUserSheet(u),
+        child: Container(
+          padding: const EdgeInsets.fromLTRB(12, 0, 10, 0),
+          decoration: adminCardDecoration(
+            radius: 16,
+            shadow: false,
+            glow: blocked ? AdminColors.accentDanger : null,
+          ),
+          child: LayoutBuilder(
+            builder: (context, c) => Row(
+              children: [
+                AdminAvatar(u.name, size: 40, colors: _userAvatarColors(u)),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        u.name,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          fontSize: 14,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                      const SizedBox(height: 5),
+                      _userStatusPill(_userStatusMeta(u)),
+                    ],
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Tooltip(
+                  message: 'Hariri',
+                  child: Material(
+                    color: const Color(0x1A6366F1),
+                    shape: const CircleBorder(),
+                    child: InkWell(
+                      customBorder: const CircleBorder(),
+                      onTap: () => _openUserSheet(u),
+                      child: const SizedBox(
+                        width: 36,
+                        height: 36,
+                        child: Icon(
+                          Icons.edit_rounded,
+                          size: 17,
+                          color: Color(0xFF818CF8),
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                _userBlockButton(u, compact: c.maxWidth < 320),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _userBlockButton(AdminUser u, {bool compact = false}) {
+    final blocked = u.status == 'suspended';
+    final busy = _userBusy.contains(u.id);
+    final color = blocked
+        ? AdminColors.accentSuccess
+        : AdminColors.accentDanger;
+    final label = blocked
+        ? (compact ? 'Fungua' : 'Fungua kifaa')
+        : (compact ? 'Zuia' : 'Zuia kifaa');
     return Material(
-      color: const Color(0x18FFFFFF),
-      borderRadius: BorderRadius.circular(12),
+      color: color.withValues(alpha: 0.12),
+      shape: StadiumBorder(
+        side: BorderSide(color: color.withValues(alpha: 0.35)),
+      ),
       child: InkWell(
-        onTap: onTap,
-        borderRadius: BorderRadius.circular(12),
+        customBorder: const StadiumBorder(),
+        onTap: busy ? null : () => unawaited(_toggleUserBlock(u)),
         child: Padding(
           padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
           child: Row(
             mainAxisSize: MainAxisSize.min,
             children: [
-              Icon(
-                icon,
-                size: 16,
-                color: onTap == null ? const Color(0xFF4B5563) : color,
-              ),
+              if (busy)
+                SizedBox(
+                  width: 13,
+                  height: 13,
+                  child: CircularProgressIndicator(
+                    strokeWidth: 1.8,
+                    color: color,
+                  ),
+                )
+              else
+                Icon(
+                  blocked ? Icons.lock_open_rounded : Icons.block_rounded,
+                  size: 14,
+                  color: color,
+                ),
               const SizedBox(width: 6),
               Text(
                 label,
                 style: TextStyle(
                   fontSize: 12,
-                  fontWeight: FontWeight.w600,
-                  color: onTap == null ? const Color(0xFF4B5563) : Colors.white,
+                  fontWeight: FontWeight.w700,
+                  color: color,
                 ),
               ),
             ],
@@ -3419,39 +3934,379 @@ class _AdminScaffoldState extends State<AdminScaffold>
     );
   }
 
-  Widget _planBadgeCell(AdminUser u) {
-    final premium = u.effectivePremium;
-    final paid = u.subscription == 'premium';
-    final adm = u.adminAccessActive;
-    String? source;
-    if (paid && adm) {
-      source = 'Malipo + msimamizi';
-    } else if (paid) {
-      source = 'Malipo (mifumo)';
-    } else if (adm) {
-      source = 'Msimamizi pekee';
+  /// Blocks (after confirming) or unblocks the device. [onBusy] lets an open sheet repaint.
+  Future<void> _toggleUserBlock(AdminUser u, {VoidCallback? onBusy}) async {
+    if (_userBusy.contains(u.id)) return;
+    final blocking = u.status != 'suspended';
+    if (blocking) {
+      final ok = await _showDeleteConfirmModal(
+        title: 'Zuia kifaa hiki?',
+        message:
+            '"${u.name}" (${u.displayDeviceId}) hataweza kutazama channel yoyote hadi umfungue tena.',
+        confirmLabel: 'Zuia kifaa',
+      );
+      if (!ok || !mounted) return;
     }
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        _badge(
-          premium ? 'premium' : 'free',
-          premium ? AdminColors.accentWarning : const Color(0xFF6B7280),
-        ),
-        if (source != null)
-          Padding(
-            padding: const EdgeInsets.only(top: 4),
-            child: Text(
-              source,
-              style: const TextStyle(
-                fontSize: 9,
-                color: AdminColors.textSecondary,
-                height: 1.2,
-              ),
+    setState(() => _userBusy.add(u.id));
+    onBusy?.call();
+    try {
+      await _syncUserToBackend(u, {
+        'status': blocking ? 'suspended' : 'active',
+      });
+      if (!mounted) return;
+      _showToast(
+        blocking
+            ? 'Kifaa kimezuiwa — hakitaweza kutazama channel yoyote'
+            : 'Kifaa kimefunguliwa',
+        _ToastType.success,
+      );
+      unawaited(_searchUsersFromBackend(silent: true));
+    } catch (e) {
+      if (mounted) _showToast('Imeshindwa: $e', _ToastType.error);
+    } finally {
+      if (mounted) setState(() => _userBusy.remove(u.id));
+      onBusy?.call();
+    }
+  }
+
+  Future<void> _renameUser(AdminUser u) async {
+    final n = (await _promptText('Badilisha jina', u.name))?.trim();
+    if (n == null || n.isEmpty || n == u.name || !mounted) return;
+    final old = u.name;
+    setState(() => u.name = n);
+    try {
+      await _syncUserToBackend(u, {'name': n});
+      if (mounted) _showToast('Jina limebadilishwa', _ToastType.success);
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => u.name = old);
+      _showToast('Imeshindwa: $e', _ToastType.error);
+    }
+  }
+
+  Widget _userSheetAction({
+    required IconData icon,
+    required String label,
+    required Color color,
+    String? hint,
+    VoidCallback? onTap,
+  }) {
+    final enabled = onTap != null;
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 8),
+      child: Material(
+        color: const Color(0x0DFFFFFF),
+        borderRadius: BorderRadius.circular(14),
+        child: InkWell(
+          borderRadius: BorderRadius.circular(14),
+          onTap: onTap,
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+            child: Row(
+              children: [
+                Container(
+                  width: 34,
+                  height: 34,
+                  decoration: BoxDecoration(
+                    color: color.withValues(alpha: enabled ? 0.16 : 0.06),
+                    borderRadius: BorderRadius.circular(10),
+                  ),
+                  child: Icon(
+                    icon,
+                    size: 17,
+                    color: enabled ? color : const Color(0xFF4B5563),
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        label,
+                        style: TextStyle(
+                          fontSize: 13,
+                          fontWeight: FontWeight.w600,
+                          color: enabled ? null : const Color(0xFF6B7280),
+                        ),
+                      ),
+                      if (hint != null)
+                        Text(
+                          hint,
+                          style: const TextStyle(
+                            fontSize: 11,
+                            color: AdminColors.textSecondary,
+                          ),
+                        ),
+                    ],
+                  ),
+                ),
+                const Icon(
+                  Icons.chevron_right_rounded,
+                  size: 18,
+                  color: Color(0xFF4B5563),
+                ),
+              ],
             ),
           ),
-      ],
+        ),
+      ),
+    );
+  }
+
+  /// Everything the tile hides: device, phone, premium windows, and the edit actions.
+  void _openUserSheet(AdminUser u) {
+    showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: AdminColors.bgSecondary,
+      constraints: const BoxConstraints(maxWidth: 560),
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+      ),
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setLocal) {
+          final blocked = u.status == 'suspended';
+          final busy = _userBusy.contains(u.id);
+          void refresh() {
+            if (ctx.mounted) setLocal(() {});
+          }
+
+          Future<void> run(Future<void> Function() action) async {
+            await action();
+            if (mounted) setState(() {});
+            refresh();
+          }
+
+          Widget row(String label, String value, {bool copy = false}) {
+            return Padding(
+              padding: const EdgeInsets.symmetric(vertical: 7),
+              child: Row(
+                children: [
+                  SizedBox(
+                    width: 130,
+                    child: Text(
+                      label,
+                      style: const TextStyle(
+                        fontSize: 12,
+                        color: AdminColors.textSecondary,
+                      ),
+                    ),
+                  ),
+                  Expanded(
+                    child: Text(
+                      value.isEmpty ? '—' : value,
+                      style: const TextStyle(
+                        fontSize: 12.5,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ),
+                  if (copy && value.isNotEmpty)
+                    InkWell(
+                      borderRadius: BorderRadius.circular(8),
+                      onTap: () {
+                        Clipboard.setData(ClipboardData(text: value));
+                        _showToast('Imenakiliwa', _ToastType.success);
+                      },
+                      child: const Padding(
+                        padding: EdgeInsets.all(4),
+                        child: Icon(
+                          Icons.copy_rounded,
+                          size: 15,
+                          color: Color(0xFF818CF8),
+                        ),
+                      ),
+                    ),
+                ],
+              ),
+            );
+          }
+
+          String window(DateTime? end) {
+            if (end == null) return '';
+            final local = end.toLocal();
+            return local.isAfter(DateTime.now())
+                ? '${_fmtAccessDate(local)} · ${_humanRemaining(local).toLowerCase()}'
+                : '${_fmtAccessDate(local)} · imeisha';
+          }
+
+          final phone = u.phone.trim();
+          return SafeArea(
+            child: SingleChildScrollView(
+              padding: const EdgeInsets.fromLTRB(20, 10, 20, 20),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Center(
+                    child: Container(
+                      width: 40,
+                      height: 4,
+                      decoration: BoxDecoration(
+                        color: const Color(0x33FFFFFF),
+                        borderRadius: BorderRadius.circular(99),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 18),
+                  Row(
+                    children: [
+                      AdminAvatar(
+                        u.name,
+                        size: 52,
+                        colors: _userAvatarColors(u),
+                      ),
+                      const SizedBox(width: 14),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              u.name,
+                              maxLines: 2,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(
+                                fontSize: 19,
+                                fontWeight: FontWeight.w900,
+                              ),
+                            ),
+                            const SizedBox(height: 6),
+                            _userStatusPill(_userStatusMeta(u)),
+                          ],
+                        ),
+                      ),
+                      IconButton(
+                        tooltip: 'Funga',
+                        onPressed: () => Navigator.pop(ctx),
+                        icon: const Icon(
+                          Icons.close_rounded,
+                          color: AdminColors.textSecondary,
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 16),
+                  Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 14,
+                      vertical: 6,
+                    ),
+                    decoration: adminCardDecoration(radius: 16, shadow: false),
+                    child: Column(
+                      children: [
+                        row('Device ID', u.displayDeviceId, copy: true),
+                        row(
+                          'Simu',
+                          phone.toUpperCase() == 'N/A' ? '' : phone,
+                          copy: true,
+                        ),
+                        row('Premium ya malipo', window(u.premiumUntil)),
+                        row('Muda wa msimamizi', window(u.adminAccessUntil)),
+                        row(
+                          'Alijiunga',
+                          '${_fmtDate(u.createdAt.toLocal())} · ${adminTimeAgo(u.createdAt)}',
+                        ),
+                        row('USR ID', u.id, copy: true),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: 18),
+                  const Text(
+                    'VITENDO',
+                    style: TextStyle(
+                      fontSize: 10.5,
+                      fontWeight: FontWeight.w800,
+                      letterSpacing: 1.2,
+                      color: Color(0xFF64748B),
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  _userSheetAction(
+                    icon: Icons.edit_rounded,
+                    label: 'Badilisha jina',
+                    color: _freeColor,
+                    onTap: () => run(() => _renameUser(u)),
+                  ),
+                  _userSheetAction(
+                    icon: Icons.more_time_rounded,
+                    label: 'Ongeza muda wa premium',
+                    hint: blocked ? 'Fungua kifaa kwanza' : null,
+                    color: AdminColors.accentSuccess,
+                    onTap: blocked
+                        ? null
+                        : () => run(() => _showGrantAccessDialog(u)),
+                  ),
+                  _userSheetAction(
+                    icon: Icons.notifications_active_outlined,
+                    label: 'Tuma arifa kwa mtumiaji huyu',
+                    color: _freeColor,
+                    onTap: () {
+                      Navigator.pop(ctx);
+                      _modalSendNotification(deviceId: u.displayDeviceId);
+                    },
+                  ),
+                  if (u.effectivePremium)
+                    _userSheetAction(
+                      icon: Icons.remove_circle_outline_rounded,
+                      label: 'Ondoa premium',
+                      hint: 'Malipo na muda wa msimamizi vitaondolewa',
+                      color: AdminColors.accentDanger,
+                      onTap: () => run(() => _revokeAllPremiumAccess(u)),
+                    ),
+                  const SizedBox(height: 10),
+                  FilledButton.icon(
+                    onPressed: busy
+                        ? null
+                        : () => run(() => _toggleUserBlock(u, onBusy: refresh)),
+                    style: FilledButton.styleFrom(
+                      backgroundColor: blocked
+                          ? AdminColors.accentSuccess
+                          : AdminColors.accentDanger,
+                      foregroundColor: Colors.white,
+                      padding: const EdgeInsets.symmetric(vertical: 14),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(14),
+                      ),
+                    ),
+                    icon: busy
+                        ? const SizedBox(
+                            width: 16,
+                            height: 16,
+                            child: CircularProgressIndicator(
+                              strokeWidth: 2,
+                              color: Colors.white,
+                            ),
+                          )
+                        : Icon(
+                            blocked
+                                ? Icons.lock_open_rounded
+                                : Icons.block_rounded,
+                            size: 18,
+                          ),
+                    label: Text(
+                      blocked ? 'Fungua kifaa' : 'Zuia kifaa',
+                      style: const TextStyle(fontWeight: FontWeight.w700),
+                    ),
+                  ),
+                  if (!blocked) ...[
+                    const SizedBox(height: 8),
+                    const Text(
+                      'Kifaa kilichozuiwa hakiwezi kutazama channel yoyote, hata kikiwa na premium.',
+                      textAlign: TextAlign.center,
+                      style: TextStyle(
+                        fontSize: 11,
+                        height: 1.4,
+                        color: AdminColors.textSecondary,
+                      ),
+                    ),
+                  ],
+                ],
+              ),
+            ),
+          );
+        },
+      ),
     );
   }
 
@@ -3477,10 +4332,12 @@ class _AdminScaffoldState extends State<AdminScaffold>
     final sub = _s(j['subscription']);
     if (sub.isNotEmpty) u.subscription = sub;
     // Always overwrite dates — null from server means access was removed.
-    if (j.containsKey('premium_until'))
+    if (j.containsKey('premium_until')) {
       u.premiumUntil = _dt(j['premium_until']);
-    if (j.containsKey('admin_access_until'))
+    }
+    if (j.containsKey('admin_access_until')) {
       u.adminAccessUntil = _dt(j['admin_access_until']);
+    }
   }
 
   Future<void> _syncUserToBackend(
@@ -3510,7 +4367,7 @@ class _AdminScaffoldState extends State<AdminScaffold>
     bool confirm = true,
   }) async {
     if (!_hasAdminSession) {
-      _showToast('Hakuna kikao cha msimamizi', _ToastType.error);
+      _showToast('Hakuna login cha msimamizi', _ToastType.error);
       return;
     }
     if (confirm) {
@@ -3768,7 +4625,7 @@ class _AdminScaffoldState extends State<AdminScaffold>
 
   Future<void> _showBulkRevokePremiumDialog() async {
     if (!_hasAdminSession) {
-      _showToast('Hakuna kikao cha msimamizi', _ToastType.error);
+      _showToast('Hujaingia (login) kama msimamizi', _ToastType.error);
       return;
     }
 
@@ -4607,10 +5464,7 @@ class _AdminScaffoldState extends State<AdminScaffold>
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  const Text(
-                    'Chaneli',
-                    style: TextStyle(fontSize: 24, fontWeight: FontWeight.w800),
-                  ),
+                  const AdminPageHeading('Chaneli'),
                   Text(
                     '${_channels.length} channels',
                     style: const TextStyle(
@@ -4673,11 +5527,7 @@ class _AdminScaffoldState extends State<AdminScaffold>
                   final ch = _channels[i];
                   return RepaintBoundary(
                     child: Container(
-                      decoration: BoxDecoration(
-                        color: AdminColors.bgTertiary,
-                        borderRadius: BorderRadius.circular(16),
-                        border: Border.all(color: const Color(0x0DFFFFFF)),
-                      ),
+                      decoration: adminCardDecoration(),
                       clipBehavior: Clip.antiAlias,
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -6187,84 +7037,265 @@ class _AdminScaffoldState extends State<AdminScaffold>
   );
 
   // --- Subscriptions ---
-  Widget _pageSubscriptions() {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        const Text(
-          'Usajili',
-          style: TextStyle(fontSize: 24, fontWeight: FontWeight.w800),
-        ),
-        const SizedBox(height: 4),
-        const Text(
-          'Waliobakiza siku 3 au chini wanaonyeshwa kwa rangi ya njano. Tuma vikumbusho kupitia ukurasa wa "Arifa na vikumbusho".',
-          style: TextStyle(fontSize: 12, color: AdminColors.textSecondary),
-        ),
-        const SizedBox(height: 12),
-        _tableWrap(
-          columns: const [
-            'ID',
-            'Mtumiaji',
-            'Kifurushi',
-            'Bei',
-            'Tarehe ya kuisha',
-            'Muda uliobaki',
-            'Hali',
-          ],
-          rows: _subscriptions
-              .map(
-                (s) => [
-                  Text(
-                    s.id,
-                    style: const TextStyle(
-                      fontSize: 12,
-                      color: AdminColors.textSecondary,
-                    ),
-                  ),
-                  Text(s.userName, style: const TextStyle(fontSize: 12)),
-                  _planBadge(s.plan),
-                  Text(fmtTzs(s.price), style: const TextStyle(fontSize: 12)),
-                  Text(
-                    _fmtDate(s.endDate),
-                    style: const TextStyle(
-                      fontSize: 12,
-                      color: AdminColors.textSecondary,
-                    ),
-                  ),
-                  _subscriptionLeftBadge(s.endDate),
-                  _badge(
-                    _swStatus(s.status),
-                    s.status == 'active'
-                        ? AdminColors.accentSuccess
-                        : AdminColors.accentDanger,
-                  ),
-                ],
-              )
-              .toList(),
+  /// Shell for pages that own a virtualized scroll view (pull-to-refresh still works).
+  Widget _ownScrollPage(bool mobile, List<Widget> slivers) {
+    return CustomScrollView(
+      physics: const AlwaysScrollableScrollPhysics(
+        parent: BouncingScrollPhysics(),
+      ),
+      slivers: [
+        SliverPadding(
+          padding: EdgeInsets.fromLTRB(16, 16, 16, mobile ? 100 : 24),
+          sliver: SliverMainAxisGroup(slivers: slivers),
         ),
       ],
     );
   }
 
-  /// "Imeisha" (red), "Siku N" (amber, ≤ 3 days) or "Siku N" (green).
-  Widget _subscriptionLeftBadge(DateTime end) {
-    final left = end.difference(DateTime.now());
-    if (left.isNegative) return _badge('Imeisha', AdminColors.accentDanger);
-    final days = left.inDays;
-    final label = days >= 1 ? 'Siku $days' : 'Saa ${max(1, left.inHours)}';
-    return _badge(
-      label,
-      days <= 3 ? AdminColors.accentWarning : AdminColors.accentSuccess,
+  Widget _emptyListState(IconData icon, String text) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 48),
+      child: Column(
+        children: [
+          Container(
+            width: 56,
+            height: 56,
+            decoration: const BoxDecoration(
+              color: Color(0x146366F1),
+              shape: BoxShape.circle,
+            ),
+            child: Icon(icon, color: const Color(0xFF818CF8), size: 26),
+          ),
+          const SizedBox(height: 12),
+          Text(
+            text,
+            textAlign: TextAlign.center,
+            style: const TextStyle(
+              fontSize: 13,
+              color: AdminColors.textSecondary,
+            ),
+          ),
+        ],
+      ),
     );
   }
 
-  Widget _planBadge(String plan) {
-    final c = plan == 'gold'
+  bool _subExpired(AdminSubscription s, DateTime now) =>
+      !s.endDate.isAfter(now);
+
+  bool _subEndingSoon(AdminSubscription s, DateTime now) =>
+      s.endDate.isAfter(now) && s.endDate.difference(now).inHours <= 72;
+
+  List<Widget> _subscriptionSlivers() {
+    final now = DateTime.now();
+    var active = 0;
+    var soon = 0;
+    for (final s in _subscriptions) {
+      if (!_subExpired(s, now)) active++;
+      if (_subEndingSoon(s, now)) soon++;
+    }
+    final expired = _subscriptions.length - active;
+    final q = _subsSearch.text.trim().toLowerCase();
+    final list =
+        _subscriptions.where((s) {
+          final keep = switch (_subsFilter) {
+            1 => !_subExpired(s, now),
+            2 => _subEndingSoon(s, now),
+            3 => _subExpired(s, now),
+            _ => true,
+          };
+          if (!keep) return false;
+          if (q.isEmpty) return true;
+          return '${s.userName} ${s.plan} ${_pricing[s.plan]?.name ?? ''} ${s.id}'
+              .toLowerCase()
+              .contains(q);
+        }).toList()..sort((a, b) {
+          // Active first (soonest to end on top), then the most recently expired.
+          final ea = _subExpired(a, now);
+          final eb = _subExpired(b, now);
+          if (ea != eb) return ea ? 1 : -1;
+          return ea
+              ? b.endDate.compareTo(a.endDate)
+              : a.endDate.compareTo(b.endDate);
+        });
+
+    return [
+      SliverToBoxAdapter(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            _pageTitleRow(
+              title: 'Usajili',
+              subtitle: '$active hai · $soon zinaisha ndani ya siku 3',
+              action: soon > 0
+                  ? _btnOutline(
+                      label: 'Reminder',
+                      icon: Icons.notifications_active_outlined,
+                      onTap: () => _navigate(AdminPageId.notifications),
+                    )
+                  : null,
+            ),
+            const SizedBox(height: 14),
+            AdminSearchField(
+              controller: _subsSearch,
+              hint: 'Tafuta jina au kifurushi…',
+              onChanged: (_) => setState(() {}),
+            ),
+            const SizedBox(height: 12),
+            AdminFilterChips(
+              options: [
+                AdminFilterOption('Zote', count: _subscriptions.length),
+                AdminFilterOption(
+                  'Hai',
+                  count: active,
+                  color: AdminColors.accentSuccess,
+                ),
+                AdminFilterOption(
+                  'Zinakaribia kuisha',
+                  count: soon,
+                  color: AdminColors.accentWarning,
+                ),
+                AdminFilterOption(
+                  'Zimeisha',
+                  count: expired,
+                  color: AdminColors.accentDanger,
+                ),
+              ],
+              selected: _subsFilter,
+              onSelected: (i) => setState(() => _subsFilter = i),
+            ),
+            const SizedBox(height: 14),
+          ],
+        ),
+      ),
+      if (list.isEmpty)
+        SliverToBoxAdapter(
+          child: _emptyListState(
+            Icons.card_membership_rounded,
+            q.isEmpty
+                ? 'Hakuna usajili katika kundi hili.'
+                : 'Hakuna matokeo ya "$q".',
+          ),
+        )
+      else
+        SliverGrid(
+          gridDelegate: const SliverGridDelegateWithMaxCrossAxisExtent(
+            maxCrossAxisExtent: 640,
+            mainAxisExtent: 84,
+            mainAxisSpacing: 10,
+            crossAxisSpacing: 10,
+          ),
+          delegate: SliverChildBuilderDelegate(
+            (context, i) => _subscriptionTile(list[i], now),
+            childCount: list.length,
+          ),
+        ),
+    ];
+  }
+
+  Widget _subscriptionTile(AdminSubscription s, DateTime now) {
+    final left = s.endDate.difference(now);
+    final expired = _subExpired(s, now);
+    final soon = _subEndingSoon(s, now);
+    final color = expired
+        ? AdminColors.accentDanger
+        : soon
         ? AdminColors.accentWarning
-        : plan == 'platinum'
-        ? const Color(0xFFA78BFA)
-        : const Color(0xFF60A5FA);
-    return _badge(plan.toUpperCase(), c);
+        : AdminColors.accentSuccess;
+    final plan = _pricing[s.plan];
+    final totalMinutes = max(1, plan?.duration ?? 30) * 24 * 60;
+    final progress = expired
+        ? 0.0
+        : (left.inMinutes / totalMinutes).clamp(0.02, 1.0).toDouble();
+    final leftLabel = expired
+        ? 'Imeisha'
+        : left.inDays >= 1
+        ? 'Siku ${left.inDays}'
+        : 'Saa ${max(1, left.inHours)}';
+    final meta = _planSlotMeta(s.plan);
+    return Container(
+      padding: const EdgeInsets.fromLTRB(12, 10, 14, 10),
+      decoration: adminCardDecoration(radius: 16, shadow: false),
+      child: Row(
+        children: [
+          AdminAvatar(s.userName, size: 40, colors: meta.grad),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        s.userName,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          fontSize: 13.5,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Text(
+                      fmtTzs(s.price),
+                      style: const TextStyle(
+                        fontSize: 12.5,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 5),
+                Row(
+                  children: [
+                    Flexible(
+                      child: _compactPill(
+                        (plan?.name ?? s.plan).toUpperCase(),
+                        meta.grad.first,
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      flex: 2,
+                      child: Text(
+                        '${expired ? 'Kiliisha' : 'Kinaisha'} ${_fmtDate(s.endDate)}',
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          fontSize: 11,
+                          color: AdminColors.textSecondary,
+                        ),
+                      ),
+                    ),
+                    Text(
+                      leftLabel,
+                      style: TextStyle(
+                        fontSize: 11,
+                        fontWeight: FontWeight.w700,
+                        color: color,
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 8),
+                ClipRRect(
+                  borderRadius: BorderRadius.circular(99),
+                  child: LinearProgressIndicator(
+                    value: progress,
+                    minHeight: 4,
+                    backgroundColor: const Color(0x14FFFFFF),
+                    valueColor: AlwaysStoppedAnimation(color),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
   }
 
   // --- Pricing ---
@@ -6295,65 +7326,97 @@ class _AdminScaffoldState extends State<AdminScaffold>
 
   Widget _pagePricing() {
     const keys = ['weekly', 'gold', 'platinum'];
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
+    final enabled = keys.where((k) => _pricing[k]?.enabled ?? false).length;
+    final actions = Row(
+      mainAxisSize: MainAxisSize.min,
       children: [
-        Row(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            const Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    'Bei za kifurushi',
-                    style: TextStyle(fontSize: 24, fontWeight: FontWeight.w800),
-                  ),
-                  SizedBox(height: 6),
-                  Text(
-                    'Weka jina, bei (TSh) na muda kwa siku. Hifadhi — bei zitaonekana kwenye app ya mtumiaji.',
-                    style: TextStyle(
-                      fontSize: 12,
-                      height: 1.35,
-                      color: AdminColors.textSecondary,
-                    ),
-                  ),
-                ],
-              ),
-            ),
-            _btnOutline(
-              label: 'Weka upya',
-              icon: Icons.undo,
-              onTap: _resetPricing,
-            ),
-            const SizedBox(width: 8),
-            _btnPrimary(
-              label: 'Hifadhi',
-              icon: Icons.save,
-              small: true,
-              onTap: _savePricing,
-            ),
-          ],
+        _btnOutline(
+          label: 'Weka upya',
+          icon: Icons.undo_rounded,
+          onTap: _resetPricing,
         ),
-        const SizedBox(height: 20),
-        LayoutBuilder(
-          builder: (context, c) {
-            final w = c.maxWidth;
-            final useThree = w > 1100;
-            final childW = useThree ? (w - 24) / 3 : double.infinity;
-            return Wrap(
-              spacing: 12,
-              runSpacing: 12,
-              children: keys.map((k) {
-                return SizedBox(
-                  width: childW == double.infinity ? w : childW,
-                  child: _pricingPlanEditorCard(k),
-                );
-              }).toList(),
-            );
-          },
+        const SizedBox(width: 8),
+        _btnPrimary(
+          label: 'Hifadhi',
+          icon: Icons.check_rounded,
+          small: true,
+          onTap: _savePricing,
         ),
       ],
+    );
+    return LayoutBuilder(
+      builder: (context, c) {
+        final w = c.maxWidth;
+        final wide = w >= 620;
+        final cols = w >= 980 ? 3 : (w >= 620 ? 2 : 1);
+        final cardW = (w - (cols - 1) * 12) / cols;
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            _pageTitleRow(
+              title: 'Bei za vifurushi',
+              subtitle:
+                  '$enabled kati ya ${keys.length} vinaonekana kwenye app',
+              action: wide ? actions : null,
+            ),
+            if (!wide) ...[
+              const SizedBox(height: 12),
+              Align(alignment: Alignment.centerRight, child: actions),
+            ],
+            const SizedBox(height: 16),
+            Wrap(
+              spacing: 12,
+              runSpacing: 12,
+              children: [
+                for (final k in keys)
+                  SizedBox(width: cardW, child: _pricingPlanEditorCard(k)),
+              ],
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  Widget _pricingField(
+    TextEditingController controller, {
+    required String label,
+    String? hint,
+    String? prefix,
+    bool number = false,
+  }) {
+    return TextField(
+      controller: controller,
+      keyboardType: number ? TextInputType.number : TextInputType.text,
+      style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w700),
+      decoration: InputDecoration(
+        isDense: true,
+        labelText: label,
+        labelStyle: const TextStyle(
+          fontSize: 12,
+          color: AdminColors.textSecondary,
+        ),
+        hintText: hint,
+        prefixText: prefix,
+        prefixStyle: const TextStyle(
+          fontSize: 12.5,
+          color: AdminColors.textSecondary,
+        ),
+        filled: true,
+        fillColor: AdminColors.bgPrimary.withValues(alpha: 0.6),
+        contentPadding: const EdgeInsets.symmetric(
+          horizontal: 12,
+          vertical: 11,
+        ),
+        enabledBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(12),
+          borderSide: const BorderSide(color: Color(0x14FFFFFF)),
+        ),
+        focusedBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(12),
+          borderSide: const BorderSide(color: AdminColors.accentPrimary),
+        ),
+      ),
     );
   }
 
@@ -6365,164 +7428,156 @@ class _AdminScaffoldState extends State<AdminScaffold>
     final nameCtl = fields.name[key]!;
     final priceCtl = fields.price[key]!;
     final daysCtl = fields.days[key]!;
-    return Opacity(
-      opacity: p.enabled ? 1 : 0.55,
+    return AnimatedOpacity(
+      opacity: p.enabled ? 1 : 0.6,
+      duration: const Duration(milliseconds: 200),
       child: Container(
-        decoration: BoxDecoration(
-          borderRadius: BorderRadius.circular(22),
-          border: Border.all(
-            color: p.popular
-                ? const Color(0x55FBBF24)
-                : const Color(0x14FFFFFF),
-          ),
-          gradient: LinearGradient(
-            begin: Alignment.topLeft,
-            end: Alignment.bottomRight,
-            colors: [
-              AdminColors.bgTertiary,
-              AdminColors.bgSecondary.withValues(alpha: 0.65),
-            ],
-          ),
-          boxShadow: [
-            BoxShadow(
-              color: Colors.black.withValues(alpha: 0.2),
-              blurRadius: 18,
-              offset: const Offset(0, 8),
-            ),
-          ],
+        padding: const EdgeInsets.fromLTRB(14, 12, 10, 14),
+        decoration: adminCardDecoration(
+          radius: 18,
+          glow: p.enabled ? meta.grad.first : null,
+          shadow: false,
         ),
-        padding: const EdgeInsets.all(20),
         child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             Row(
-              crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Container(
-                  width: 50,
-                  height: 50,
+                  width: 40,
+                  height: 40,
                   decoration: BoxDecoration(
-                    borderRadius: BorderRadius.circular(16),
+                    borderRadius: BorderRadius.circular(12),
                     gradient: LinearGradient(colors: meta.grad),
-                    boxShadow: [
-                      BoxShadow(
-                        color: meta.grad.first.withValues(alpha: 0.35),
-                        blurRadius: 12,
-                        offset: const Offset(0, 4),
-                      ),
-                    ],
                   ),
-                  child: Icon(meta.icon, color: Colors.white, size: 26),
+                  child: Icon(meta.icon, color: Colors.white, size: 20),
                 ),
-                const SizedBox(width: 14),
+                const SizedBox(width: 12),
                 Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        meta.slot.toUpperCase(),
-                        style: const TextStyle(
-                          fontSize: 10,
-                          fontWeight: FontWeight.w800,
-                          letterSpacing: 1.2,
-                          color: AdminColors.textSecondary,
+                  child: ListenableBuilder(
+                    listenable: daysCtl,
+                    builder: (context, _) => Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          meta.slot.toUpperCase(),
+                          style: const TextStyle(
+                            fontSize: 10,
+                            fontWeight: FontWeight.w800,
+                            letterSpacing: 1.1,
+                            color: AdminColors.textSecondary,
+                          ),
                         ),
-                      ),
-                      const SizedBox(height: 10),
-                      TextField(
-                        controller: nameCtl,
-                        style: const TextStyle(
-                          fontWeight: FontWeight.w800,
-                          fontSize: 17,
-                          letterSpacing: 0.2,
+                        const SizedBox(height: 2),
+                        Text(
+                          planPeriodSubtitle(
+                            int.tryParse(daysCtl.text.trim()) ?? p.duration,
+                          ),
+                          style: const TextStyle(
+                            fontSize: 12.5,
+                            fontWeight: FontWeight.w600,
+                          ),
                         ),
-                        decoration: _inputDeco().copyWith(
-                          labelText: 'Jina la kifurushi',
-                          hintText: 'mf. DHAHABU',
-                        ),
-                      ),
-                    ],
+                      ],
+                    ),
+                  ),
+                ),
+                Tooltip(
+                  message: p.enabled
+                      ? 'Inaonekana kwenye app'
+                      : 'Imefichwa kwenye app',
+                  child: Switch(
+                    value: p.enabled,
+                    activeTrackColor: const Color(0xFF6366F1),
+                    thumbColor: const WidgetStatePropertyAll(Colors.white),
+                    trackOutlineColor: const WidgetStatePropertyAll(
+                      Color(0x26FFFFFF),
+                    ),
+                    materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                    onChanged: (v) => setState(() => p.enabled = v),
                   ),
                 ),
               ],
             ),
-            const SizedBox(height: 8),
-            Text(
-              planPeriodSubtitle(p.duration),
-              style: const TextStyle(
-                fontSize: 12,
-                fontWeight: FontWeight.w500,
-                color: Color(0xFF94A3B8),
-              ),
-            ),
-            const SizedBox(height: 16),
-            LayoutBuilder(
-              builder: (context, c) {
-                final row = c.maxWidth > 400;
-                Widget priceField() => Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    const Text(
-                      'Bei (TSh)',
-                      style: TextStyle(fontSize: 10, color: Color(0xFF6B7280)),
-                    ),
-                    const SizedBox(height: 4),
-                    TextField(
-                      controller: priceCtl,
-                      keyboardType: const TextInputType.numberWithOptions(
-                        decimal: true,
-                      ),
-                      style: const TextStyle(fontSize: 12),
-                      decoration: _inputDeco(),
-                    ),
-                  ],
-                );
-                Widget daysField() => Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    const Text(
-                      'Muda (siku)',
-                      style: TextStyle(fontSize: 10, color: Color(0xFF6B7280)),
-                    ),
-                    const SizedBox(height: 4),
-                    TextField(
-                      controller: daysCtl,
-                      keyboardType: TextInputType.number,
-                      style: const TextStyle(fontSize: 12),
-                      decoration: _inputDeco(),
-                    ),
-                  ],
-                );
-                if (row) {
-                  return Row(
-                    crossAxisAlignment: CrossAxisAlignment.start,
+            const SizedBox(height: 14),
+            Padding(
+              padding: const EdgeInsets.only(right: 4),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  _pricingField(
+                    nameCtl,
+                    label: 'Jina la kifurushi',
+                    hint: 'mf. DHAHABU',
+                  ),
+                  const SizedBox(height: 10),
+                  Row(
                     children: [
-                      Expanded(child: priceField()),
-                      const SizedBox(width: 12),
-                      Expanded(child: daysField()),
+                      Expanded(
+                        flex: 3,
+                        child: _pricingField(
+                          priceCtl,
+                          label: 'Bei',
+                          prefix: 'TSh ',
+                          number: true,
+                        ),
+                      ),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        flex: 2,
+                        child: _pricingField(
+                          daysCtl,
+                          label: 'Siku',
+                          number: true,
+                        ),
+                      ),
                     ],
-                  );
-                }
-                return Column(
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
-                    priceField(),
-                    const SizedBox(height: 12),
-                    daysField(),
-                  ],
-                );
-              },
-            ),
-            const SizedBox(height: 8),
-            SwitchListTile(
-              contentPadding: EdgeInsets.zero,
-              title: const Text(
-                'Inapatikana kwenye app',
-                style: TextStyle(fontSize: 13),
+                  ),
+                  const SizedBox(height: 10),
+                  ListenableBuilder(
+                    listenable: Listenable.merge([priceCtl, daysCtl]),
+                    builder: (context, _) {
+                      final price =
+                          double.tryParse(
+                            priceCtl.text.replaceAll(',', '').trim(),
+                          ) ??
+                          0;
+                      final days = int.tryParse(daysCtl.text.trim()) ?? 0;
+                      return Row(
+                        children: [
+                          const Icon(
+                            Icons.insights_rounded,
+                            size: 13,
+                            color: Color(0xFF818CF8),
+                          ),
+                          const SizedBox(width: 6),
+                          Expanded(
+                            child: Text(
+                              price > 0 && days > 0
+                                  ? '≈ ${fmtTzs(price / days)} kwa siku'
+                                  : 'Weka bei na siku',
+                              style: const TextStyle(
+                                fontSize: 11.5,
+                                color: AdminColors.textSecondary,
+                              ),
+                            ),
+                          ),
+                          Text(
+                            p.enabled ? 'Inaonekana' : 'Imefichwa',
+                            style: TextStyle(
+                              fontSize: 11,
+                              fontWeight: FontWeight.w700,
+                              color: p.enabled
+                                  ? AdminColors.accentSuccess
+                                  : AdminColors.textSecondary,
+                            ),
+                          ),
+                        ],
+                      );
+                    },
+                  ),
+                ],
               ),
-              value: p.enabled,
-              activeTrackColor: const Color(0xFF6366F1),
-              onChanged: (v) => setState(() => p.enabled = v),
             ),
           ],
         ),
@@ -6620,56 +7675,811 @@ class _AdminScaffoldState extends State<AdminScaffold>
   }
 
   // --- Payments ---
-  Widget _pagePayments() {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        const Text(
-          'Malipo',
-          style: TextStyle(fontSize: 24, fontWeight: FontWeight.w800),
+  bool _paymentPending(AdminPayment p) =>
+      p.status != 'completed' && p.status != 'failed';
+
+  Color _paymentColor(String status) => switch (status) {
+    'completed' => AdminColors.accentSuccess,
+    'failed' => AdminColors.accentDanger,
+    _ => AdminColors.accentWarning,
+  };
+
+  IconData _paymentIcon(String status) => switch (status) {
+    'completed' => Icons.check_circle_rounded,
+    'failed' => Icons.cancel_rounded,
+    _ => Icons.schedule_rounded,
+  };
+
+  String _planLabel(String? key) {
+    if (key == null || key.isEmpty) return 'Kifurushi';
+    final name = _pricing[key]?.name ?? '';
+    return name.isNotEmpty ? name : key.toUpperCase();
+  }
+
+  List<Widget> _paymentSlivers() {
+    final now = DateTime.now();
+    var completed = 0;
+    var pending = 0;
+    var failed = 0;
+    double todayRevenue = 0;
+    for (final p in _payments) {
+      if (p.status == 'completed') {
+        completed++;
+        final t = p.createdAt.toLocal();
+        if (t.year == now.year && t.month == now.month && t.day == now.day) {
+          todayRevenue += p.amount;
+        }
+      } else if (p.status == 'failed') {
+        failed++;
+      } else {
+        pending++;
+      }
+    }
+    final revenue = _effectiveStats?.revenue ?? todayRevenue;
+    final pendingSonic = _payments
+        .where((p) => _paymentPending(p) && p.isSonicpesa)
+        .length;
+    final q = _paySearch.text.trim().toLowerCase();
+    final list = _payments.where((p) {
+      final keep = switch (_payFilter) {
+        1 => p.status == 'completed',
+        2 => _paymentPending(p),
+        3 => p.status == 'failed',
+        _ => true,
+      };
+      if (!keep) return false;
+      if (q.isEmpty) return true;
+      return '${p.userName} ${p.transactionId} ${p.id} ${p.phone} ${p.method} ${_planLabel(p.planKey)}'
+          .toLowerCase()
+          .contains(q);
+    }).toList();
+
+    final bulkButton = _bulkVerifying
+        ? Container(
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 9),
+            decoration: BoxDecoration(
+              color: const Color(0x226366F1),
+              borderRadius: BorderRadius.circular(12),
+            ),
+            child: const Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                SizedBox(
+                  width: 14,
+                  height: 14,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                ),
+                SizedBox(width: 8),
+                Text(
+                  'Inahakiki…',
+                  style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600),
+                ),
+              ],
+            ),
+          )
+        : _btnPrimary(
+            label: 'Hakiki zinazosubiri',
+            icon: Icons.verified_rounded,
+            small: true,
+            onTap: () => unawaited(_verifyPendingPayments()),
+          );
+
+    return [
+      SliverToBoxAdapter(
+        child: LayoutBuilder(
+          builder: (context, c) {
+            final wide = c.maxWidth >= 640;
+            return Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                _pageTitleRow(
+                  title: 'Malipo',
+                  subtitle:
+                      'Malipo ya SonicPesa yanahakikiwa kiotomatiki · ${_payments.length} ya karibuni',
+                  action: wide && pendingSonic > 0 ? bulkButton : null,
+                ),
+                const SizedBox(height: 14),
+                _paymentMiniStats(
+                  revenue: revenue,
+                  completed: completed,
+                  pending: pending,
+                  failed: failed,
+                  width: c.maxWidth,
+                ),
+                if (!wide && pendingSonic > 0) ...[
+                  const SizedBox(height: 12),
+                  Align(alignment: Alignment.centerLeft, child: bulkButton),
+                ],
+                const SizedBox(height: 14),
+                AdminSearchField(
+                  controller: _paySearch,
+                  hint: 'Tafuta jina, simu au namba ya muamala (sp_…)',
+                  onChanged: (_) => setState(() {}),
+                ),
+                const SizedBox(height: 12),
+                AdminFilterChips(
+                  options: [
+                    AdminFilterOption('Zote', count: _payments.length),
+                    AdminFilterOption(
+                      'Zimekamilika',
+                      count: completed,
+                      color: AdminColors.accentSuccess,
+                    ),
+                    AdminFilterOption(
+                      'Zinasubiri',
+                      count: pending,
+                      color: AdminColors.accentWarning,
+                    ),
+                    AdminFilterOption(
+                      'Zimeshindwa',
+                      count: failed,
+                      color: AdminColors.accentDanger,
+                    ),
+                  ],
+                  selected: _payFilter,
+                  onSelected: (i) => setState(() => _payFilter = i),
+                ),
+                const SizedBox(height: 14),
+              ],
+            );
+          },
         ),
-        const SizedBox(height: 8),
-        Container(
-          width: double.infinity,
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-          decoration: BoxDecoration(
-            color: const Color(0x2210B981),
-            borderRadius: BorderRadius.circular(12),
-            border: Border.all(color: const Color(0x3310B981)),
+      ),
+      if (list.isEmpty)
+        SliverToBoxAdapter(
+          child: _emptyListState(
+            Icons.receipt_long_rounded,
+            q.isEmpty
+                ? 'Hakuna malipo katika kundi hili.'
+                : 'Hakuna matokeo ya "$q".',
           ),
-          child: const Text(
-            'Malipo yaliyokamilika yanathibitishwa kiotomatiki. Hakuna Idhini ya msimamizi inahitajika.',
-            style: TextStyle(
-              fontSize: 11,
-              color: AdminColors.textSecondary,
-              height: 1.35,
+        )
+      else
+        SliverGrid(
+          gridDelegate: const SliverGridDelegateWithMaxCrossAxisExtent(
+            maxCrossAxisExtent: 640,
+            mainAxisExtent: 92,
+            mainAxisSpacing: 10,
+            crossAxisSpacing: 10,
+          ),
+          delegate: SliverChildBuilderDelegate(
+            (context, i) => _paymentTile(list[i], now),
+            childCount: list.length,
+          ),
+        ),
+    ];
+  }
+
+  Widget _paymentMiniStats({
+    required double revenue,
+    required int completed,
+    required int pending,
+    required int failed,
+    required double width,
+  }) {
+    final items = <(String, String, IconData, Color)>[
+      (
+        'Mapato ya leo',
+        fmtTzs(revenue),
+        Icons.payments_rounded,
+        const Color(0xFFC084FC),
+      ),
+      (
+        'Zimekamilika',
+        '$completed',
+        Icons.check_circle_rounded,
+        AdminColors.accentSuccess,
+      ),
+      (
+        'Zinasubiri',
+        '$pending',
+        Icons.schedule_rounded,
+        AdminColors.accentWarning,
+      ),
+      (
+        'Zimeshindwa',
+        '$failed',
+        Icons.cancel_rounded,
+        AdminColors.accentDanger,
+      ),
+    ];
+    final cols = width >= 640 ? 4 : 2;
+    final itemW = (width - (cols - 1) * 10) / cols;
+    return Wrap(
+      spacing: 10,
+      runSpacing: 10,
+      children: [
+        for (final (label, value, icon, color) in items)
+          Container(
+            width: itemW,
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+            decoration: adminCardDecoration(
+              radius: 14,
+              glow: color,
+              shadow: false,
+            ),
+            child: Row(
+              children: [
+                Container(
+                  width: 30,
+                  height: 30,
+                  decoration: BoxDecoration(
+                    color: color.withValues(alpha: 0.16),
+                    borderRadius: BorderRadius.circular(9),
+                  ),
+                  child: Icon(icon, size: 16, color: color),
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      FittedBox(
+                        fit: BoxFit.scaleDown,
+                        alignment: Alignment.centerLeft,
+                        child: Text(
+                          value,
+                          style: const TextStyle(
+                            fontSize: 15,
+                            fontWeight: FontWeight.w800,
+                          ),
+                        ),
+                      ),
+                      Text(
+                        label,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          fontSize: 10.5,
+                          color: AdminColors.textSecondary,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
             ),
           ),
-        ),
-        const SizedBox(height: 12),
-        _tableWrap(
-          columns: const ['Muamala', 'Mtumiaji', 'Kiasi', 'Hali'],
-          rows: _payments.take(20).map((p) {
-            return [
-              Text(
-                p.transactionId,
-                style: const TextStyle(
-                  fontSize: 11,
-                  color: AdminColors.textSecondary,
-                ),
-              ),
-              Text(
-                p.userName,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: const TextStyle(fontSize: 12),
-              ),
-              Text(fmtTzs(p.amount), style: const TextStyle(fontSize: 12)),
-              _paymentStatusPill(p.status),
-            ];
-          }).toList(),
-        ),
       ],
+    );
+  }
+
+  Widget _paymentTile(AdminPayment p, DateTime now) {
+    final color = _paymentColor(p.status);
+    final pending = _paymentPending(p);
+    return AdminPressable(
+      lift: 1,
+      pressedScale: 0.99,
+      onTap: () => _openPaymentSheet(p),
+      child: Container(
+        padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
+        decoration: adminCardDecoration(radius: 16, shadow: false),
+        child: Row(
+          children: [
+            Container(
+              width: 40,
+              height: 40,
+              decoration: BoxDecoration(
+                color: color.withValues(alpha: 0.15),
+                borderRadius: BorderRadius.circular(12),
+              ),
+              child: Icon(_paymentIcon(p.status), size: 20, color: color),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      Expanded(
+                        child: Text(
+                          p.userName,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                            fontSize: 13.5,
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      Text(
+                        fmtTzs(p.amount),
+                        style: const TextStyle(
+                          fontSize: 13.5,
+                          fontWeight: FontWeight.w800,
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 3),
+                  Text(
+                    p.transactionId,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      fontSize: 11,
+                      color: Color(0xFF818CF8),
+                      letterSpacing: 0.2,
+                    ),
+                  ),
+                  const SizedBox(height: 4),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: Text(
+                          '${_planLabel(p.planKey)} · ${p.method} · ${adminTimeAgo(p.createdAt, now)}',
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                            fontSize: 11,
+                            color: AdminColors.textSecondary,
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      if (pending && p.isSonicpesa)
+                        _verifyChip(p)
+                      else
+                        _paymentStateChip(p),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _paymentStateChip(AdminPayment p) {
+    final color = _paymentColor(p.status);
+    final label = switch (p.status) {
+      'completed' => 'Imethibitishwa',
+      'failed' => 'Imeshindwa',
+      _ => 'Inasubiri',
+    };
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.16),
+        borderRadius: BorderRadius.circular(999),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (p.status == 'completed') ...[
+            Icon(Icons.verified_rounded, size: 11, color: color),
+            const SizedBox(width: 4),
+          ],
+          Text(
+            label,
+            style: TextStyle(
+              fontSize: 10.5,
+              fontWeight: FontWeight.w700,
+              color: color,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _verifyChip(AdminPayment p) {
+    final busy = _verifyingRefs.contains(p.transactionId);
+    return GestureDetector(
+      onTap: busy ? null : () => unawaited(_verifyPayment(p)),
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 200),
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+        decoration: BoxDecoration(
+          gradient: busy ? null : adminBrandGradient,
+          color: busy ? const Color(0x226366F1) : null,
+          borderRadius: BorderRadius.circular(999),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (busy)
+              const SizedBox(
+                width: 11,
+                height: 11,
+                child: CircularProgressIndicator(
+                  strokeWidth: 1.6,
+                  color: Colors.white,
+                ),
+              )
+            else
+              const Icon(
+                Icons.verified_outlined,
+                size: 12,
+                color: Colors.white,
+              ),
+            const SizedBox(width: 5),
+            Text(
+              busy ? 'Inahakiki…' : 'Hakiki',
+              style: const TextStyle(
+                fontSize: 11,
+                fontWeight: FontWeight.w700,
+                color: Colors.white,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// Asks the server to check one order with SonicPesa (same data as sonicpesa.com/verify).
+  Future<AdminPayment?> _verifyPayment(AdminPayment p) async {
+    final ref = p.transactionId;
+    if (_verifyingRefs.contains(ref)) return null;
+    if (!_hasAdminSession) {
+      _showToast('Ingia tena ili kuhakiki malipo.', _ToastType.warning);
+      return null;
+    }
+    setState(() => _verifyingRefs.add(ref));
+    try {
+      final res = await http
+          .post(
+            Uri.parse(
+              '$_apiBase/api/v1/admin/transactions/${Uri.encodeComponent(ref)}/verify',
+            ),
+            headers: _adminHeaders(),
+            // Fastify rejects an empty body sent with a JSON Content-Type (400).
+            body: '{}',
+          )
+          .timeout(const Duration(seconds: 25));
+      if (res.statusCode == 401 || res.statusCode == 403) {
+        await _handleAdminUnauthorized();
+        return null;
+      }
+      final body = await _decodeJsonMapSafe(res.body) ?? <String, dynamic>{};
+      if (res.statusCode == 404) {
+        _showToast(
+          body['status'] == 'not_found'
+              ? 'Muamala $ref haupo kwenye kumbukumbu.'
+              : 'Seva bado haina uhakiki wa SonicPesa. Sasisha (deploy) backend mpya kwanza.',
+          _ToastType.error,
+        );
+        return null;
+      }
+      if (res.statusCode < 200 || res.statusCode >= 300) {
+        _showToast(
+          'Uhakiki umeshindikana: ${_s(body['message']).isNotEmpty ? body['message'] : body['error'] ?? 'HTTP ${res.statusCode}'}',
+          _ToastType.error,
+        );
+        return null;
+      }
+      final tx = body['transaction'];
+      final updated = tx is Map
+          ? _parsePaymentJson(tx.cast<String, dynamic>())
+          : (p
+              ..status = _s(body['status'], fallback: p.status)
+              ..verifiedAt = DateTime.now()
+              ..remoteStatus = _s(body['remote_status']).isEmpty
+                  ? p.remoteStatus
+                  : _s(body['remote_status']));
+      if (!mounted) return updated;
+      setState(() {
+        final i = _payments.indexWhere((x) => x.id == p.id);
+        if (i >= 0) _payments[i] = updated;
+      });
+      _toastVerifyOutcome(body, updated);
+      if (body['newly_granted'] == true) unawaited(_refreshDashboardStats());
+      return updated;
+    } on TimeoutException {
+      _showToast(
+        'SonicPesa inachelewa kujibu. Jaribu tena baada ya muda mfupi.',
+        _ToastType.warning,
+      );
+    } catch (e) {
+      _showToast('Uhakiki umeshindikana: $e', _ToastType.error);
+    } finally {
+      if (mounted) setState(() => _verifyingRefs.remove(ref));
+    }
+    return null;
+  }
+
+  void _toastVerifyOutcome(Map<String, dynamic> body, AdminPayment p) {
+    final status = _s(body['status']);
+    final remote = _s(body['remote_status']);
+    final error = _s(body['error']);
+    if (remote.isEmpty) {
+      _showToast(
+        error.isEmpty ? 'SonicPesa haikujibu. Jaribu tena.' : error,
+        _ToastType.warning,
+      );
+      return;
+    }
+    if (error.isNotEmpty) {
+      _showToast(error, _ToastType.warning);
+      return;
+    }
+    if (body['mismatch'] == true) {
+      _showToast(
+        'Kumbukumbu zinasema imekamilika lakini SonicPesa inasema $remote. Kagua muamala huu.',
+        _ToastType.warning,
+      );
+      return;
+    }
+    switch (status) {
+      case 'completed':
+        _showToast(
+          body['newly_granted'] == true
+              ? 'Malipo yamethibitishwa na premium ya ${p.userName} imewashwa.'
+              : 'Imethibitishwa: SonicPesa inasema $remote.',
+          _ToastType.success,
+        );
+      case 'failed':
+        _showToast(
+          'SonicPesa inasema $remote — malipo hayakufanikiwa.',
+          _ToastType.error,
+        );
+      default:
+        _showToast(
+          'Bado yanasubiri (SonicPesa: $remote). Mteja hajakamilisha kulipa.',
+          _ToastType.info,
+        );
+    }
+  }
+
+  Future<void> _verifyPendingPayments() async {
+    if (_bulkVerifying || !_hasAdminSession) return;
+    setState(() => _bulkVerifying = true);
+    try {
+      final res = await http
+          .post(
+            Uri.parse('$_apiBase/api/v1/admin/transactions/verify-pending'),
+            headers: _adminHeaders(),
+            body: '{}',
+          )
+          .timeout(const Duration(seconds: 90));
+      if (res.statusCode == 401 || res.statusCode == 403) {
+        await _handleAdminUnauthorized();
+        return;
+      }
+      final body = await _decodeJsonMapSafe(res.body) ?? <String, dynamic>{};
+      if (res.statusCode == 404) {
+        _showToast(
+          'Seva bado haina uhakiki wa SonicPesa. Sasisha (deploy) backend mpya kwanza.',
+          _ToastType.error,
+        );
+        return;
+      }
+      if (res.statusCode < 200 || res.statusCode >= 300) {
+        _showToast(
+          _s(
+            body['message'] ?? body['error'],
+            fallback: 'Uhakiki umeshindikana (${res.statusCode}).',
+          ),
+          res.statusCode == 409 ? _ToastType.info : _ToastType.error,
+        );
+        return;
+      }
+      final checked = _toInt(body['checked']);
+      final completed = _toInt(body['completed']);
+      final failed = _toInt(body['failed']);
+      final still = _toInt(body['still_pending']);
+      final unreachable = _toInt(body['unreachable']);
+      if (checked == 0) {
+        _showToast('Hakuna malipo yanayosubiri ya kuhakiki.', _ToastType.info);
+      } else {
+        _showToast(
+          'Yamekaguliwa $checked: $completed yamekamilika, $failed yameshindwa, $still bado yanasubiri'
+          '${unreachable > 0 ? ' ($unreachable SonicPesa haikujibu)' : ''}.',
+          completed > 0 ? _ToastType.success : _ToastType.info,
+        );
+      }
+      await _reloadPayments();
+      if (completed > 0) unawaited(_refreshDashboardStats());
+    } on TimeoutException {
+      _showToast(
+        'Uhakiki unaendelea kwenye seva. Pakia upya baada ya dakika moja.',
+        _ToastType.warning,
+      );
+    } catch (e) {
+      _showToast('Uhakiki umeshindikana: $e', _ToastType.error);
+    } finally {
+      if (mounted) setState(() => _bulkVerifying = false);
+    }
+  }
+
+  void _openPaymentSheet(AdminPayment payment) {
+    var current = payment;
+    var busy = false;
+    showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: AdminColors.bgSecondary,
+      constraints: const BoxConstraints(maxWidth: 560),
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+      ),
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setLocal) {
+          final p = current;
+          final color = _paymentColor(p.status);
+          Widget row(String label, String value, {bool copy = false}) {
+            return Padding(
+              padding: const EdgeInsets.symmetric(vertical: 7),
+              child: Row(
+                children: [
+                  SizedBox(
+                    width: 120,
+                    child: Text(
+                      label,
+                      style: const TextStyle(
+                        fontSize: 12,
+                        color: AdminColors.textSecondary,
+                      ),
+                    ),
+                  ),
+                  Expanded(
+                    child: Text(
+                      value.isEmpty ? '—' : value,
+                      style: const TextStyle(
+                        fontSize: 12.5,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ),
+                  if (copy && value.isNotEmpty)
+                    InkWell(
+                      borderRadius: BorderRadius.circular(8),
+                      onTap: () {
+                        Clipboard.setData(ClipboardData(text: value));
+                        _showToast('Imenakiliwa', _ToastType.success);
+                      },
+                      child: const Padding(
+                        padding: EdgeInsets.all(4),
+                        child: Icon(
+                          Icons.copy_rounded,
+                          size: 15,
+                          color: Color(0xFF818CF8),
+                        ),
+                      ),
+                    ),
+                ],
+              ),
+            );
+          }
+
+          return SafeArea(
+            child: SingleChildScrollView(
+              padding: const EdgeInsets.fromLTRB(20, 10, 20, 20),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Center(
+                    child: Container(
+                      width: 40,
+                      height: 4,
+                      decoration: BoxDecoration(
+                        color: const Color(0x33FFFFFF),
+                        borderRadius: BorderRadius.circular(99),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 18),
+                  Row(
+                    children: [
+                      Container(
+                        width: 46,
+                        height: 46,
+                        decoration: BoxDecoration(
+                          color: color.withValues(alpha: 0.16),
+                          borderRadius: BorderRadius.circular(14),
+                        ),
+                        child: Icon(
+                          _paymentIcon(p.status),
+                          color: color,
+                          size: 24,
+                        ),
+                      ),
+                      const SizedBox(width: 14),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              fmtTzs(p.amount),
+                              style: const TextStyle(
+                                fontSize: 22,
+                                fontWeight: FontWeight.w900,
+                              ),
+                            ),
+                            Text(
+                              _swStatus(p.status),
+                              style: TextStyle(
+                                fontSize: 12.5,
+                                fontWeight: FontWeight.w700,
+                                color: color,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 14),
+                  const Divider(color: Color(0x14FFFFFF), height: 1),
+                  const SizedBox(height: 8),
+                  row('Mtumiaji', p.userName),
+                  row('Kifurushi', _planLabel(p.planKey)),
+                  row('Njia', p.method),
+                  row('Simu', p.phone),
+                  row('Namba ya SonicPesa', p.transactionId, copy: true),
+                  if (p.id != p.transactionId) row('Muamala', p.id, copy: true),
+                  row('Tarehe', _formatLogDateTime(p.createdAt.toLocal())),
+                  row(
+                    'Uhakiki wa mwisho',
+                    p.verifiedAt == null
+                        ? 'Bado'
+                        : '${adminTimeAgo(p.verifiedAt!)}${p.remoteStatus == null ? '' : ' · ${p.remoteStatus}'}',
+                  ),
+                  const SizedBox(height: 16),
+                  if (p.isSonicpesa)
+                    FilledButton.icon(
+                      onPressed: busy
+                          ? null
+                          : () async {
+                              setLocal(() => busy = true);
+                              final updated = await _verifyPayment(p);
+                              if (!ctx.mounted) return;
+                              setLocal(() {
+                                busy = false;
+                                if (updated != null) current = updated;
+                              });
+                            },
+                      style: FilledButton.styleFrom(
+                        backgroundColor: AdminColors.accentPrimary,
+                        foregroundColor: Colors.white,
+                        padding: const EdgeInsets.symmetric(vertical: 14),
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(14),
+                        ),
+                      ),
+                      icon: busy
+                          ? const SizedBox(
+                              width: 16,
+                              height: 16,
+                              child: CircularProgressIndicator(
+                                strokeWidth: 2,
+                                color: Colors.white,
+                              ),
+                            )
+                          : const Icon(Icons.verified_rounded, size: 18),
+                      label: Text(
+                        busy
+                            ? 'Inahakiki na SonicPesa…'
+                            : 'Hakiki na SonicPesa',
+                        style: const TextStyle(fontWeight: FontWeight.w700),
+                      ),
+                    ),
+                  const SizedBox(height: 8),
+                  Text(
+                    p.isSonicpesa
+                        ? 'Uhakiki unauliza SonicPesa moja kwa moja (taarifa sawa na sonicpesa.com/verify). '
+                              'Yakifanikiwa, premium ya mtumiaji huwashwa papo hapo.'
+                        : 'Muamala huu haukulipwa kupitia SonicPesa.',
+                    textAlign: TextAlign.center,
+                    style: const TextStyle(
+                      fontSize: 11,
+                      height: 1.4,
+                      color: AdminColors.textSecondary,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          );
+        },
+      ),
     );
   }
 
@@ -6737,7 +8547,7 @@ class _AdminScaffoldState extends State<AdminScaffold>
       final summaryRes = results[0];
       if (summaryRes.statusCode == 404) {
         throw Exception(
-          'Seva bado haina vikumbusho. Sasisha (deploy) backend mpya kwanza.',
+          'Seva bado haina reminder. Sasisha (deploy) backend mpya kwanza.',
         );
       }
       if (summaryRes.statusCode < 200 || summaryRes.statusCode >= 300) {
@@ -6775,7 +8585,7 @@ class _AdminScaffoldState extends State<AdminScaffold>
       setState(
         () => _remindersError = msg.contains('Seva')
             ? msg
-            : 'Imeshindwa kupakia vikumbusho. Angalia mtandao kisha ujaribu tena.',
+            : 'Imeshindwa kupakia reminder. Angalia mtandao kisha ujaribu tena.',
       );
     } finally {
       if (mounted) setState(() => _remindersLoading = false);
@@ -6841,7 +8651,7 @@ class _AdminScaffoldState extends State<AdminScaffold>
       final how = parts.length > 2 && parts[2] == 'auto'
           ? 'otomatiki'
           : 'admin';
-      return 'Kikumbusho · $who · $how';
+      return 'Reminder · $who · $how';
     }
     return target;
   }
@@ -6892,8 +8702,9 @@ class _AdminScaffoldState extends State<AdminScaffold>
         await _handleAdminUnauthorized();
         return;
       }
-      if (res.statusCode < 200 || res.statusCode >= 300)
+      if (res.statusCode < 200 || res.statusCode >= 300) {
         throw Exception('${res.statusCode}');
+      }
       if (!mounted) return;
       setState(() => _notifications.removeWhere((x) => x.id == n.id));
       _showToast('Imefutwa kwenye historia', _ToastType.success);
@@ -6908,7 +8719,7 @@ class _AdminScaffoldState extends State<AdminScaffold>
     final expiring = audience == 'expiring';
     if (!s.pushConfigured) {
       _showToast(
-        'FCM haijasanidiwa kwenye seva — vikumbusho haviwezi kutumwa.',
+        'FCM haijasanidiwa kwenye seva — reminder haziwezi kutumwa.',
         _ToastType.error,
       );
       return;
@@ -6937,7 +8748,7 @@ class _AdminScaffoldState extends State<AdminScaffold>
               borderRadius: BorderRadius.circular(20),
             ),
             title: Text(
-              expiring ? 'Kumbusha wanaokaribia kuisha' : 'Kumbusha walioisha',
+              expiring ? 'Reminder: vinakaribia kuisha' : 'Reminder: vimeisha',
               style: const TextStyle(fontWeight: FontWeight.w800),
             ),
             content: SizedBox(
@@ -6987,7 +8798,7 @@ class _AdminScaffoldState extends State<AdminScaffold>
                           ? null
                           : (v) => setLocal(() => onlyUnsent = v ?? false),
                       title: const Text(
-                        'Ruka waliokwisha kukumbushwa',
+                        'Ruka waliokwisha pata reminder',
                         style: TextStyle(fontSize: 13),
                       ),
                       subtitle: Text(
@@ -7008,8 +8819,8 @@ class _AdminScaffoldState extends State<AdminScaffold>
                       ),
                       child: Text(
                         recipients == 0
-                            ? 'Hakuna mtumiaji wa kutumiwa kikumbusho hiki.'
-                            : 'Watumiaji $recipients watapokea kikumbusho hiki.',
+                            ? 'Hakuna mtumiaji wa kutumiwa reminder hii.'
+                            : 'Watumiaji $recipients watapokea reminder hii.',
                         style: const TextStyle(
                           fontSize: 12.5,
                           fontWeight: FontWeight.w600,
@@ -7058,7 +8869,7 @@ class _AdminScaffoldState extends State<AdminScaffold>
                         child: CircularProgressIndicator(strokeWidth: 2),
                       )
                     : const Icon(Icons.send_rounded, size: 16),
-                label: Text(sending ? 'Inatuma…' : 'Tuma kikumbusho'),
+                label: Text(sending ? 'Inatuma…' : 'Tuma reminder'),
               ),
             ],
           );
@@ -7107,14 +8918,14 @@ class _AdminScaffoldState extends State<AdminScaffold>
         _showToast('Hakuna mtumiaji aliyestahili kutumiwa.', _ToastType.info);
       } else if (sent == 0) {
         _showToast(
-          'Hakuna kikumbusho kilichofika (vimeshindwa $failed). Huenda watumiaji hawajawasha arifa.',
+          'Hakuna reminder iliyofika (zimeshindwa $failed). Huenda watumiaji hawajawasha arifa.',
           _ToastType.error,
         );
       } else {
         _showToast(
           failed == 0
-              ? 'Vikumbusho $sent vimetumwa!'
-              : 'Vimetumwa $sent, vimeshindwa $failed (jumla $total).',
+              ? 'Reminder $sent zimetumwa!'
+              : 'Zimetumwa $sent, zimeshindwa $failed (jumla $total).',
           failed == 0 ? _ToastType.success : _ToastType.warning,
         );
       }
@@ -7142,21 +8953,51 @@ class _AdminScaffoldState extends State<AdminScaffold>
     return Container(
       width: double.infinity,
       margin: const EdgeInsets.only(bottom: 12),
-      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
       decoration: BoxDecoration(
-        color: color.withValues(alpha: 0.12),
-        borderRadius: BorderRadius.circular(14),
-        border: Border.all(color: color.withValues(alpha: 0.35)),
+        color: color.withValues(alpha: 0.10),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: color.withValues(alpha: 0.30)),
       ),
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Icon(icon, size: 18, color: color),
-          const SizedBox(width: 10),
+          Icon(icon, size: 16, color: color),
+          const SizedBox(width: 8),
           Expanded(
             child: Text(
               text,
-              style: const TextStyle(fontSize: 12.5, height: 1.4),
+              style: const TextStyle(fontSize: 12, height: 1.35),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _statusChip(IconData icon, String text, Color color) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.12),
+        borderRadius: BorderRadius.circular(999),
+        border: Border.all(color: color.withValues(alpha: 0.28)),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, size: 13, color: color),
+          const SizedBox(width: 6),
+          Flexible(
+            child: Text(
+              text,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                fontSize: 11.5,
+                fontWeight: FontWeight.w600,
+                color: Color.lerp(color, Colors.white, 0.35),
+              ),
             ),
           ),
         ],
@@ -7173,31 +9014,26 @@ class _AdminScaffoldState extends State<AdminScaffold>
     required List<ReminderUser> users,
     required Color color,
     required IconData icon,
-    required String actionLabel,
   }) {
-    final expiring = audience == 'expiring';
+    final loading = _remindersLoading && _reminderSummary == null;
     return Container(
-      padding: const EdgeInsets.all(16),
-      decoration: BoxDecoration(
-        color: AdminColors.bgTertiary,
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: color.withValues(alpha: 0.3)),
-      ),
+      padding: const EdgeInsets.fromLTRB(14, 14, 14, 12),
+      decoration: adminCardDecoration(radius: 18, glow: color, shadow: false),
       child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           Row(
             children: [
               Container(
-                width: 36,
-                height: 36,
+                width: 38,
+                height: 38,
                 decoration: BoxDecoration(
-                  color: color.withValues(alpha: 0.18),
-                  borderRadius: BorderRadius.circular(10),
+                  color: color.withValues(alpha: 0.16),
+                  borderRadius: BorderRadius.circular(11),
                 ),
-                child: Icon(icon, size: 18, color: color),
+                child: Icon(icon, size: 19, color: color),
               ),
-              const SizedBox(width: 10),
+              const SizedBox(width: 12),
               Expanded(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
@@ -7209,8 +9045,11 @@ class _AdminScaffoldState extends State<AdminScaffold>
                         fontSize: 14,
                       ),
                     ),
+                    const SizedBox(height: 1),
                     Text(
                       subtitle,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
                       style: const TextStyle(
                         fontSize: 11.5,
                         color: AdminColors.textSecondary,
@@ -7219,64 +9058,147 @@ class _AdminScaffoldState extends State<AdminScaffold>
                   ],
                 ),
               ),
-            ],
-          ),
-          const SizedBox(height: 14),
-          Row(
-            crossAxisAlignment: CrossAxisAlignment.end,
-            children: [
-              Text(
-                _remindersLoading && _reminderSummary == null ? '…' : '$count',
-                style: TextStyle(
-                  fontSize: 30,
-                  fontWeight: FontWeight.w800,
-                  color: color,
-                ),
-              ),
               const SizedBox(width: 8),
-              Padding(
-                padding: const EdgeInsets.only(bottom: 6),
-                child: Text(
-                  'watumiaji · $unsent hawajakumbushwa',
-                  style: const TextStyle(
-                    fontSize: 12,
-                    color: AdminColors.textSecondary,
-                  ),
+              Text(
+                loading ? '…' : '$count',
+                style: TextStyle(
+                  fontSize: 26,
+                  fontWeight: FontWeight.w900,
+                  color: color,
+                  letterSpacing: -0.5,
                 ),
               ),
             ],
           ),
           const SizedBox(height: 12),
-          SizedBox(
-            width: double.infinity,
-            child: FilledButton.icon(
-              onPressed: count == 0
-                  ? null
-                  : () => unawaited(_openReminderComposer(audience)),
-              style: FilledButton.styleFrom(
-                backgroundColor: color,
-                foregroundColor: Colors.white,
-              ),
-              icon: const Icon(Icons.notifications_active_rounded, size: 16),
-              label: Text(count == 0 ? 'Hakuna wa kukumbusha' : actionLabel),
-            ),
-          ),
-          if (users.isNotEmpty)
-            Theme(
-              data: Theme.of(
-                context,
-              ).copyWith(dividerColor: Colors.transparent),
-              child: ExpansionTile(
-                tilePadding: EdgeInsets.zero,
-                childrenPadding: EdgeInsets.zero,
-                title: Text(
-                  'Ona watumiaji (${users.length}${users.length < count ? ' kati ya $count' : ''})',
+          Row(
+            children: [
+              Expanded(
+                child: Text(
+                  unsent == 0
+                      ? (count == 0
+                            ? 'Hakuna wa kukumbusha'
+                            : 'Wote wamepata reminder')
+                      : '$unsent hawajapata reminder',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
                   style: const TextStyle(
-                    fontSize: 12.5,
-                    fontWeight: FontWeight.w600,
+                    fontSize: 11.5,
+                    color: AdminColors.textSecondary,
                   ),
                 ),
-                children: users.take(60).map((u) {
+              ),
+              if (users.isNotEmpty)
+                TextButton(
+                  onPressed: () => _openReminderUsersSheet(
+                    title: title,
+                    users: users,
+                    total: count,
+                    expiring: audience == 'expiring',
+                    color: color,
+                  ),
+                  style: TextButton.styleFrom(
+                    foregroundColor: AdminColors.textSecondary,
+                    visualDensity: VisualDensity.compact,
+                    padding: const EdgeInsets.symmetric(horizontal: 10),
+                  ),
+                  child: const Text(
+                    'Ona orodha',
+                    style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600),
+                  ),
+                ),
+              const SizedBox(width: 4),
+              FilledButton.icon(
+                onPressed: count == 0
+                    ? null
+                    : () => unawaited(_openReminderComposer(audience)),
+                style: FilledButton.styleFrom(
+                  backgroundColor: color,
+                  foregroundColor: Colors.white,
+                  visualDensity: VisualDensity.compact,
+                  padding: const EdgeInsets.symmetric(horizontal: 14),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(10),
+                  ),
+                ),
+                icon: const Icon(Icons.send_rounded, size: 14),
+                label: const Text(
+                  'Tuma',
+                  style: TextStyle(fontSize: 12.5, fontWeight: FontWeight.w700),
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _openReminderUsersSheet({
+    required String title,
+    required List<ReminderUser> users,
+    required int total,
+    required bool expiring,
+    required Color color,
+  }) {
+    showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: AdminColors.bgSecondary,
+      constraints: const BoxConstraints(maxWidth: 560),
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+      ),
+      builder: (ctx) => DraggableScrollableSheet(
+        expand: false,
+        initialChildSize: 0.65,
+        minChildSize: 0.4,
+        maxChildSize: 0.92,
+        builder: (ctx, scroll) => Column(
+          children: [
+            const SizedBox(height: 10),
+            Container(
+              width: 40,
+              height: 4,
+              decoration: BoxDecoration(
+                color: const Color(0x33FFFFFF),
+                borderRadius: BorderRadius.circular(99),
+              ),
+            ),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(20, 14, 20, 10),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      title,
+                      style: const TextStyle(
+                        fontSize: 16,
+                        fontWeight: FontWeight.w800,
+                      ),
+                    ),
+                  ),
+                  Text(
+                    users.length < total
+                        ? '${users.length} kati ya $total'
+                        : '$total',
+                    style: TextStyle(
+                      fontSize: 12.5,
+                      fontWeight: FontWeight.w700,
+                      color: color,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            Expanded(
+              child: ListView.builder(
+                controller: scroll,
+                padding: const EdgeInsets.fromLTRB(16, 0, 16, 20),
+                itemExtent: 64,
+                itemCount: users.length,
+                itemBuilder: (ctx, i) {
+                  final u = users[i];
                   final ends = u.endsAt;
                   final name = u.name.isEmpty || u.name == 'Viewer'
                       ? 'Mtumiaji'
@@ -7284,78 +9206,76 @@ class _AdminScaffoldState extends State<AdminScaffold>
                   final phone = u.phone.isEmpty || u.phone == 'N/A'
                       ? ''
                       : ' · ${u.phone}';
-                  return Container(
-                    margin: const EdgeInsets.only(bottom: 6),
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 10,
-                      vertical: 8,
-                    ),
-                    decoration: BoxDecoration(
-                      color: const Color(0x0DFFFFFF),
-                      borderRadius: BorderRadius.circular(10),
-                    ),
-                    child: Row(
-                      children: [
-                        Expanded(
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
+                  final reminded = u.remindedAt != null;
+                  return Row(
+                    children: [
+                      AdminAvatar(name, size: 34),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: Column(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              '$name$phone',
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(
+                                fontSize: 13,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                            if (ends != null)
                               Text(
-                                '$name$phone',
+                                '${expiring ? 'Kinaisha' : 'Kiliisha'} ${_swDayDistance(ends)} · ${_fmtAccessDate(ends)}',
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
                                 style: const TextStyle(
-                                  fontSize: 12.5,
-                                  fontWeight: FontWeight.w600,
+                                  fontSize: 11,
+                                  color: AdminColors.textSecondary,
                                 ),
                               ),
-                              if (ends != null)
-                                Text(
-                                  '${expiring ? 'Kinaisha' : 'Kiliisha'} ${_swDayDistance(ends)} · ${_fmtAccessDate(ends)}',
-                                  style: const TextStyle(
-                                    fontSize: 11,
-                                    color: AdminColors.textSecondary,
-                                  ),
-                                ),
-                            ],
-                          ),
+                          ],
                         ),
-                        _badge(
-                          u.remindedAt == null
-                              ? 'Hajakumbushwa'
-                              : 'Amekumbushwa ${_swDayDistance(u.remindedAt!)}',
-                          u.remindedAt == null
-                              ? const Color(0xFF94A3B8)
-                              : AdminColors.accentSuccess,
-                        ),
-                      ],
-                    ),
+                      ),
+                      const SizedBox(width: 8),
+                      _compactPill(
+                        reminded
+                            ? 'Amepata ${_swDayDistance(u.remindedAt!)}'
+                            : 'Hajapata',
+                        reminded
+                            ? AdminColors.accentSuccess
+                            : const Color(0xFF94A3B8),
+                      ),
+                    ],
                   );
-                }).toList(),
+                },
               ),
             ),
-        ],
+          ],
+        ),
       ),
     );
   }
 
+  bool _isReminderNotification(AdminNotification n) =>
+      n.type == 'reminder' || n.target.startsWith('reminder:');
+
   Widget _notificationHistoryTile(AdminNotification n) {
     final (label, color) = _deliveryBadge(n.delivery);
-    final isReminder = n.type == 'reminder' || n.target.startsWith('reminder:');
+    final isReminder = _isReminderNotification(n);
     return Container(
-      margin: const EdgeInsets.only(bottom: 10),
-      padding: const EdgeInsets.fromLTRB(16, 14, 8, 14),
-      decoration: BoxDecoration(
-        color: AdminColors.bgTertiary,
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: const Color(0x0DFFFFFF)),
-      ),
+      margin: const EdgeInsets.only(bottom: 8),
+      padding: const EdgeInsets.fromLTRB(12, 10, 2, 10),
+      decoration: adminCardDecoration(radius: 14, shadow: false),
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Container(
-            width: 34,
-            height: 34,
+            width: 32,
+            height: 32,
             decoration: BoxDecoration(
-              color: color.withValues(alpha: 0.18),
+              color: color.withValues(alpha: 0.16),
               borderRadius: BorderRadius.circular(9),
             ),
             child: Icon(
@@ -7364,61 +9284,74 @@ class _AdminScaffoldState extends State<AdminScaffold>
               color: color,
             ),
           ),
-          const SizedBox(width: 12),
+          const SizedBox(width: 10),
           Expanded(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(
-                  n.title,
-                  style: const TextStyle(
-                    fontWeight: FontWeight.w700,
-                    fontSize: 13,
-                  ),
+                Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        n.title,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          fontWeight: FontWeight.w700,
+                          fontSize: 13,
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 6),
+                    Text(
+                      adminTimeAgo(n.createdAt),
+                      style: const TextStyle(
+                        fontSize: 10.5,
+                        color: AdminColors.textSecondary,
+                      ),
+                    ),
+                  ],
                 ),
                 const SizedBox(height: 2),
                 Text(
                   n.message,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
                   style: const TextStyle(
                     fontSize: 12,
                     height: 1.35,
                     color: AdminColors.textSecondary,
                   ),
                 ),
-                const SizedBox(height: 8),
+                const SizedBox(height: 7),
                 Wrap(
                   spacing: 6,
-                  runSpacing: 6,
+                  runSpacing: 4,
                   crossAxisAlignment: WrapCrossAlignment.center,
                   children: [
-                    _badge(label, color),
-                    _badge(
+                    _compactPill(label, color),
+                    _compactPill(
                       _notificationTargetLabel(n.target),
-                      AdminColors.accentPrimary,
+                      const Color(0xFF818CF8),
                     ),
                     if (n.sentCount + n.failedCount > 0)
                       Text(
                         'imefika ${n.sentCount}${n.failedCount > 0 ? ' · imeshindwa ${n.failedCount}' : ''}',
                         style: const TextStyle(
-                          fontSize: 11,
+                          fontSize: 10.5,
                           color: AdminColors.textSecondary,
                         ),
                       ),
-                    Text(
-                      _formatLogDateTime(n.createdAt),
-                      style: const TextStyle(
-                        fontSize: 11,
-                        color: AdminColors.textSecondary,
-                      ),
-                    ),
                   ],
                 ),
                 if (n.error != null) ...[
-                  const SizedBox(height: 6),
+                  const SizedBox(height: 5),
                   Text(
                     n.error!,
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
                     style: const TextStyle(
-                      fontSize: 11.5,
+                      fontSize: 11,
                       color: Color(0xFFF87171),
                     ),
                   ),
@@ -7428,10 +9361,11 @@ class _AdminScaffoldState extends State<AdminScaffold>
           ),
           IconButton(
             tooltip: 'Futa kwenye historia',
+            visualDensity: VisualDensity.compact,
             onPressed: () => unawaited(_deleteNotification(n)),
             icon: const Icon(
               Icons.delete_outline_rounded,
-              size: 18,
+              size: 17,
               color: Color(0xFF6B7280),
             ),
           ),
@@ -7443,252 +9377,884 @@ class _AdminScaffoldState extends State<AdminScaffold>
   Widget _pageNotifications() {
     final s = _reminderSummary;
     final days = s?.days ?? 3;
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
+    final reminders = _notifications.where(_isReminderNotification).length;
+    final history = switch (_historyFilter) {
+      1 => _notifications.where((n) => !_isReminderNotification(n)).toList(),
+      2 => _notifications.where(_isReminderNotification).toList(),
+      _ => _notifications,
+    };
+    final shown = history.take(_historyShown).toList();
+    final actions = Row(
+      mainAxisSize: MainAxisSize.min,
       children: [
-        _pageTitleRow(
-          title: 'Arifa na vikumbusho',
-          subtitle:
-              'Tuma ujumbe kwa watumiaji na uwakumbushe kulipia vifurushi vyao',
-          action: Wrap(
-            spacing: 8,
-            runSpacing: 8,
-            children: [
-              _btnOutline(
-                label: _remindersLoading ? 'Inapakia…' : 'Pakia upya',
-                icon: Icons.refresh_rounded,
-                onTap: () {
+        IconButton(
+          tooltip: 'Pakia upya',
+          onPressed: _remindersLoading
+              ? null
+              : () {
                   unawaited(_loadReminderData());
                   unawaited(_reloadNotifications());
                 },
-              ),
-              _btnPrimary(
-                label: 'Tuma arifa',
-                icon: Icons.send_rounded,
-                small: true,
-                onTap: _modalSendNotification,
-              ),
-            ],
-          ),
+          icon: _remindersLoading
+              ? const SizedBox(
+                  width: 16,
+                  height: 16,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                )
+              : const Icon(
+                  Icons.refresh_rounded,
+                  size: 20,
+                  color: AdminColors.textSecondary,
+                ),
         ),
-        const SizedBox(height: 16),
-        if (_remindersError != null)
-          _reminderNotice(
-            _remindersError!,
-            color: AdminColors.accentDanger,
-            icon: Icons.error_outline_rounded,
-          ),
-        if (s != null && !s.pushConfigured)
-          _reminderNotice(
-            'FCM haijasanidiwa kwenye seva, kwa hiyo vikumbusho havitafika. '
-            'Weka FCM_SERVICE_ACCOUNT_JSON kwenye Railway (Firebase → Project settings → Service accounts).',
-          ),
-        if (s != null && s.pushConfigured)
-          _reminderNotice(
-            s.autoReminders
-                ? 'Vikumbusho otomatiki vimewashwa: kila mtumiaji ambaye kifurushi chake kinaisha ndani ya siku $days '
-                      'hutumiwa kikumbusho mara moja, kati ya saa 2 asubuhi na saa 2 usiku.'
-                : 'Vikumbusho otomatiki vimezimwa (REMINDER_AUTO_ENABLED=false). Tuma kwa mkono hapa chini.',
-            color: s.autoReminders
-                ? AdminColors.accentSuccess
-                : const Color(0xFF94A3B8),
-            icon: s.autoReminders
-                ? Icons.auto_mode_rounded
-                : Icons.pause_circle_outline_rounded,
-          ),
-        LayoutBuilder(
-          builder: (context, c) {
-            final a = _reminderCard(
-              audience: 'expiring',
-              title: 'Vinakaribia kuisha',
-              subtitle: 'Vifurushi vinavyoisha ndani ya siku $days',
-              count: s?.expiring ?? 0,
-              unsent: s?.expiringUnsent ?? 0,
-              users: _expiringUsers,
-              color: const Color(0xFFF59E0B),
-              icon: Icons.hourglass_bottom_rounded,
-              actionLabel: 'Tuma kikumbusho',
-            );
-            final b = _reminderCard(
-              audience: 'expired',
-              title: 'Vimeisha',
-              subtitle: 'Watumiaji ambao vifurushi vyao vimeshaisha',
-              count: s?.expired ?? 0,
-              unsent: s?.expiredUnsent ?? 0,
-              users: _expiredUsers,
-              color: AdminColors.accentDanger,
-              icon: Icons.event_busy_rounded,
-              actionLabel: 'Tuma kwa walioisha',
-            );
-            if (c.maxWidth < 900)
-              return Column(children: [a, const SizedBox(height: 12), b]);
-            return Row(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Expanded(child: a),
-                const SizedBox(width: 12),
-                Expanded(child: b),
-              ],
-            );
-          },
+        const SizedBox(width: 4),
+        _btnPrimary(
+          label: 'Tuma arifa',
+          icon: Icons.send_rounded,
+          small: true,
+          onTap: _modalSendNotification,
         ),
-        const SizedBox(height: 24),
-        const Text(
-          'Historia ya arifa',
-          style: TextStyle(fontSize: 16, fontWeight: FontWeight.w800),
-        ),
-        const SizedBox(height: 4),
-        const Text(
-          'Kila arifa na kikumbusho kilichotumwa, pamoja na kama kilifika.',
-          style: TextStyle(fontSize: 12, color: AdminColors.textSecondary),
-        ),
-        const SizedBox(height: 12),
-        if (_notifications.isEmpty)
-          Container(
-            width: double.infinity,
-            padding: const EdgeInsets.all(24),
-            decoration: BoxDecoration(
-              color: AdminColors.bgTertiary,
-              borderRadius: BorderRadius.circular(16),
-            ),
-            child: const Text(
-              'Hakuna arifa zilizotumwa bado.',
-              textAlign: TextAlign.center,
-              style: TextStyle(color: AdminColors.textSecondary),
-            ),
-          ),
-        ..._notifications.map(_notificationHistoryTile),
       ],
+    );
+    return LayoutBuilder(
+      builder: (context, c) {
+        final wide = c.maxWidth >= 560;
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            _pageTitleRow(
+              title: 'Arifa na Reminder',
+              subtitle: 'Tuma arifa na uwakumbushe watumiaji kulipia vifurushi',
+              action: wide ? actions : null,
+            ),
+            if (!wide) ...[
+              const SizedBox(height: 10),
+              Align(alignment: Alignment.centerRight, child: actions),
+            ],
+            const SizedBox(height: 14),
+            if (_remindersError != null)
+              _reminderNotice(
+                _remindersError!,
+                color: AdminColors.accentDanger,
+                icon: Icons.error_outline_rounded,
+              ),
+            if (s != null && !s.pushConfigured)
+              _reminderNotice(
+                'FCM haijasanidiwa kwenye seva, kwa hiyo arifa hazitafika. '
+                'Weka FCM_SERVICE_ACCOUNT_JSON kwenye Railway.',
+              ),
+            if (s != null)
+              Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: [
+                  if (s.pushConfigured)
+                    _statusChip(
+                      Icons.check_circle_rounded,
+                      'Arifa ziko tayari',
+                      AdminColors.accentSuccess,
+                    ),
+                  _statusChip(
+                    s.autoReminders
+                        ? Icons.auto_mode_rounded
+                        : Icons.pause_circle_outline_rounded,
+                    s.autoReminders
+                        ? 'Reminder otomatiki: zimewashwa'
+                        : 'Reminder otomatiki: zimezimwa',
+                    s.autoReminders
+                        ? AdminColors.accentPrimary
+                        : const Color(0xFF94A3B8),
+                  ),
+                  if (s.autoReminders) ...[
+                    _statusChip(
+                      Icons.schedule_rounded,
+                      'Saa 2 asubuhi – saa 2 usiku',
+                      const Color(0xFF38BDF8),
+                    ),
+                    _statusChip(
+                      Icons.hourglass_bottom_rounded,
+                      'Siku $days kabla ya kuisha',
+                      AdminColors.accentWarning,
+                    ),
+                    _statusChip(
+                      Icons.event_busy_rounded,
+                      'Walioisha ndani ya siku 2',
+                      AdminColors.accentDanger,
+                    ),
+                  ],
+                ],
+              ),
+            const SizedBox(height: 14),
+            Builder(
+              builder: (context) {
+                final a = _reminderCard(
+                  audience: 'expiring',
+                  title: 'Vinakaribia kuisha',
+                  subtitle: 'Vinaisha ndani ya siku $days',
+                  count: s?.expiring ?? 0,
+                  unsent: s?.expiringUnsent ?? 0,
+                  users: _expiringUsers,
+                  color: const Color(0xFFF59E0B),
+                  icon: Icons.hourglass_bottom_rounded,
+                );
+                final b = _reminderCard(
+                  audience: 'expired',
+                  title: 'Vimeisha',
+                  subtitle: 'Vifurushi vilivyokwisha',
+                  count: s?.expired ?? 0,
+                  unsent: s?.expiredUnsent ?? 0,
+                  users: _expiredUsers,
+                  color: AdminColors.accentDanger,
+                  icon: Icons.event_busy_rounded,
+                );
+                if (c.maxWidth < 760) {
+                  return Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [a, const SizedBox(height: 10), b],
+                  );
+                }
+                return Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Expanded(child: a),
+                    const SizedBox(width: 12),
+                    Expanded(child: b),
+                  ],
+                );
+              },
+            ),
+            const SizedBox(height: 22),
+            const Text(
+              'Historia',
+              style: TextStyle(fontSize: 15, fontWeight: FontWeight.w800),
+            ),
+            const SizedBox(height: 10),
+            AdminFilterChips(
+              options: [
+                AdminFilterOption('Zote', count: _notifications.length),
+                AdminFilterOption(
+                  'Arifa',
+                  count: _notifications.length - reminders,
+                ),
+                AdminFilterOption(
+                  'Reminder',
+                  count: reminders,
+                  color: AdminColors.accentWarning,
+                ),
+              ],
+              selected: _historyFilter,
+              onSelected: (i) => setState(() {
+                _historyFilter = i;
+                _historyShown = 30;
+              }),
+            ),
+            const SizedBox(height: 12),
+            if (history.isEmpty)
+              _emptyListState(
+                Icons.notifications_none_rounded,
+                'Hakuna kilichotumwa bado.',
+              ),
+            ...shown.map(_notificationHistoryTile),
+            if (history.length > shown.length)
+              Center(
+                child: TextButton(
+                  onPressed: () => setState(() => _historyShown += 30),
+                  child: Text(
+                    'Onyesha zaidi (${history.length - shown.length})',
+                    style: const TextStyle(fontWeight: FontWeight.w600),
+                  ),
+                ),
+              ),
+          ],
+        );
+      },
     );
   }
 
   // --- Analytics ---
   Widget _pageAnalytics() {
+    final stats = _effectiveStats;
+    final loading = stats == null;
+    final live = stats?.live ?? const AdminLiveStats();
+    final total = stats?.totalUsers ?? 0;
+    final premium = stats?.premiumUsers ?? 0;
+    final updated = _statsFetchedAt;
     return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        const Text(
-          'Takwimu',
-          style: TextStyle(fontSize: 24, fontWeight: FontWeight.w800),
+        Row(
+          children: [
+            Expanded(
+              child: Row(
+                children: [
+                  const Flexible(child: AdminPageHeading('Takwimu')),
+                  const SizedBox(width: 10),
+                  if (_hasAdminSession && !_statsRefreshFailed && !loading)
+                    const AdminLiveBadge(),
+                ],
+              ),
+            ),
+            IconButton(
+              tooltip: 'Sasisha sasa',
+              onPressed: () => unawaited(_refreshDashboardStats()),
+              icon: const Icon(
+                Icons.refresh_rounded,
+                size: 20,
+                color: AdminColors.textSecondary,
+              ),
+            ),
+          ],
         ),
-        const SizedBox(height: 4),
         Text(
-          _dashboardSubtitle(),
-          style: const TextStyle(
+          _statsRefreshFailed
+              ? 'Imeshindwa kusasisha — inajaribu tena…'
+              : updated == null
+              ? 'Inapakia takwimu…'
+              : 'Inajisasisha kila sekunde 10 · mara ya mwisho ${adminTimeAgo(updated)}',
+          style: TextStyle(
             fontSize: 12,
-            color: AdminColors.textSecondary,
+            color: _statsRefreshFailed
+                ? const Color(0xFFF87171)
+                : AdminColors.textSecondary,
           ),
         ),
         const SizedBox(height: 16),
         LayoutBuilder(
           builder: (context, c) {
-            final stacked = c.maxWidth < 1024;
-            final a = _chartCard('Usajili wa kila siku', 250, _dailyRegChart());
-            final b = _chartCard(
-              'Vifurushi vilivyonunuliwa',
-              250,
-              _subDoughnut(),
-            );
-            if (stacked)
-              return Column(children: [a, const SizedBox(height: 16), b]);
-            return Row(
-              crossAxisAlignment: CrossAxisAlignment.start,
+            final cols = c.maxWidth < 640 ? 2 : (c.maxWidth < 1100 ? 3 : 4);
+            final cards = <Widget>[
+              _statCard(
+                label: 'Online sasa (dak 5)',
+                value: loading ? null : live.onlineNow,
+                icon: Icons.wifi_tethering_rounded,
+                iconBg: const Color(0x2210B981),
+                iconColor: const Color(0xFF34D399),
+              ),
+              _statCard(
+                label: 'Waliotumia leo',
+                value: loading ? null : live.activeToday,
+                icon: Icons.today_rounded,
+                iconBg: const Color(0x223B82F6),
+                iconColor: const Color(0xFF60A5FA),
+              ),
+              _statCard(
+                label: 'Wapya leo',
+                value: loading ? null : live.newUsersToday,
+                icon: Icons.person_add_alt_1_rounded,
+                iconBg: const Color(0x226366F1),
+                iconColor: const Color(0xFF818CF8),
+                onTap: () => _navigate(AdminPageId.users),
+              ),
+              _statCard(
+                label: 'Mapato ya leo',
+                value: stats?.revenue,
+                format: fmtTzs,
+                icon: Icons.payments_rounded,
+                iconBg: const Color(0x229333EA),
+                iconColor: const Color(0xFFC084FC),
+              ),
+              _statCard(
+                label: 'Mapato siku 7',
+                value: loading ? null : live.revenue7d,
+                format: fmtTzs,
+                icon: Icons.date_range_rounded,
+                iconBg: const Color(0x229333EA),
+                iconColor: const Color(0xFFC084FC),
+              ),
+              _statCard(
+                label: 'Mapato siku 30',
+                value: loading ? null : live.revenue30d,
+                format: fmtTzs,
+                icon: Icons.calendar_month_rounded,
+                iconBg: const Color(0x229333EA),
+                iconColor: const Color(0xFFC084FC),
+              ),
+              _statCard(
+                label: 'Malipo yanasubiri',
+                value: loading ? null : live.pendingPayments,
+                icon: Icons.hourglass_top_rounded,
+                iconBg: const Color(0x22F59E0B),
+                iconColor: const Color(0xFFFBBF24),
+                onTap: () {
+                  _payFilter = 2;
+                  _navigate(AdminPageId.payments);
+                },
+              ),
+              _statCard(
+                label: total > 0
+                    ? 'Premium hai · ${(premium * 100 / total).toStringAsFixed(1)}%'
+                    : 'Premium hai',
+                value: loading ? null : premium,
+                icon: Icons.workspace_premium_rounded,
+                iconBg: const Color(0x22F59E0B),
+                iconColor: const Color(0xFFFBBF24),
+                onTap: () => _navigate(AdminPageId.subscriptions),
+              ),
+            ];
+            return GridView(
+              shrinkWrap: true,
+              physics: const NeverScrollableScrollPhysics(),
+              gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+                crossAxisCount: cols,
+                mainAxisSpacing: 12,
+                crossAxisSpacing: 12,
+                mainAxisExtent: 124,
+              ),
               children: [
-                Expanded(child: a),
-                const SizedBox(width: 16),
-                Expanded(child: b),
+                for (var i = 0; i < cards.length; i++)
+                  FadeSlideIn(index: i, child: cards[i]),
               ],
             );
           },
         ),
+        const SizedBox(height: 16),
+        _analyticsTrendCard(stats),
+        const SizedBox(height: 16),
+        LayoutBuilder(
+          builder: (context, c) {
+            final a = _analyticsPlanCard(stats);
+            final b = _analyticsAudienceCard(stats);
+            if (c.maxWidth < 900) {
+              return Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [a, const SizedBox(height: 16), b],
+              );
+            }
+            return IntrinsicHeight(
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Expanded(child: a),
+                  const SizedBox(width: 16),
+                  Expanded(child: b),
+                ],
+              ),
+            );
+          },
+        ),
+        const SizedBox(height: 16),
+        _analyticsRecentPayments(stats),
       ],
     );
   }
 
-  Widget _dailyRegChart() {
-    final stats = _effectiveStats;
-    final counts = stats?.dailyRegistrations ?? const [0.0, 0, 0, 0, 0, 0, 0];
-    final n = counts.length;
-    final maxY = counts.fold<double>(0, (a, b) => b > a ? b : a);
-    final yMax = maxY <= 0 ? 1.0 : maxY * 1.15;
-    final spots = List.generate(
-      n,
-      (i) => FlSpot(i.toDouble(), i < counts.length ? counts[i] : 0),
+  Widget _analyticsCardTitle(String title, {Widget? trailing}) {
+    return Row(
+      children: [
+        Container(
+          width: 4,
+          height: 16,
+          decoration: BoxDecoration(
+            gradient: adminBrandGradient,
+            borderRadius: BorderRadius.circular(4),
+          ),
+        ),
+        const SizedBox(width: 8),
+        Expanded(
+          child: Text(
+            title,
+            style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 13.5),
+          ),
+        ),
+        ?trailing,
+      ],
     );
-    return LineChart(
-      LineChartData(
-        gridData: const FlGridData(show: false),
-        borderData: FlBorderData(show: false),
-        titlesData: const FlTitlesData(show: false),
-        minY: 0,
-        maxY: yMax,
-        lineBarsData: [
-          LineChartBarData(
-            spots: spots.isEmpty ? const [FlSpot(0, 0)] : spots,
-            isCurved: true,
-            color: AdminColors.accentPrimary,
-            barWidth: 2,
-            belowBarData: BarAreaData(
-              show: true,
-              color: const Color(0x1A6366F1),
+  }
+
+  Widget _analyticsTrendCard(AdminDashboardStats? stats) {
+    final days = stats?.days14 ?? const <AdminDayStat>[];
+    const metrics = ['Usajili', 'Mauzo', 'Mapato'];
+    const colors = [Color(0xFF818CF8), Color(0xFF34D399), Color(0xFFC084FC)];
+    final m = _analyticsMetric;
+    final color = colors[m];
+    final values = [
+      for (final d in days)
+        switch (m) {
+          0 => d.registrations.toDouble(),
+          1 => d.purchases.toDouble(),
+          _ => d.revenue,
+        },
+    ];
+    final total = values.fold<double>(0, (a, b) => a + b);
+    final peak = values.fold<double>(0, max);
+    String fmt(num v) => m == 2 ? fmtTzs(v) : '${v.round()}';
+    final step = peak <= 0 ? 1.0 : max(1.0, (peak / 4).ceilToDouble());
+    final maxY = peak <= 0 ? 4.0 : (peak / step).ceil() * step + step * 0.25;
+    const swDays = ['Jtt', 'Jnn', 'Jtn', 'Alh', 'Iju', 'Jms', 'Jpl'];
+
+    return Container(
+      padding: const EdgeInsets.fromLTRB(18, 16, 18, 14),
+      decoration: adminCardDecoration(),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          _analyticsCardTitle(
+            'Siku 14 zilizopita',
+            trailing: Text(
+              'Jumla: ${fmt(total)}',
+              style: TextStyle(
+                fontSize: 12.5,
+                fontWeight: FontWeight.w800,
+                color: color,
+              ),
             ),
+          ),
+          const SizedBox(height: 12),
+          AdminFilterChips(
+            options: [
+              for (var i = 0; i < metrics.length; i++)
+                AdminFilterOption(metrics[i], color: colors[i]),
+            ],
+            selected: m,
+            onSelected: (i) => setState(() => _analyticsMetric = i),
+          ),
+          const SizedBox(height: 18),
+          SizedBox(
+            height: 220,
+            child: days.isEmpty
+                ? Center(
+                    child: Text(
+                      stats == null
+                          ? 'Inapakia…'
+                          : 'Sasisha (deploy) backend mpya ili kuona takwimu za kila siku.',
+                      textAlign: TextAlign.center,
+                      style: const TextStyle(
+                        fontSize: 12,
+                        color: AdminColors.textSecondary,
+                      ),
+                    ),
+                  )
+                : LayoutBuilder(
+                    builder: (context, c) {
+                      final barW = (c.maxWidth / days.length * 0.5).clamp(
+                        6.0,
+                        22.0,
+                      );
+                      return BarChart(
+                        BarChartData(
+                          maxY: maxY,
+                          minY: 0,
+                          alignment: BarChartAlignment.spaceAround,
+                          borderData: FlBorderData(show: false),
+                          gridData: FlGridData(
+                            drawVerticalLine: false,
+                            horizontalInterval: step,
+                            getDrawingHorizontalLine: (_) => const FlLine(
+                              color: Color(0x12FFFFFF),
+                              strokeWidth: 1,
+                            ),
+                          ),
+                          barTouchData: BarTouchData(
+                            touchTooltipData: BarTouchTooltipData(
+                              getTooltipColor: (_) => AdminColors.bgSecondary,
+                              tooltipRoundedRadius: 10,
+                              getTooltipItem: (group, gi, rod, ri) {
+                                final d = days[group.x].day;
+                                return BarTooltipItem(
+                                  '${swDays[d.weekday - 1]} ${d.day}/${d.month}\n',
+                                  const TextStyle(
+                                    fontSize: 11,
+                                    color: AdminColors.textSecondary,
+                                  ),
+                                  children: [
+                                    TextSpan(
+                                      text: fmt(rod.toY),
+                                      style: TextStyle(
+                                        fontSize: 13,
+                                        fontWeight: FontWeight.w800,
+                                        color: color,
+                                      ),
+                                    ),
+                                  ],
+                                );
+                              },
+                            ),
+                          ),
+                          titlesData: FlTitlesData(
+                            topTitles: const AxisTitles(),
+                            rightTitles: const AxisTitles(),
+                            leftTitles: AxisTitles(
+                              sideTitles: SideTitles(
+                                showTitles: true,
+                                reservedSize: m == 2 ? 40 : 30,
+                                interval: step,
+                                getTitlesWidget: (v, meta) {
+                                  final r = v / step;
+                                  if ((r - r.round()).abs() > 0.01) {
+                                    return const SizedBox.shrink();
+                                  }
+                                  return Text(
+                                    m == 2
+                                        ? fmtTzsAxis(v)
+                                        : v.toInt().toString(),
+                                    style: const TextStyle(
+                                      fontSize: 10,
+                                      color: Color(0xFF6B7280),
+                                    ),
+                                  );
+                                },
+                              ),
+                            ),
+                            bottomTitles: AxisTitles(
+                              sideTitles: SideTitles(
+                                showTitles: true,
+                                reservedSize: 24,
+                                getTitlesWidget: (v, meta) {
+                                  final i = v.toInt();
+                                  if (i < 0 || i >= days.length) {
+                                    return const SizedBox.shrink();
+                                  }
+                                  final last = i == days.length - 1;
+                                  if (c.maxWidth < 480 && i.isOdd && !last) {
+                                    return const SizedBox.shrink();
+                                  }
+                                  return Padding(
+                                    padding: const EdgeInsets.only(top: 6),
+                                    child: Text(
+                                      last ? 'Leo' : '${days[i].day.day}',
+                                      style: TextStyle(
+                                        fontSize: 10,
+                                        fontWeight: last
+                                            ? FontWeight.w800
+                                            : FontWeight.w500,
+                                        color: last
+                                            ? color
+                                            : const Color(0xFF6B7280),
+                                      ),
+                                    ),
+                                  );
+                                },
+                              ),
+                            ),
+                          ),
+                          barGroups: [
+                            for (var i = 0; i < values.length; i++)
+                              BarChartGroupData(
+                                x: i,
+                                barRods: [
+                                  BarChartRodData(
+                                    toY: values[i],
+                                    width: barW,
+                                    borderRadius: const BorderRadius.vertical(
+                                      top: Radius.circular(5),
+                                    ),
+                                    gradient: LinearGradient(
+                                      begin: Alignment.bottomCenter,
+                                      end: Alignment.topCenter,
+                                      colors: [
+                                        color.withValues(alpha: 0.35),
+                                        color,
+                                      ],
+                                    ),
+                                    backDrawRodData: BackgroundBarChartRodData(
+                                      show: true,
+                                      toY: maxY,
+                                      color: const Color(0x08FFFFFF),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                          ],
+                        ),
+                        duration: const Duration(milliseconds: 350),
+                      );
+                    },
+                  ),
           ),
         ],
       ),
     );
   }
 
-  Widget _subDoughnut() {
-    final stats = _effectiveStats;
-    final gold = (stats?.planGold ?? 0).toDouble();
-    final plat = (stats?.planPlatinum ?? 0).toDouble();
-    final week = (stats?.planWeekly ?? 0).toDouble();
-    final other = (stats?.planOther ?? 0).toDouble();
-    final total = gold + plat + week + other;
-    if (total <= 0) {
-      return const Center(
-        child: Text(
-          'Hakuna malipo ya vifurushi yaliyokamilika bado',
-          style: TextStyle(color: AdminColors.textSecondary, fontSize: 12),
+  Widget _analyticsPlanCard(AdminDashboardStats? stats) {
+    final items = <(String, int, Color)>[
+      ('Wiki', stats?.planWeekly ?? 0, const Color(0xFF3B82F6)),
+      ('Mwezi', stats?.planGold ?? 0, const Color(0xFFF59E0B)),
+      ('Miezi 3', stats?.planPlatinum ?? 0, const Color(0xFF8B5CF6)),
+      if ((stats?.planOther ?? 0) > 0)
+        ('Nyingine', stats!.planOther, const Color(0xFF6B7280)),
+    ];
+    final total = items.fold<int>(0, (a, e) => a + e.$2);
+    return Container(
+      padding: const EdgeInsets.all(18),
+      decoration: adminCardDecoration(),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          _analyticsCardTitle('Vifurushi vilivyonunuliwa'),
+          const SizedBox(height: 16),
+          Row(
+            children: [
+              SizedBox(
+                width: 130,
+                height: 130,
+                child: Stack(
+                  alignment: Alignment.center,
+                  children: [
+                    PieChart(
+                      PieChartData(
+                        sectionsSpace: total > 0 ? 3 : 0,
+                        centerSpaceRadius: 44,
+                        startDegreeOffset: -90,
+                        sections: total == 0
+                            ? [
+                                PieChartSectionData(
+                                  value: 1,
+                                  color: const Color(0x14FFFFFF),
+                                  radius: 16,
+                                  showTitle: false,
+                                ),
+                              ]
+                            : [
+                                for (final (_, count, color) in items)
+                                  if (count > 0)
+                                    PieChartSectionData(
+                                      value: count.toDouble(),
+                                      color: color,
+                                      radius: 16,
+                                      showTitle: false,
+                                    ),
+                              ],
+                      ),
+                    ),
+                    Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Text(
+                          '$total',
+                          style: const TextStyle(
+                            fontSize: 20,
+                            fontWeight: FontWeight.w900,
+                          ),
+                        ),
+                        const Text(
+                          'mauzo',
+                          style: TextStyle(
+                            fontSize: 10.5,
+                            color: AdminColors.textSecondary,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(width: 18),
+              Expanded(
+                child: Column(
+                  children: [
+                    for (final (label, count, color) in items)
+                      Padding(
+                        padding: const EdgeInsets.symmetric(vertical: 6),
+                        child: _analyticsShareRow(
+                          label: label,
+                          value: '$count',
+                          share: total == 0 ? 0 : count / total,
+                          color: color,
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _analyticsShareRow({
+    required String label,
+    required String value,
+    required double share,
+    required Color color,
+  }) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Row(
+          children: [
+            Container(
+              width: 8,
+              height: 8,
+              decoration: BoxDecoration(color: color, shape: BoxShape.circle),
+            ),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                label,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(fontSize: 12.5),
+              ),
+            ),
+            Text(
+              value,
+              style: const TextStyle(
+                fontSize: 12.5,
+                fontWeight: FontWeight.w800,
+              ),
+            ),
+            SizedBox(
+              width: 44,
+              child: Text(
+                '${(share * 100).round()}%',
+                textAlign: TextAlign.right,
+                style: const TextStyle(
+                  fontSize: 11,
+                  color: AdminColors.textSecondary,
+                ),
+              ),
+            ),
+          ],
         ),
-      );
-    }
-    return PieChart(
-      PieChartData(
-        sectionsSpace: 2,
-        centerSpaceRadius: 44,
-        sections: [
-          if (gold > 0)
-            PieChartSectionData(
-              value: gold,
-              color: const Color(0xFFF59E0B),
-              title: 'Dhahabu',
-              radius: 48,
-              titleStyle: const TextStyle(fontSize: 10, color: Colors.white),
+        const SizedBox(height: 5),
+        ClipRRect(
+          borderRadius: BorderRadius.circular(99),
+          child: TweenAnimationBuilder<double>(
+            tween: Tween(end: share.clamp(0.0, 1.0)),
+            duration: const Duration(milliseconds: 600),
+            curve: Curves.easeOutCubic,
+            builder: (context, v, _) => LinearProgressIndicator(
+              value: v,
+              minHeight: 4,
+              backgroundColor: const Color(0x12FFFFFF),
+              valueColor: AlwaysStoppedAnimation(color),
             ),
-          if (plat > 0)
-            PieChartSectionData(
-              value: plat,
-              color: const Color(0xFF8B5CF6),
-              title: 'Platinum',
-              radius: 48,
-              titleStyle: const TextStyle(fontSize: 10, color: Colors.white),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _analyticsAudienceCard(AdminDashboardStats? stats) {
+    final total = stats?.totalUsers ?? 0;
+    final live = stats?.live ?? const AdminLiveStats();
+    double share(int v) => total <= 0 ? 0 : v / total;
+    final rows = <(String, int, Color)>[
+      ('Premium hai', stats?.premiumUsers ?? 0, const Color(0xFFFBBF24)),
+      ('Bure', stats?.freeUsers ?? 0, const Color(0xFF94A3B8)),
+      ('Walioingia siku 7', live.active7d, const Color(0xFF60A5FA)),
+      ('Waliotumia leo', live.activeToday, const Color(0xFF34D399)),
+    ];
+    return Container(
+      padding: const EdgeInsets.all(18),
+      decoration: adminCardDecoration(),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          _analyticsCardTitle(
+            'Watumiaji',
+            trailing: Text(
+              '$total jumla',
+              style: const TextStyle(
+                fontSize: 12.5,
+                fontWeight: FontWeight.w800,
+                color: Color(0xFF818CF8),
+              ),
             ),
-          if (week > 0)
-            PieChartSectionData(
-              value: week,
-              color: const Color(0xFF3B82F6),
-              title: 'Wiki',
-              radius: 48,
-              titleStyle: const TextStyle(fontSize: 10, color: Colors.white),
+          ),
+          const SizedBox(height: 10),
+          for (final (label, v, color) in rows)
+            Padding(
+              padding: const EdgeInsets.symmetric(vertical: 6),
+              child: _analyticsShareRow(
+                label: label,
+                value: '$v',
+                share: share(v),
+                color: color,
+              ),
             ),
-          if (other > 0)
-            PieChartSectionData(
-              value: other,
-              color: const Color(0xFF6B7280),
-              title: 'Nyingine',
-              radius: 48,
-              titleStyle: const TextStyle(fontSize: 10, color: Colors.white),
+        ],
+      ),
+    );
+  }
+
+  Widget _analyticsRecentPayments(AdminDashboardStats? stats) {
+    final items = stats?.recentPayments ?? const <AdminRecentPayment>[];
+    final now = DateTime.now();
+    return Container(
+      padding: const EdgeInsets.fromLTRB(18, 16, 18, 8),
+      decoration: adminCardDecoration(),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          _analyticsCardTitle(
+            'Malipo ya karibuni',
+            trailing: TextButton(
+              onPressed: () => _navigate(AdminPageId.payments),
+              style: TextButton.styleFrom(
+                visualDensity: VisualDensity.compact,
+                foregroundColor: const Color(0xFF818CF8),
+              ),
+              child: const Text(
+                'Ona yote',
+                style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700),
+              ),
+            ),
+          ),
+          const SizedBox(height: 6),
+          if (items.isEmpty)
+            const Padding(
+              padding: EdgeInsets.symmetric(vertical: 20),
+              child: Text(
+                'Hakuna malipo bado.',
+                textAlign: TextAlign.center,
+                style: TextStyle(
+                  fontSize: 12,
+                  color: AdminColors.textSecondary,
+                ),
+              ),
+            ),
+          for (final p in items)
+            Padding(
+              padding: const EdgeInsets.symmetric(vertical: 7),
+              child: Row(
+                children: [
+                  AdminAvatar(p.userName, size: 32),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          p.userName,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                            fontSize: 13,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                        Text(
+                          '${_planLabel(p.planKey)} · ${adminTimeAgo(p.at, now)}',
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                            fontSize: 11,
+                            color: AdminColors.textSecondary,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Column(
+                    crossAxisAlignment: CrossAxisAlignment.end,
+                    children: [
+                      Text(
+                        fmtTzs(p.amount),
+                        style: const TextStyle(
+                          fontSize: 13,
+                          fontWeight: FontWeight.w800,
+                        ),
+                      ),
+                      const SizedBox(height: 2),
+                      _paymentStatusPill(p.status),
+                    ],
+                  ),
+                ],
+              ),
             ),
         ],
       ),
@@ -7790,347 +10356,359 @@ class _AdminScaffoldState extends State<AdminScaffold>
         constraints: const BoxConstraints(maxWidth: 560),
         child: Container(
           padding: const EdgeInsets.all(24),
-          decoration: BoxDecoration(
-            color: AdminColors.bgTertiary,
-            borderRadius: BorderRadius.circular(16),
-            border: Border.all(color: const Color(0x0DFFFFFF)),
-          ),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              const Text(
-                'Mipangilio',
-                style: TextStyle(fontSize: 24, fontWeight: FontWeight.w800),
-              ),
-              const SizedBox(height: 16),
-              _adminSessionCard(),
-              const SizedBox(height: 16),
-              Container(
-                width: double.infinity,
-                padding: const EdgeInsets.all(16),
-                decoration: BoxDecoration(
-                  color: const Color(0x22F43F5E),
-                  borderRadius: BorderRadius.circular(14),
-                  border: Border.all(color: const Color(0x33F43F5E)),
-                ),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    const Row(
-                      children: [
-                        Icon(
-                          Icons.person_off_rounded,
-                          color: Color(0xFFFB7185),
-                        ),
-                        SizedBox(width: 10),
-                        Expanded(
-                          child: Text(
-                            'Ondoa premium kwa watumiaji',
-                            style: TextStyle(
-                              fontSize: 15,
-                              fontWeight: FontWeight.w800,
+          decoration: adminCardDecoration(),
+          child: Material(
+            type: MaterialType.transparency,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const AdminPageHeading('Mipangilio'),
+                const SizedBox(height: 16),
+                _adminSessionCard(),
+                const SizedBox(height: 16),
+                Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.all(16),
+                  decoration: BoxDecoration(
+                    color: const Color(0x22F43F5E),
+                    borderRadius: BorderRadius.circular(14),
+                    border: Border.all(color: const Color(0x33F43F5E)),
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Row(
+                        children: [
+                          Icon(
+                            Icons.person_off_rounded,
+                            color: Color(0xFFFB7185),
+                          ),
+                          SizedBox(width: 10),
+                          Expanded(
+                            child: Text(
+                              'Ondoa premium kwa watumiaji',
+                              style: TextStyle(
+                                fontSize: 15,
+                                fontWeight: FontWeight.w800,
+                              ),
                             ),
                           ),
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: 8),
-                    const Text(
-                      'Chuja orodha ya watumiaji (premium), chagua unaotaka, kisha warudishe free. '
-                      'Watapoteza ufikiaji wa malipo na muda wa msimamizi — watalazimika kulipa tena.',
-                      style: TextStyle(
-                        fontSize: 11.5,
-                        height: 1.4,
-                        color: AdminColors.textSecondary,
+                        ],
                       ),
-                    ),
-                    const SizedBox(height: 12),
-                    SizedBox(
-                      width: double.infinity,
-                      child: FilledButton.icon(
-                        style: FilledButton.styleFrom(
-                          backgroundColor: const Color(0xFFDC2626),
-                          foregroundColor: Colors.white,
-                          shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(12),
-                          ),
-                          padding: const EdgeInsets.symmetric(
-                            vertical: 12,
-                            horizontal: 14,
-                          ),
-                        ),
-                        onPressed: _hasAdminSession
-                            ? () => unawaited(_showBulkRevokePremiumDialog())
-                            : null,
-                        icon: const Icon(Icons.filter_list_rounded, size: 18),
-                        label: const Text(
-                          'Chuja & ondoa premium',
-                          style: TextStyle(fontWeight: FontWeight.w700),
+                      const SizedBox(height: 8),
+                      const Text(
+                        'Chuja orodha ya watumiaji (premium), chagua unaotaka, kisha warudishe free. '
+                        'Watapoteza ufikiaji wa malipo na muda wa msimamizi — watalazimika kulipa tena.',
+                        style: TextStyle(
+                          fontSize: 11.5,
+                          height: 1.4,
+                          color: AdminColors.textSecondary,
                         ),
                       ),
-                    ),
-                  ],
-                ),
-              ),
-              const SizedBox(height: 20),
-              const Text(
-                'Jina la tovuti',
-                style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600),
-              ),
-              const SizedBox(height: 6),
-              TextField(
-                controller: _settingsSiteName,
-                onChanged: (v) => _settings.siteName = v,
-                decoration: _inputDeco(),
-              ),
-              SwitchListTile(
-                contentPadding: EdgeInsets.zero,
-                title: const Text(
-                  'Usajili wa premium umewashwa',
-                  style: TextStyle(fontSize: 13),
-                ),
-                value: _settings.subscriptionEnabled,
-                onChanged: (v) =>
-                    setState(() => _settings.subscriptionEnabled = v),
-                activeThumbColor: AdminColors.accentPrimary,
-              ),
-              SwitchListTile(
-                contentPadding: EdgeInsets.zero,
-                title: const Text(
-                  'Hali ya matengenezo',
-                  style: TextStyle(fontSize: 13),
-                ),
-                value: _settings.maintenanceMode,
-                onChanged: (v) => setState(() => _settings.maintenanceMode = v),
-                activeThumbColor: AdminColors.accentPrimary,
-              ),
-              const SizedBox(height: 16),
-              const Text(
-                'WhatsApp (wasiliani)',
-                style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600),
-              ),
-              const SizedBox(height: 6),
-              TextField(
-                controller: _settingsWhatsapp,
-                keyboardType: TextInputType.phone,
-                onChanged: (v) => _settings.whatsappNumber = v,
-                decoration: _inputDeco().copyWith(
-                  hintText: 'mf. +255712345678 au 0712345678',
-                  prefixIcon: const Icon(
-                    Icons.chat_rounded,
-                    color: Color(0xFF22C55E),
-                    size: 20,
+                      const SizedBox(height: 12),
+                      SizedBox(
+                        width: double.infinity,
+                        child: FilledButton.icon(
+                          style: FilledButton.styleFrom(
+                            backgroundColor: const Color(0xFFDC2626),
+                            foregroundColor: Colors.white,
+                            shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(12),
+                            ),
+                            padding: const EdgeInsets.symmetric(
+                              vertical: 12,
+                              horizontal: 14,
+                            ),
+                          ),
+                          onPressed: _hasAdminSession
+                              ? () => unawaited(_showBulkRevokePremiumDialog())
+                              : null,
+                          icon: const Icon(Icons.filter_list_rounded, size: 18),
+                          label: const Text(
+                            'Chuja & ondoa premium',
+                            style: TextStyle(fontWeight: FontWeight.w700),
+                          ),
+                        ),
+                      ),
+                    ],
                   ),
                 ),
-              ),
-              const SizedBox(height: 6),
-              const Text(
-                'Nambari hii itaonekana kwenye Wasifu katika app ya mtumiaji na kutumika kuthibitisha WhatsApp.',
-                style: TextStyle(
-                  fontSize: 11,
-                  height: 1.35,
-                  color: AdminColors.textSecondary,
+                const SizedBox(height: 20),
+                const Text(
+                  'Jina la tovuti',
+                  style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600),
                 ),
-              ),
-              const SizedBox(height: 22),
-              Container(
-                width: double.infinity,
-                padding: const EdgeInsets.all(16),
-                decoration: BoxDecoration(
-                  color: const Color(0x22FB7185),
-                  borderRadius: BorderRadius.circular(14),
-                  border: Border.all(color: const Color(0x33FB7185)),
+                const SizedBox(height: 6),
+                TextField(
+                  controller: _settingsSiteName,
+                  onChanged: (v) => _settings.siteName = v,
+                  decoration: _inputDeco(),
                 ),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    const Row(
+                SwitchListTile(
+                  contentPadding: EdgeInsets.zero,
+                  title: const Text(
+                    'Usajili wa premium umewashwa',
+                    style: TextStyle(fontSize: 13),
+                  ),
+                  value: _settings.subscriptionEnabled,
+                  onChanged: (v) =>
+                      setState(() => _settings.subscriptionEnabled = v),
+                  activeThumbColor: AdminColors.accentPrimary,
+                ),
+                SwitchListTile(
+                  contentPadding: EdgeInsets.zero,
+                  title: const Text(
+                    'Hali ya matengenezo',
+                    style: TextStyle(fontSize: 13),
+                  ),
+                  value: _settings.maintenanceMode,
+                  onChanged: (v) =>
+                      setState(() => _settings.maintenanceMode = v),
+                  activeThumbColor: AdminColors.accentPrimary,
+                ),
+                const SizedBox(height: 16),
+                const Text(
+                  'WhatsApp (wasiliani)',
+                  style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600),
+                ),
+                const SizedBox(height: 6),
+                TextField(
+                  controller: _settingsWhatsapp,
+                  keyboardType: TextInputType.phone,
+                  onChanged: (v) => _settings.whatsappNumber = v,
+                  decoration: _inputDeco().copyWith(
+                    hintText: 'mf. +255712345678 au 0712345678',
+                    prefixIcon: const Icon(
+                      Icons.chat_rounded,
+                      color: Color(0xFF22C55E),
+                      size: 20,
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 6),
+                const Text(
+                  'Nambari hii itaonekana kwenye Wasifu katika app ya mtumiaji na kutumika kuthibitisha WhatsApp.',
+                  style: TextStyle(
+                    fontSize: 11,
+                    height: 1.35,
+                    color: AdminColors.textSecondary,
+                  ),
+                ),
+                const SizedBox(height: 22),
+                Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.all(16),
+                  decoration: BoxDecoration(
+                    color: const Color(0x22FB7185),
+                    borderRadius: BorderRadius.circular(14),
+                    border: Border.all(color: const Color(0x33FB7185)),
+                  ),
+                  child: Material(
+                    type: MaterialType.transparency,
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        Icon(
-                          Icons.system_update_alt_rounded,
-                          color: Color(0xFFFB7185),
-                        ),
-                        SizedBox(width: 10),
-                        Expanded(
-                          child: Text(
-                            'Lazima ku update app',
-                            style: TextStyle(
-                              fontSize: 15,
-                              fontWeight: FontWeight.w800,
+                        const Row(
+                          children: [
+                            Icon(
+                              Icons.system_update_alt_rounded,
+                              color: Color(0xFFFB7185),
                             ),
+                            SizedBox(width: 10),
+                            Expanded(
+                              child: Text(
+                                'Lazima ku update app',
+                                style: TextStyle(
+                                  fontSize: 15,
+                                  fontWeight: FontWeight.w800,
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 8),
+                        const Text(
+                          'Washa mtumiaji asiyesasisha hawezi kuona channels wala kulipa — atalazimishwa kwenda Play Store kwanza. '
+                          'Baada ya kuchapisha APK mpya, weka Build ya chini = versionCode mpya (sasa 11 kwa 1.0.10+11).',
+                          style: TextStyle(
+                            fontSize: 11.5,
+                            height: 1.4,
+                            color: AdminColors.textSecondary,
+                          ),
+                        ),
+                        SwitchListTile(
+                          contentPadding: EdgeInsets.zero,
+                          value: _settings.forceUpdateEnabled,
+                          onChanged: (v) =>
+                              setState(() => _settings.forceUpdateEnabled = v),
+                          title: const Text(
+                            'Lazimisha kusasisha app',
+                            style: TextStyle(fontSize: 13),
+                          ),
+                          activeThumbColor: const Color(0xFFFB7185),
+                        ),
+                        TextField(
+                          controller: _settingsMinBuild,
+                          keyboardType: TextInputType.number,
+                          onChanged: (v) => _settings.minAndroidBuild =
+                              int.tryParse(v.trim()) ?? 0,
+                          decoration: _inputDeco().copyWith(
+                            labelText: 'Build ya chini (versionCode)',
+                            hintText: '11',
+                            prefixIcon: const Icon(
+                              Icons.numbers_rounded,
+                              size: 20,
+                            ),
+                          ),
+                        ),
+                        const SizedBox(height: 10),
+                        TextField(
+                          controller: _settingsMinVersion,
+                          onChanged: (v) =>
+                              _settings.minAndroidVersion = v.trim(),
+                          decoration: _inputDeco().copyWith(
+                            labelText: 'Toleo la chini',
+                            hintText: '1.0.10',
+                            prefixIcon: const Icon(
+                              Icons.new_releases_outlined,
+                              size: 20,
+                            ),
+                          ),
+                        ),
+                        const SizedBox(height: 10),
+                        TextField(
+                          controller: _settingsLatestVersion,
+                          onChanged: (v) =>
+                              _settings.latestAndroidVersion = v.trim(),
+                          decoration: _inputDeco().copyWith(
+                            labelText: 'Toleo jipya',
+                            hintText: '1.0.10',
+                            prefixIcon: const Icon(
+                              Icons.upgrade_rounded,
+                              size: 20,
+                            ),
+                          ),
+                        ),
+                        const SizedBox(height: 10),
+                        TextField(
+                          controller: _settingsLatestBuild,
+                          keyboardType: TextInputType.number,
+                          onChanged: (v) => _settings.latestAndroidBuild =
+                              int.tryParse(v.trim()) ?? 0,
+                          decoration: _inputDeco().copyWith(
+                            labelText: 'Build jipya (hiari)',
+                            hintText: '11',
+                            prefixIcon: const Icon(
+                              Icons.build_circle_outlined,
+                              size: 20,
+                            ),
+                          ),
+                        ),
+                        const SizedBox(height: 10),
+                        TextField(
+                          controller: _settingsPlayStoreUrl,
+                          onChanged: (v) => _settings.playStoreUrl = v.trim(),
+                          decoration: _inputDeco().copyWith(
+                            labelText: 'Play Store URL',
+                            prefixIcon: const Icon(
+                              Icons.shop_rounded,
+                              size: 20,
+                            ),
+                          ),
+                        ),
+                        const SizedBox(height: 10),
+                        TextField(
+                          controller: _settingsUpdateTitle,
+                          onChanged: (v) => _settings.updateTitle = v.trim(),
+                          decoration: _inputDeco().copyWith(
+                            labelText: 'Kichwa cha ujumbe',
+                          ),
+                        ),
+                        const SizedBox(height: 10),
+                        TextField(
+                          controller: _settingsUpdateMessage,
+                          maxLines: 3,
+                          onChanged: (v) => _settings.updateMessage = v.trim(),
+                          decoration: _inputDeco().copyWith(
+                            labelText: 'Ujumbe kwa mtumiaji',
                           ),
                         ),
                       ],
                     ),
-                    const SizedBox(height: 8),
-                    const Text(
-                      'Washa mtumiaji asiyesasisha hawezi kuona channels wala kulipa — atalazimishwa kwenda Play Store kwanza. '
-                      'Baada ya kuchapisha APK mpya, weka Build ya chini = versionCode mpya (sasa 11 kwa 1.0.10+11).',
-                      style: TextStyle(
-                        fontSize: 11.5,
-                        height: 1.4,
-                        color: AdminColors.textSecondary,
-                      ),
-                    ),
-                    SwitchListTile(
-                      contentPadding: EdgeInsets.zero,
-                      value: _settings.forceUpdateEnabled,
-                      onChanged: (v) =>
-                          setState(() => _settings.forceUpdateEnabled = v),
-                      title: const Text(
-                        'Lazimisha kusasisha app',
-                        style: TextStyle(fontSize: 13),
-                      ),
-                      activeThumbColor: const Color(0xFFFB7185),
-                    ),
-                    TextField(
-                      controller: _settingsMinBuild,
-                      keyboardType: TextInputType.number,
-                      onChanged: (v) => _settings.minAndroidBuild =
-                          int.tryParse(v.trim()) ?? 0,
-                      decoration: _inputDeco().copyWith(
-                        labelText: 'Build ya chini (versionCode)',
-                        hintText: '11',
-                        prefixIcon: const Icon(Icons.numbers_rounded, size: 20),
-                      ),
-                    ),
-                    const SizedBox(height: 10),
-                    TextField(
-                      controller: _settingsMinVersion,
-                      onChanged: (v) => _settings.minAndroidVersion = v.trim(),
-                      decoration: _inputDeco().copyWith(
-                        labelText: 'Toleo la chini',
-                        hintText: '1.0.10',
-                        prefixIcon: const Icon(
-                          Icons.new_releases_outlined,
-                          size: 20,
-                        ),
-                      ),
-                    ),
-                    const SizedBox(height: 10),
-                    TextField(
-                      controller: _settingsLatestVersion,
-                      onChanged: (v) =>
-                          _settings.latestAndroidVersion = v.trim(),
-                      decoration: _inputDeco().copyWith(
-                        labelText: 'Toleo jipya',
-                        hintText: '1.0.10',
-                        prefixIcon: const Icon(Icons.upgrade_rounded, size: 20),
-                      ),
-                    ),
-                    const SizedBox(height: 10),
-                    TextField(
-                      controller: _settingsLatestBuild,
-                      keyboardType: TextInputType.number,
-                      onChanged: (v) => _settings.latestAndroidBuild =
-                          int.tryParse(v.trim()) ?? 0,
-                      decoration: _inputDeco().copyWith(
-                        labelText: 'Build jipya (hiari)',
-                        hintText: '11',
-                        prefixIcon: const Icon(
-                          Icons.build_circle_outlined,
-                          size: 20,
-                        ),
-                      ),
-                    ),
-                    const SizedBox(height: 10),
-                    TextField(
-                      controller: _settingsPlayStoreUrl,
-                      onChanged: (v) => _settings.playStoreUrl = v.trim(),
-                      decoration: _inputDeco().copyWith(
-                        labelText: 'Play Store URL',
-                        prefixIcon: const Icon(Icons.shop_rounded, size: 20),
-                      ),
-                    ),
-                    const SizedBox(height: 10),
-                    TextField(
-                      controller: _settingsUpdateTitle,
-                      onChanged: (v) => _settings.updateTitle = v.trim(),
-                      decoration: _inputDeco().copyWith(
-                        labelText: 'Kichwa cha ujumbe',
-                      ),
-                    ),
-                    const SizedBox(height: 10),
-                    TextField(
-                      controller: _settingsUpdateMessage,
-                      maxLines: 3,
-                      onChanged: (v) => _settings.updateMessage = v.trim(),
-                      decoration: _inputDeco().copyWith(
-                        labelText: 'Ujumbe kwa mtumiaji',
-                      ),
-                    ),
-                  ],
+                  ),
                 ),
-              ),
-              const SizedBox(height: 16),
-              _btnPrimary(
-                label: 'Hifadhi mipangilio',
-                icon: Icons.save,
-                onTap: () async {
-                  final wa = _settingsWhatsapp.text.trim();
-                  _settings.whatsappNumber = wa;
-                  _settings.minAndroidBuild =
-                      int.tryParse(_settingsMinBuild.text.trim()) ?? 0;
-                  _settings.minAndroidVersion = _settingsMinVersion.text.trim();
-                  _settings.latestAndroidVersion = _settingsLatestVersion.text
-                      .trim();
-                  _settings.latestAndroidBuild =
-                      int.tryParse(_settingsLatestBuild.text.trim()) ?? 0;
-                  _settings.playStoreUrl =
-                      _settingsPlayStoreUrl.text.trim().isEmpty
-                      ? 'https://play.google.com/store/apps/details?id=com.washatv'
-                      : _settingsPlayStoreUrl.text.trim();
-                  _settings.updateTitle =
-                      _settingsUpdateTitle.text.trim().isEmpty
-                      ? 'Sasisha WASHA TV'
-                      : _settingsUpdateTitle.text.trim();
-                  _settings.updateMessage = _settingsUpdateMessage.text.trim();
-                  final sp = await SharedPreferences.getInstance();
-                  await sp.setString(AdminPrefsKeys.supportWhatsapp, wa);
-                  if (_hasAdminSession) {
-                    try {
-                      final res = await http
-                          .patch(
-                            Uri.parse('$_apiBase/api/v1/admin/settings'),
-                            headers: _adminHeaders(),
-                            body: jsonEncode({
-                              'site_name': _settingsSiteName.text.trim(),
-                              'subscription_enabled':
-                                  _settings.subscriptionEnabled,
-                              'maintenance_mode': _settings.maintenanceMode,
-                              'whatsapp_number': wa,
-                              'force_update_enabled':
-                                  _settings.forceUpdateEnabled,
-                              'min_android_build': _settings.minAndroidBuild,
-                              'min_android_version':
-                                  _settings.minAndroidVersion,
-                              'latest_android_version':
-                                  _settings.latestAndroidVersion,
-                              'latest_android_build':
-                                  _settings.latestAndroidBuild,
-                              'play_store_url': _settings.playStoreUrl,
-                              'update_title': _settings.updateTitle,
-                              'update_message': _settings.updateMessage,
-                            }),
-                          )
-                          .timeout(const Duration(seconds: 12));
-                      if (res.statusCode < 200 || res.statusCode >= 300) {
-                        throw Exception('settings ${res.statusCode}');
+                const SizedBox(height: 16),
+                _btnPrimary(
+                  label: 'Hifadhi mipangilio',
+                  icon: Icons.save,
+                  onTap: () async {
+                    final wa = _settingsWhatsapp.text.trim();
+                    _settings.whatsappNumber = wa;
+                    _settings.minAndroidBuild =
+                        int.tryParse(_settingsMinBuild.text.trim()) ?? 0;
+                    _settings.minAndroidVersion = _settingsMinVersion.text
+                        .trim();
+                    _settings.latestAndroidVersion = _settingsLatestVersion.text
+                        .trim();
+                    _settings.latestAndroidBuild =
+                        int.tryParse(_settingsLatestBuild.text.trim()) ?? 0;
+                    _settings.playStoreUrl =
+                        _settingsPlayStoreUrl.text.trim().isEmpty
+                        ? 'https://play.google.com/store/apps/details?id=com.washatv'
+                        : _settingsPlayStoreUrl.text.trim();
+                    _settings.updateTitle =
+                        _settingsUpdateTitle.text.trim().isEmpty
+                        ? 'Sasisha WASHA TV'
+                        : _settingsUpdateTitle.text.trim();
+                    _settings.updateMessage = _settingsUpdateMessage.text
+                        .trim();
+                    final sp = await SharedPreferences.getInstance();
+                    await sp.setString(AdminPrefsKeys.supportWhatsapp, wa);
+                    if (_hasAdminSession) {
+                      try {
+                        final res = await http
+                            .patch(
+                              Uri.parse('$_apiBase/api/v1/admin/settings'),
+                              headers: _adminHeaders(),
+                              body: jsonEncode({
+                                'site_name': _settingsSiteName.text.trim(),
+                                'subscription_enabled':
+                                    _settings.subscriptionEnabled,
+                                'maintenance_mode': _settings.maintenanceMode,
+                                'whatsapp_number': wa,
+                                'force_update_enabled':
+                                    _settings.forceUpdateEnabled,
+                                'min_android_build': _settings.minAndroidBuild,
+                                'min_android_version':
+                                    _settings.minAndroidVersion,
+                                'latest_android_version':
+                                    _settings.latestAndroidVersion,
+                                'latest_android_build':
+                                    _settings.latestAndroidBuild,
+                                'play_store_url': _settings.playStoreUrl,
+                                'update_title': _settings.updateTitle,
+                                'update_message': _settings.updateMessage,
+                              }),
+                            )
+                            .timeout(const Duration(seconds: 12));
+                        if (res.statusCode < 200 || res.statusCode >= 300) {
+                          throw Exception('settings ${res.statusCode}');
+                        }
+                      } catch (_) {
+                        if (!mounted) return;
+                        _showToast(
+                          'Imeshindikana kuhifadhi mipangilio kwenye server.',
+                          _ToastType.error,
+                        );
+                        return;
                       }
-                    } catch (_) {
-                      if (!mounted) return;
-                      _showToast(
-                        'Imeshindikana kuhifadhi mipangilio kwenye server.',
-                        _ToastType.error,
-                      );
-                      return;
                     }
-                  }
-                  if (!mounted) return;
-                  _showToast('Mabadiliko yamehifadhiwa.', _ToastType.success);
-                },
-              ),
-            ],
+                    if (!mounted) return;
+                    _showToast('Mabadiliko yamehifadhiwa.', _ToastType.success);
+                  },
+                ),
+              ],
+            ),
           ),
         ),
       ),
@@ -8142,10 +10720,7 @@ class _AdminScaffoldState extends State<AdminScaffold>
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        const Text(
-          'Kumbukumbu za shughuli',
-          style: TextStyle(fontSize: 24, fontWeight: FontWeight.w800),
-        ),
+        const AdminPageHeading('Kumbukumbu za shughuli'),
         const SizedBox(height: 12),
         _tableWrap(
           columns: const ['ID', 'Msimamizi', 'Kitendo', 'Tarehe'],
@@ -8179,44 +10754,37 @@ class _AdminScaffoldState extends State<AdminScaffold>
     required List<List<Widget>> rows,
   }) {
     return Container(
-      decoration: BoxDecoration(
-        color: AdminColors.bgTertiary,
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: const Color(0x0DFFFFFF)),
-      ),
+      decoration: adminCardDecoration(),
       clipBehavior: Clip.antiAlias,
       child: LayoutBuilder(
         builder: (context, constraints) {
-          return Scrollbar(
-            thumbVisibility: constraints.maxWidth < 640,
-            child: SingleChildScrollView(
-              scrollDirection: Axis.horizontal,
-              child: ConstrainedBox(
-                constraints: BoxConstraints(minWidth: constraints.maxWidth),
-                child: DataTable(
-                  headingRowColor: MaterialStateProperty.all(
-                    AdminColors.bgSecondary,
-                  ),
-                  headingRowHeight: 42,
-                  dataRowMinHeight: 44,
-                  horizontalMargin: 8,
-                  columnSpacing: 10,
-                  headingTextStyle: const TextStyle(
-                    color: AdminColors.textSecondary,
-                    fontSize: 10,
-                    fontWeight: FontWeight.w600,
-                  ),
-                  columns: columns
-                      .map((c) => DataColumn(label: Text(c.toUpperCase())))
-                      .toList(),
-                  rows: rows
-                      .map(
-                        (cells) => DataRow(
-                          cells: cells.map((w) => DataCell(w)).toList(),
-                        ),
-                      )
-                      .toList(),
+          return _HorizontalScroll(
+            showThumb: constraints.maxWidth < 640,
+            child: ConstrainedBox(
+              constraints: BoxConstraints(minWidth: constraints.maxWidth),
+              child: DataTable(
+                headingRowColor: MaterialStateProperty.all(
+                  AdminColors.bgSecondary,
                 ),
+                headingRowHeight: 42,
+                dataRowMinHeight: 44,
+                horizontalMargin: 8,
+                columnSpacing: 10,
+                headingTextStyle: const TextStyle(
+                  color: AdminColors.textSecondary,
+                  fontSize: 10,
+                  fontWeight: FontWeight.w600,
+                ),
+                columns: columns
+                    .map((c) => DataColumn(label: Text(c.toUpperCase())))
+                    .toList(),
+                rows: rows
+                    .map(
+                      (cells) => DataRow(
+                        cells: cells.map((w) => DataCell(w)).toList(),
+                      ),
+                    )
+                    .toList(),
               ),
             ),
           );
@@ -8237,14 +10805,8 @@ class _AdminScaffoldState extends State<AdminScaffold>
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Text(
-                title,
-                style: const TextStyle(
-                  fontSize: 24,
-                  fontWeight: FontWeight.w800,
-                ),
-              ),
-              const SizedBox(height: 4),
+              AdminPageHeading(title),
+              const SizedBox(height: 6),
               Text(
                 subtitle,
                 style: const TextStyle(
@@ -8280,13 +10842,13 @@ class _AdminScaffoldState extends State<AdminScaffold>
     required VoidCallback onTap,
     bool small = false,
   }) {
-    return InkWell(
+    return AdminPressable(
       onTap: onTap,
-      borderRadius: BorderRadius.circular(12),
+      lift: 2,
       child: Container(
         padding: EdgeInsets.symmetric(
           horizontal: small ? 12 : 16,
-          vertical: small ? 8 : 10,
+          vertical: small ? 8 : 11,
         ),
         decoration: BoxDecoration(
           gradient: const LinearGradient(
@@ -8295,6 +10857,13 @@ class _AdminScaffoldState extends State<AdminScaffold>
             end: Alignment.bottomRight,
           ),
           borderRadius: BorderRadius.circular(12),
+          boxShadow: const [
+            BoxShadow(
+              color: Color(0x4D6366F1),
+              blurRadius: 16,
+              offset: Offset(0, 6),
+            ),
+          ],
         ),
         child: Row(
           mainAxisSize: MainAxisSize.min,
@@ -8437,7 +11006,7 @@ class _AdminScaffoldState extends State<AdminScaffold>
                       }
                       if (!_hasAdminSession) {
                         _showToast(
-                          'Hakuna kikao cha msimamizi',
+                          'Hujaingia (login) kama msimamizi',
                           _ToastType.error,
                         );
                         return;
@@ -8577,6 +11146,39 @@ class _HamburgerButton extends StatelessWidget {
                   color: Color(0xFF94A3B8),
                 ),
         ),
+      ),
+    );
+  }
+}
+
+class _HorizontalScroll extends StatefulWidget {
+  const _HorizontalScroll({required this.showThumb, required this.child});
+
+  final bool showThumb;
+  final Widget child;
+
+  @override
+  State<_HorizontalScroll> createState() => _HorizontalScrollState();
+}
+
+class _HorizontalScrollState extends State<_HorizontalScroll> {
+  final _controller = ScrollController();
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scrollbar(
+      controller: _controller,
+      thumbVisibility: widget.showThumb,
+      child: SingleChildScrollView(
+        controller: _controller,
+        scrollDirection: Axis.horizontal,
+        child: widget.child,
       ),
     );
   }

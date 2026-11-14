@@ -15,7 +15,8 @@ class AdminLaunchGate extends StatefulWidget {
   State<AdminLaunchGate> createState() => _AdminLaunchGateState();
 }
 
-class _AdminLaunchGateState extends State<AdminLaunchGate> with WidgetsBindingObserver {
+class _AdminLaunchGateState extends State<AdminLaunchGate>
+    with WidgetsBindingObserver {
   final AdminAuth _auth = AdminAuth();
   Timer? _expiryTimer;
 
@@ -25,7 +26,10 @@ class _AdminLaunchGateState extends State<AdminLaunchGate> with WidgetsBindingOb
     WidgetsBinding.instance.addObserver(this);
     _auth.addListener(_onAuthChanged);
     _auth.load();
-    _expiryTimer = Timer.periodic(const Duration(seconds: 20), (_) => unawaited(_auth.expireIfNeeded()));
+    _expiryTimer = Timer.periodic(
+      const Duration(seconds: 20),
+      (_) => unawaited(_auth.expireIfNeeded()),
+    );
   }
 
   @override
@@ -48,14 +52,14 @@ class _AdminLaunchGateState extends State<AdminLaunchGate> with WidgetsBindingOb
   @override
   Widget build(BuildContext context) {
     if (!_auth.isLoaded) {
-      return const Scaffold(
-        body: Center(child: CircularProgressIndicator()),
-      );
+      return const Scaffold(body: Center(child: CircularProgressIndicator()));
     }
     if (!_auth.hasSession) {
       return AdminLoginScreen(
         auth: _auth,
-        notice: _auth.endedByExpiry ? 'Kikao kimeisha (saa 24). Weka neno la siri tena.' : null,
+        notice: _auth.endedByExpiry
+            ? 'Login imeisha (saa 24). Weka neno la siri tena.'
+            : null,
         onLoggedIn: () => setState(() {}),
       );
     }
