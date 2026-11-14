@@ -10,8 +10,21 @@ import {
   fillTemplate,
   friendlyName,
   isReasonableHourEat,
+  reminderWindow,
   swahiliWhen,
 } from './reminders.js';
+
+// Postgres rejects bind parameters a statement never references ("bind message supplies 1 parameters,
+// but prepared statement requires 0"), which broke every manual "expired" send.
+for (const [audience, opts] of [
+  ['expiring', { days: 3 }],
+  ['expired', { days: 3 }],
+  ['expired', { days: 3, expiredWithinDays: 2 }],
+] as const) {
+  const w = reminderWindow(audience, opts);
+  const used = new Set([...w.sql.matchAll(/\$(\d+)/g)].map((m) => Number(m[1])));
+  assert.equal(used.size, w.params.length, `${audience} ${JSON.stringify(opts)}: placeholders vs params`);
+}
 
 // Tanzania (UTC+3) calendar days, not 24h windows: 22:00 UTC is already "tomorrow" in Dar es Salaam.
 const now = new Date('2026-11-13T10:00:00Z'); // 13:00 EAT

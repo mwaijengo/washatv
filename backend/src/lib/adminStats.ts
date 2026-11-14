@@ -27,7 +27,32 @@ export type AdminStatsOverview = {
     counts: number[];
   };
   plan_mix: { weekly: number; gold: number; platinum: number; other: number };
+  /** Right-now activity (Tanzania day boundaries). */
+  live: {
+    online_now: number;
+    active_today: number;
+    active_7d: number;
+    new_users_today: number;
+    pending_payments: number;
+    failed_today: number;
+    revenue_7d: number;
+    revenue_30d: number;
+    generated_at: string;
+  };
+  /** Last 14 Tanzania calendar days, oldest first; `labels` are YYYY-MM-DD. */
+  daily_14: { labels: string[]; registrations: number[]; purchases: number[]; revenue: number[] };
+  recent_payments: {
+    id: string;
+    order_id: string | null;
+    user_name: string;
+    amount: number;
+    plan_key: string | null;
+    status: string;
+    at: string;
+  }[];
 };
+
+const EAT_MIDNIGHT_SQL = `(date_trunc('day', now() AT TIME ZONE 'Africa/Dar_es_Salaam') AT TIME ZONE 'Africa/Dar_es_Salaam')`;
 
 export async function fetchAdminStatsOverview(pool: DbPool): Promise<AdminStatsOverview> {
   const totalsRes = await pool.query(
@@ -134,6 +159,62 @@ export async function fetchAdminStatsOverview(pool: DbPool): Promise<AdminStatsO
      GROUP BY COALESCE(plan_key, 'other')`,
   );
 
+  const liveRes = await pool.query(
+    `SELECT
+       (SELECT COUNT(*)::int FROM users WHERE last_seen_at > now() - interval '5 minutes') AS online_now,
+       (SELECT COUNT(*)::int FROM users WHERE last_seen_at >= ${EAT_MIDNIGHT_SQL}) AS active_today,
+       (SELECT COUNT(*)::int FROM users WHERE last_seen_at > now() - interval '7 days') AS active_7d,
+       (SELECT COUNT(*)::int FROM users WHERE created_at >= ${EAT_MIDNIGHT_SQL}) AS new_users_today,
+       (SELECT COUNT(*)::int FROM transactions
+          WHERE status = 'pending' AND created_at > now() - interval '48 hours') AS pending_payments,
+       (SELECT COUNT(*)::int FROM transactions
+          WHERE status = 'failed' AND updated_at >= ${EAT_MIDNIGHT_SQL}) AS failed_today,
+       (SELECT COALESCE(SUM(amount), 0)::float8 FROM transactions
+          WHERE status = 'completed' AND COALESCE(completed_at, created_at) > now() - interval '7 days') AS revenue_7d,
+       (SELECT COALESCE(SUM(amount), 0)::float8 FROM transactions
+          WHERE status = 'completed' AND COALESCE(completed_at, created_at) > now() - interval '30 days') AS revenue_30d`,
+  );
+  const live = (liveRes.rows[0] ?? {}) as Record<string, number>;
+
+  const days14Res = await pool.query(
+    `WITH days AS (
+       SELECT generate_series(
+         (now() AT TIME ZONE 'Africa/Dar_es_Salaam')::date - 13,
+         (now() AT TIME ZONE 'Africa/Dar_es_Salaam')::date,
+         interval '1 day'
+       )::date AS d
+     ),
+     regs AS (
+       SELECT (created_at AT TIME ZONE 'Africa/Dar_es_Salaam')::date AS d, COUNT(*)::int AS c
+       FROM users WHERE created_at > now() - interval '15 days'
+       GROUP BY 1
+     ),
+     pay AS (
+       SELECT (COALESCE(completed_at, created_at) AT TIME ZONE 'Africa/Dar_es_Salaam')::date AS d,
+              COUNT(*)::int AS c, SUM(amount)::float8 AS s
+       FROM transactions
+       WHERE status = 'completed' AND COALESCE(completed_at, created_at) > now() - interval '15 days'
+       GROUP BY 1
+     )
+     SELECT to_char(days.d, 'YYYY-MM-DD') AS day,
+            COALESCE(regs.c, 0) AS regs,
+            COALESCE(pay.c, 0) AS purchases,
+            COALESCE(pay.s, 0) AS revenue
+     FROM days
+     LEFT JOIN regs ON regs.d = days.d
+     LEFT JOIN pay ON pay.d = days.d
+     ORDER BY days.d`,
+  );
+  const days14 = days14Res.rows as { day: string; regs: number; purchases: number; revenue: number }[];
+
+  const recentRes = await pool.query(
+    `SELECT t.id, t.provider_ref, COALESCE(u.name, 'Viewer') AS user_name, t.amount, t.plan_key, t.status,
+            COALESCE(t.completed_at, t.created_at) AS at
+     FROM transactions t LEFT JOIN users u ON u.id = t.user_id
+     ORDER BY t.created_at DESC
+     LIMIT 8`,
+  );
+
   const planMix = { weekly: 0, gold: 0, platinum: 0, other: 0 };
   for (const row of planRes.rows as { plan_key: string; cnt: number }[]) {
     const key = String(row.plan_key ?? 'other');
@@ -167,6 +248,43 @@ export async function fetchAdminStatsOverview(pool: DbPool): Promise<AdminStatsO
       counts: dailyRes.rows.map((r) => Number((r as { reg_count: number }).reg_count ?? 0)),
     },
     plan_mix: planMix,
+    live: {
+      online_now: Number(live.online_now ?? 0),
+      active_today: Number(live.active_today ?? 0),
+      active_7d: Number(live.active_7d ?? 0),
+      new_users_today: Number(live.new_users_today ?? 0),
+      pending_payments: Number(live.pending_payments ?? 0),
+      failed_today: Number(live.failed_today ?? 0),
+      revenue_7d: Number(live.revenue_7d ?? 0),
+      revenue_30d: Number(live.revenue_30d ?? 0),
+      generated_at: new Date().toISOString(),
+    },
+    daily_14: {
+      labels: days14.map((r) => String(r.day)),
+      registrations: days14.map((r) => Number(r.regs ?? 0)),
+      purchases: days14.map((r) => Number(r.purchases ?? 0)),
+      revenue: days14.map((r) => Number(r.revenue ?? 0)),
+    },
+    recent_payments: recentRes.rows.map((raw) => {
+      const r = raw as {
+        id: string;
+        provider_ref: string | null;
+        user_name: string;
+        amount: number;
+        plan_key: string | null;
+        status: string;
+        at: Date;
+      };
+      return {
+        id: r.id,
+        order_id: r.provider_ref,
+        user_name: r.user_name,
+        amount: Number(r.amount ?? 0),
+        plan_key: r.plan_key,
+        status: r.status,
+        at: new Date(r.at).toISOString(),
+      };
+    }),
   };
 }
 

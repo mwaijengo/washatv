@@ -200,7 +200,7 @@ export function registerAdminNotificationRoutes(
         return reply.code(400).send({ error: 'Kichwa au ujumbe ni mrefu mno.' });
       }
       if (reminderRunInFlight) {
-        return reply.code(409).send({ error: 'Vikumbusho vinatumwa tayari. Subiri kidogo kisha ujaribu tena.' });
+        return reply.code(409).send({ error: 'Reminder zinatumwa tayari. Subiri kidogo kisha ujaribu tena.' });
       }
       reminderRunInFlight = true;
       try {
@@ -231,7 +231,7 @@ export function registerAdminNotificationRoutes(
             [`LOG-${nanoid(10)}`, 'admin', 'send_reminders_failed', `${audience}: ${errorText(e)}`.slice(0, 500)],
           )
           .catch(() => {});
-        return reply.code(502).send({ error: `Kutuma vikumbusho kumeshindikana: ${errorText(e)}` });
+        return reply.code(502).send({ error: `Kutuma reminder kumeshindikana: ${errorText(e)}` });
       } finally {
         reminderRunInFlight = false;
       }

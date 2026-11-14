@@ -15,6 +15,7 @@ import { FixedWindowLimiter } from '../lib/rateLimit.js';
 import { normalizeUserPremiumWindows, PREMIUM_ACTIVE_SQL } from '../lib/premiumAccess.js';
 import { buildAppUpdatePayload, fetchAppUpdateSettings } from '../lib/appUpdatePolicy.js';
 import { clientIp, ipTag } from '../lib/clientIp.js';
+import { touchLastSeen } from '../lib/presence.js';
 
 const PLAYBACK_PAYLOAD_TTL_MS = 5 * 60_000;
 const DEVICE_ID_RE = /^[A-Z0-9][A-Z0-9._-]{7,63}$/;
@@ -159,6 +160,7 @@ export async function registerViewerSecurityRoutes(
     if (user.rowCount && (user.rows[0] as { status: string }).status === 'suspended') {
       return reply.code(403).send({ error: 'device_blocked' });
     }
+    touchLastSeen(pool, deviceId);
 
     const build = Math.trunc(Number(b.app_build ?? 0)) || undefined;
     const version = String(b.app_version ?? '').trim().slice(0, 32) || undefined;
@@ -177,6 +179,7 @@ export async function registerViewerSecurityRoutes(
     async (req, reply) => {
       reply.header('Cache-Control', 'no-store');
       const viewer = (req as FastifyRequest & { viewer: ViewerClaims }).viewer;
+      touchLastSeen(pool, viewer.sub);
       const channelId = String(req.body?.channel_id ?? '').trim();
       if (!channelId || channelId.length > 64) {
         return reply.code(400).send({ error: 'channel_id is required' });

@@ -106,15 +106,42 @@ export async function reminderSummary(pool: DbPool, days: number): Promise<Remin
   };
 }
 
+/**
+ * WHERE clause selecting the reminder window. Postgres rejects bind parameters the statement never
+ * references, so `params` holds exactly the values the SQL uses.
+ */
+export function reminderWindow(
+  audience: ReminderAudience,
+  opts: { days: number; expiredWithinDays?: number },
+): { sql: string; params: unknown[] } {
+  if (audience === 'expiring') {
+    return {
+      sql: `ends_at > now() AND ends_at <= now() + make_interval(days => $1::int)`,
+      params: [opts.days],
+    };
+  }
+  if (opts.expiredWithinDays != null) {
+    return {
+      sql: `ends_at > now() - make_interval(days => $1::int) AND ends_at <= now()`,
+      params: [opts.expiredWithinDays],
+    };
+  }
+  return { sql: `ends_at > '-infinity'::timestamptz AND ends_at <= now()`, params: [] };
+}
+
 export async function listReminderCandidates(
   pool: DbPool,
   audience: ReminderAudience,
-  opts: { days: number; onlyUnsent: boolean; limit?: number },
+  opts: {
+    days: number;
+    onlyUnsent: boolean;
+    limit?: number;
+    /** Expired audience only: skip subscriptions that ended longer ago than this. */
+    expiredWithinDays?: number;
+  },
 ): Promise<CandidateRow[]> {
   const expiring = audience === 'expiring';
-  const windowSql = expiring
-    ? `ends_at > now() AND ends_at <= now() + make_interval(days => $1::int)`
-    : `ends_at > '-infinity'::timestamptz AND ends_at <= now()`;
+  const { sql: windowSql, params } = reminderWindow(audience, opts);
   const remindedCol = expiring ? 'expiry_reminder_for' : 'expired_reminder_for';
   const sentAtCol = expiring ? 'expiry_reminder_sent_at' : 'expired_reminder_sent_at';
   const onlyUnsentSql = opts.onlyUnsent ? `AND ${unsentSql(remindedCol)}` : '';
@@ -134,7 +161,7 @@ export async function listReminderCandidates(
        ${onlyUnsentSql}
      ORDER BY ${order}
      LIMIT ${limit}`,
-    [opts.days],
+    params,
   );
   return r.rows as CandidateRow[];
 }
@@ -157,6 +184,7 @@ export async function sendReminders(
     source: 'manual' | 'auto';
     title?: string;
     body?: string;
+    expiredWithinDays?: number;
   },
 ): Promise<ReminderResult> {
   const expiring = opts.audience === 'expiring';
@@ -164,7 +192,11 @@ export async function sendReminders(
   const title = (opts.title ?? '').trim() || (expiring ? DEFAULT_EXPIRING_TITLE : DEFAULT_EXPIRED_TITLE);
   const bodyTemplate = (opts.body ?? '').trim() || (expiring ? DEFAULT_EXPIRING_BODY : DEFAULT_EXPIRED_BODY);
 
-  const rows = await listReminderCandidates(pool, opts.audience, { days, onlyUnsent: opts.onlyUnsent });
+  const rows = await listReminderCandidates(pool, opts.audience, {
+    days,
+    onlyUnsent: opts.onlyUnsent,
+    expiredWithinDays: opts.expiredWithinDays,
+  });
   if (rows.length === 0) return { audience: opts.audience, total: 0, sent: 0, failed: 0, source: opts.source };
 
   const now = new Date();
@@ -227,9 +259,12 @@ type LogLike = {
   error: (obj: unknown, msg?: string) => void;
 };
 
+/** Automatic "your subscription has ended" reminders only reach users whose window ended this recently. */
+export const AUTO_EXPIRED_WITHIN_DAYS = 2;
+
 /**
- * Automatic "your subscription ends soon" reminders. Runs every 20 minutes, only inside
- * 08:00–20:00 Tanzania time, and only for subscription windows nobody was reminded about yet.
+ * Automatic reminders, once per subscription window: "ends soon" and "has just ended". Runs every
+ * 10 minutes, only inside 08:00–20:00 Tanzania time. Long-expired users are left to manual sends.
  */
 export function startReminderScheduler(deps: { pool: DbPool; env: Env; log: LogLike }): () => void {
   const { pool, env, log } = deps;
@@ -245,17 +280,26 @@ export function startReminderScheduler(deps: { pool: DbPool; env: Env; log: LogL
     if (!isReasonableHourEat()) return;
     running = true;
     try {
-      const out = await sendReminders(pool, env, { audience: 'expiring', onlyUnsent: true, source: 'auto' });
-      if (out.total > 0) log.info(out, 'reminders: automatic expiring-soon run finished');
-    } catch (e) {
-      log.error({ err: e instanceof Error ? e.message : String(e) }, 'reminders: automatic run failed');
+      for (const audience of ['expiring', 'expired'] as const) {
+        try {
+          const out = await sendReminders(pool, env, {
+            audience,
+            onlyUnsent: true,
+            source: 'auto',
+            expiredWithinDays: audience === 'expired' ? AUTO_EXPIRED_WITHIN_DAYS : undefined,
+          });
+          if (out.total > 0) log.info(out, `reminders: automatic ${audience} run finished`);
+        } catch (e) {
+          log.error({ err: e instanceof Error ? e.message : String(e) }, `reminders: automatic ${audience} run failed`);
+        }
+      }
     } finally {
       running = false;
     }
   };
 
-  const first = setTimeout(() => void tick(), 2 * 60_000);
-  const timer = setInterval(() => void tick(), 20 * 60_000);
+  const first = setTimeout(() => void tick(), 60_000);
+  const timer = setInterval(() => void tick(), 10 * 60_000);
   first.unref();
   timer.unref();
   return () => {

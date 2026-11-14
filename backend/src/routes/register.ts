@@ -11,11 +11,7 @@ import {
   upsertPendingSonicpesaTransaction,
   withDbRetry,
 } from '../lib/premiumPayment.js';
-import {
-  normalizeAllPremiumWindows,
-  normalizeUserPremiumWindows,
-  PREMIUM_ACTIVE_SQL,
-} from '../lib/premiumAccess.js';
+import { normalizeAllPremiumWindows, normalizeUserPremiumWindows } from '../lib/premiumAccess.js';
 import {
   detectTzMobileNetwork,
   mobileMoneyMethodLabel,
@@ -33,6 +29,14 @@ import {
 } from '../lib/sonicpesa.js';
 import { MAX_ADMIN_SESSION_SECONDS } from '../config/env.js';
 import { registerAdminNotificationRoutes } from './adminNotifications.js';
+import { registerAdminPaymentRoutes } from './adminPayments.js';
+import {
+  ADMIN_USER_FILTER_SQL,
+  adminUserCountsSelect,
+  parseAdminUserFilter,
+  readAdminUserCounts,
+} from '../lib/adminUserFilters.js';
+import { startPendingPaymentReconciler } from '../lib/sonicpesaVerify.js';
 import { registerPartnerPushRoutes } from './partnerPush.js';
 import { fetchAdminStatsOverview, fetchAdminSubscriptions } from '../lib/adminStats.js';
 import {
@@ -45,6 +49,7 @@ import {
 import bcrypt from 'bcrypt';
 import { nanoid } from 'nanoid';
 import { safeEqual } from '../lib/clientAuth.js';
+import { touchLastSeen } from '../lib/presence.js';
 import { FixedWindowLimiter } from '../lib/rateLimit.js';
 import { clientIp, ipAllowed, ipTag, parseIpAllowList } from '../lib/clientIp.js';
 import { readViewerClaims, registerViewerSecurityRoutes } from './viewerSecurity.js';
@@ -310,6 +315,7 @@ export async function registerRoutes(
   app.get<{ Params: { device_id: string } }>('/api/v1/public/user-premium/:device_id', async (req, reply) => {
     const deviceId = (req.params.device_id ?? '').trim();
     if (!deviceId) return reply.code(400).send({ error: 'device_id is required' });
+    touchLastSeen(pool, deviceId);
 
     const repairedUntil = await reconcileDevicePremium(pool, env, deviceId, req.log);
     if (repairedUntil) await notifyClientsAfterPremiumGrant();
@@ -349,6 +355,7 @@ export async function registerRoutes(
   app.get<{ Params: { device_id: string } }>('/api/v1/public/user-profile/:device_id', async (req, reply) => {
     const deviceId = (req.params.device_id ?? '').trim();
     if (!deviceId) return reply.code(400).send({ error: 'device_id is required' });
+    touchLastSeen(pool, deviceId);
 
     const repairedUntil = await reconcileDevicePremium(pool, env, deviceId, req.log);
     if (repairedUntil) await notifyClientsAfterPremiumGrant();
@@ -571,7 +578,8 @@ export async function registerRoutes(
              THEN EXCLUDED.name
              ELSE users.name
            END,
-           phone = CASE WHEN EXCLUDED.phone <> '' AND EXCLUDED.phone <> 'N/A' THEN EXCLUDED.phone ELSE users.phone END
+           phone = CASE WHEN EXCLUDED.phone <> '' AND EXCLUDED.phone <> 'N/A' THEN EXCLUDED.phone ELSE users.phone END,
+           last_seen_at = now()
          RETURNING id, name, phone, device_id, status, subscription, premium_until, admin_access_until, created_at`,
         [userId, safeName || 'Viewer', phone || 'N/A', deviceId],
       );
@@ -1804,55 +1812,43 @@ export async function registerRoutes(
     }
   });
 
-  app.get<{ Querystring: { q?: string; limit?: string; premium?: string } }>(
+  app.get<{ Querystring: { q?: string; limit?: string; premium?: string; filter?: string } }>(
     '/api/v1/admin/users',
     { preHandler: adminPre },
     async (req) => {
       const q = String(req.query?.q ?? '').trim();
-      const premiumOnly = ['1', 'true', 'yes', 'premium'].includes(
-        String(req.query?.premium ?? '').trim().toLowerCase(),
-      );
+      const filter = parseAdminUserFilter(req.query?.filter, req.query?.premium);
       // Search path skips the expensive batch premium repair — listing correctness > normalize.
       if (!q) await normalizeAllPremiumWindows(pool);
       const limitRaw = Number(req.query?.limit ?? 300);
       const limit = Number.isFinite(limitRaw) ? Math.min(Math.max(Math.trunc(limitRaw), 1), 5000) : 300;
       const { like, exact, compact } = parseAdminUserSearch(q);
-      const premiumClause = premiumOnly ? ` AND (${PREMIUM_ACTIVE_SQL})` : '';
-      const where = `(${ADMIN_USER_SEARCH_WHERE})${premiumClause}`;
-      const params = [like, exact, compact, limit] as const;
-      const [r, matchedRes, totalRes, premiumTotalRes] = await Promise.all([
+      const searchWhere = `(${ADMIN_USER_SEARCH_WHERE})`;
+      const where = `${searchWhere} AND ${ADMIN_USER_FILTER_SQL[filter]}`;
+      const [r, countsRes, totalRes] = await Promise.all([
         pool.query(
           `SELECT id, name, phone, device_id, status, subscription, premium_until, admin_access_until, created_at
            FROM users
            WHERE ${where}
            ORDER BY ${ADMIN_USER_SEARCH_ORDER}
            LIMIT $4`,
-          [...params],
+          [like, exact, compact, limit],
         ),
-        like || premiumOnly
-          ? pool.query(`SELECT COUNT(*)::int AS c FROM users WHERE ${where}`, [like, exact, compact])
-          : Promise.resolve(null),
+        // Per-filter counts within the current search, so the filter chips show real totals.
+        pool.query(`${adminUserCountsSelect()} FROM users WHERE ${searchWhere}`, [like, exact, compact]),
         pool.query(`SELECT COUNT(*)::int AS c FROM users`),
-        premiumOnly
-          ? pool.query(`SELECT COUNT(*)::int AS c FROM users WHERE ${PREMIUM_ACTIVE_SQL}`)
-          : Promise.resolve(null),
       ]);
       const total = Number((totalRes.rows[0] as { c: number }).c ?? r.rowCount ?? 0);
-      const premiumTotal = premiumTotalRes
-        ? Number((premiumTotalRes.rows[0] as { c: number }).c ?? 0)
-        : undefined;
-      const matched = matchedRes
-        ? Number((matchedRes.rows[0] as { c: number }).c ?? r.rowCount ?? 0)
-        : premiumOnly
-          ? (premiumTotal ?? total)
-          : total;
+      const counts = readAdminUserCounts(countsRes.rows[0] as Record<string, unknown> | undefined);
       return {
         users: r.rows,
         total,
-        matched,
+        matched: counts[filter],
         limit,
-        premium_only: premiumOnly,
-        ...(premiumTotal !== undefined ? { premium_total: premiumTotal } : {}),
+        filter,
+        counts,
+        premium_only: filter === 'premium',
+        ...(filter === 'premium' ? { premium_total: counts.premium } : {}),
       };
     },
   );
@@ -2240,7 +2236,19 @@ export async function registerRoutes(
 
   // Notification compose, push health and subscription reminders live in adminNotifications.ts.
   registerAdminNotificationRoutes(app, { pool, env, adminPre });
+  registerAdminPaymentRoutes(app, { pool, env, adminPre, onPremiumGranted: notifyClientsAfterPremiumGrant });
   registerPartnerPushRoutes(app, { pool, env });
+
+  let stopReconciler = () => {};
+  app.addHook('onReady', async () => {
+    stopReconciler = startPendingPaymentReconciler({
+      pool,
+      env,
+      log: app.log,
+      onPremiumGranted: notifyClientsAfterPremiumGrant,
+    });
+  });
+  app.addHook('onClose', async () => stopReconciler());
 
   app.get('/api/v1/admin/slides', { preHandler: adminPre }, async () => {
     const r = await pool.query(
