@@ -97,24 +97,31 @@ class AdminScaffold extends StatefulWidget {
   State<AdminScaffold> createState() => _AdminScaffoldState();
 }
 
-class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserver {
+class _AdminScaffoldState extends State<AdminScaffold>
+    with WidgetsBindingObserver {
   final _rand = Random();
   final _globalSearch = TextEditingController();
   final _userSearch = TextEditingController();
   Timer? _userSearchDebounce;
+
   /// Authoritative DB count (may exceed loaded list length when filtered).
   int _usersTotal = 0;
+
   /// Rows matching the current server search (`q`). 0 when not searching.
   int _usersMatched = 0;
   bool _usersSearchLoading = false;
+
   /// Prevents overlapping full syncs from racing / freezing the UI.
   int _hydrateSeq = 0;
   Future<bool>? _hydrateInFlight;
+
   /// Browse page size — keep modest; search uses the server `q` path to find any user.
   static const int _usersBrowseLimit = 200;
   static const int _usersSearchLimit = 50;
+
   /// Pause background polls while the OS reports the app is not visible.
   bool _appLifecyclePaused = false;
+
   /// Same Railway API as the viewer app unless overridden with `--dart-define=WASHA_API_BASE_URL=...`.
   String get _apiBase => widget.auth.apiBase;
   bool get _hasAdminSession => widget.auth.hasSession;
@@ -136,24 +143,40 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
   bool _remindersLoading = false;
   String? _remindersError;
   final _settings = AdminSettings();
+
   /// Field initializers run on first read — survives hot reload when `initState` does not re-run.
-  late final TextEditingController _settingsSiteName = TextEditingController(text: _settings.siteName);
-  late final TextEditingController _settingsWhatsapp = TextEditingController(text: _settings.whatsappNumber);
-  late final TextEditingController _settingsMinBuild = TextEditingController(text: '0');
-  late final TextEditingController _settingsMinVersion = TextEditingController();
-  late final TextEditingController _settingsLatestVersion = TextEditingController();
-  late final TextEditingController _settingsLatestBuild = TextEditingController(text: '0');
-  late final TextEditingController _settingsPlayStoreUrl = TextEditingController(
-    text: 'https://play.google.com/store/apps/details?id=com.washatv',
+  late final TextEditingController _settingsSiteName = TextEditingController(
+    text: _settings.siteName,
   );
-  late final TextEditingController _settingsUpdateTitle = TextEditingController(text: 'Sasisha WASHA TV');
-  late final TextEditingController _settingsUpdateMessage = TextEditingController(
+  late final TextEditingController _settingsWhatsapp = TextEditingController(
+    text: _settings.whatsappNumber,
+  );
+  late final TextEditingController _settingsMinBuild = TextEditingController(
+    text: '0',
+  );
+  late final TextEditingController _settingsMinVersion =
+      TextEditingController();
+  late final TextEditingController _settingsLatestVersion =
+      TextEditingController();
+  late final TextEditingController _settingsLatestBuild = TextEditingController(
+    text: '0',
+  );
+  late final TextEditingController _settingsPlayStoreUrl =
+      TextEditingController(
+        text: 'https://play.google.com/store/apps/details?id=com.washatv',
+      );
+  late final TextEditingController _settingsUpdateTitle = TextEditingController(
+    text: 'Sasisha WASHA TV',
+  );
+  late final TextEditingController
+  _settingsUpdateMessage = TextEditingController(
     text:
         'Toleo jipya linahitajika ili kuendelea kutumia app. Pakua kutoka Play Store kisha fungua tena.',
   );
   AdminPageId _page = AdminPageId.dashboard;
   String? _slideQuery = '';
   String? _slideFilter = 'all';
+
   /// Desktop: whether sidebar is open (main gets left margin). HTML starts with main `full-width` → sidebar closed.
   bool _sidebarOpen = false;
   final List<_Toast> _toasts = [];
@@ -175,6 +198,7 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
     WidgetsBinding.instance.addObserver(this);
     _users = generateUsers(_rand);
     _channels = generateChannels(_rand);
+
     /// Empty until bootstrap/admin APIs load — avoids fake carousel rows overwriting real DB state in the UI.
     _slides = [];
     _pricing = defaultPricingPlans();
@@ -187,7 +211,8 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
     // Stats only matter on dashboard — polling every page rebuilds Users/Channels and causes ANRs.
     _statsRefreshTimer = Timer.periodic(const Duration(seconds: 20), (_) {
       if (!mounted || !_hasAdminSession || _appLifecyclePaused) return;
-      if (_page != AdminPageId.dashboard && _page != AdminPageId.analytics) return;
+      if (_page != AdminPageId.dashboard && _page != AdminPageId.analytics)
+        return;
       unawaited(_refreshDashboardStats());
     });
     // Full sync is expensive; keep it rare and page-aware.
@@ -215,7 +240,8 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    _appLifecyclePaused = state == AppLifecycleState.paused ||
+    _appLifecyclePaused =
+        state == AppLifecycleState.paused ||
         state == AppLifecycleState.detached ||
         state == AppLifecycleState.hidden;
   }
@@ -276,8 +302,10 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
 
   String _dashboardSubtitle() {
     if (!_hasAdminSession) return 'Ingia ili kuona data za moja kwa moja';
-    if (_statsRefreshFailed && _dashboardStats == null) return 'Imeshindwa kupakia takwimu · vuta chini ujaribu tena';
-    if (_statsRefreshFailed) return 'Kusasisha kumeshindikana · mwisho ${_formatRelative(_statsFetchedAt)}';
+    if (_statsRefreshFailed && _dashboardStats == null)
+      return 'Imeshindwa kupakia takwimu · vuta chini ujaribu tena';
+    if (_statsRefreshFailed)
+      return 'Kusasisha kumeshindikana · mwisho ${_formatRelative(_statsFetchedAt)}';
     if (_dashboardStats != null) {
       return 'Data za moja kwa moja · zilisasishwa ${_formatRelative(_statsFetchedAt)}';
     }
@@ -286,9 +314,25 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
 
   /// English month / weekday abbreviations (from the server or `to_char`) → Swahili.
   static const _swahiliLabels = {
-    'Jan': 'Jan', 'Feb': 'Feb', 'Mar': 'Mac', 'Apr': 'Apr', 'May': 'Mei', 'Jun': 'Jun',
-    'Jul': 'Jul', 'Aug': 'Ago', 'Sep': 'Sep', 'Oct': 'Okt', 'Nov': 'Nov', 'Dec': 'Des',
-    'Mon': 'Jtt', 'Tue': 'Jnn', 'Wed': 'Jtn', 'Thu': 'Alh', 'Fri': 'Iju', 'Sat': 'Jmo', 'Sun': 'Jpi',
+    'Jan': 'Jan',
+    'Feb': 'Feb',
+    'Mar': 'Mac',
+    'Apr': 'Apr',
+    'May': 'Mei',
+    'Jun': 'Jun',
+    'Jul': 'Jul',
+    'Aug': 'Ago',
+    'Sep': 'Sep',
+    'Oct': 'Okt',
+    'Nov': 'Nov',
+    'Dec': 'Des',
+    'Mon': 'Jtt',
+    'Tue': 'Jnn',
+    'Wed': 'Jtn',
+    'Thu': 'Alh',
+    'Fri': 'Iju',
+    'Sat': 'Jmo',
+    'Sun': 'Jpi',
   };
 
   String _swLabel(String raw) => _swahiliLabels[raw.trim()] ?? raw;
@@ -343,7 +387,10 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
     if (!_hasAdminSession) return false;
     try {
       final res = await http
-          .get(Uri.parse('$_apiBase/api/v1/admin/stats/overview'), headers: _adminHeaders())
+          .get(
+            Uri.parse('$_apiBase/api/v1/admin/stats/overview'),
+            headers: _adminHeaders(),
+          )
           .timeout(const Duration(seconds: 15));
       if (res.statusCode == 401 || res.statusCode == 403) {
         await _handleAdminUnauthorized();
@@ -358,13 +405,16 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
         if (notify && mounted) setState(() => _statsRefreshFailed = true);
         return false;
       }
-      final stats = _parseStatsJson((map['stats'] as Map?)?.cast<String, dynamic>());
+      final stats = _parseStatsJson(
+        (map['stats'] as Map?)?.cast<String, dynamic>(),
+      );
       if (stats == null) {
         if (notify && mounted) setState(() => _statsRefreshFailed = true);
         return false;
       }
       if (!mounted) return false;
-      final unchanged = _dashboardStats != null &&
+      final unchanged =
+          _dashboardStats != null &&
           _dashboardStats!.totalUsers == stats.totalUsers &&
           _dashboardStats!.premiumUsers == stats.premiumUsers &&
           _dashboardStats!.freeUsers == stats.freeUsers &&
@@ -374,7 +424,8 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
         // Avoid rebuilding heavy pages when numbers did not change.
         if (unchanged && !_statsRefreshFailed) {
           _statsFetchedAt = DateTime.now();
-          if (_page == AdminPageId.dashboard || _page == AdminPageId.analytics) {
+          if (_page == AdminPageId.dashboard ||
+              _page == AdminPageId.analytics) {
             setState(() {});
           }
         } else {
@@ -421,7 +472,10 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
       setState(() {
         for (final e in map.entries) {
           if (_pricing.containsKey(e.key)) {
-            _pricing[e.key] = _pricingFromJson(e.value as Map<String, dynamic>, _pricing[e.key]!);
+            _pricing[e.key] = _pricingFromJson(
+              e.value as Map<String, dynamic>,
+              _pricing[e.key]!,
+            );
           }
         }
       });
@@ -430,61 +484,74 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
   }
 
   Map<String, String> _adminHeaders() => {
-        ...widget.auth.headers(contentType: 'application/json'),
-        'Cache-Control': 'no-cache',
-        'Pragma': 'no-cache',
-      };
+    ...widget.auth.headers(contentType: 'application/json'),
+    'Cache-Control': 'no-cache',
+    'Pragma': 'no-cache',
+  };
 
   /// DELETE without JSON Content-Type — fewer CORS preflight issues on Flutter web.
   Map<String, String> _adminHeadersForDelete() => widget.auth.headers();
 
   List<AdminSlide> _parseAdminSlidesJson(List<dynamic> raw) {
-    return raw.whereType<Map>().map((rawItem) {
-      final j = rawItem.cast<String, dynamic>();
-      return AdminSlide(
-        id: _s(j['id']),
-        title: _s(j['title']),
-        subtitle: _s(j['subtitle']),
-        imageUrl: _s(j['image_url']),
-        premium: j['premium'] as bool? ?? false,
-        active: j['active'] as bool? ?? true,
-        sortOrder: (j['sort_order'] as num?)?.toInt() ?? 0,
-      );
-    }).where((s) => s.id.isNotEmpty).toList();
+    return raw
+        .whereType<Map>()
+        .map((rawItem) {
+          final j = rawItem.cast<String, dynamic>();
+          return AdminSlide(
+            id: _s(j['id']),
+            title: _s(j['title']),
+            subtitle: _s(j['subtitle']),
+            imageUrl: _s(j['image_url']),
+            premium: j['premium'] as bool? ?? false,
+            active: j['active'] as bool? ?? true,
+            sortOrder: (j['sort_order'] as num?)?.toInt() ?? 0,
+          );
+        })
+        .where((s) => s.id.isNotEmpty)
+        .toList();
   }
 
-  Uri _adminSlideUri(String slideId) =>
-      Uri.parse('$_apiBase/api/v1/admin/slides/${Uri.encodeComponent(slideId)}');
+  Uri _adminSlideUri(String slideId) => Uri.parse(
+    '$_apiBase/api/v1/admin/slides/${Uri.encodeComponent(slideId)}',
+  );
 
-  Uri _adminChannelUri(String channelId) =>
-      Uri.parse('$_apiBase/api/v1/admin/channels/${Uri.encodeComponent(channelId)}');
+  Uri _adminChannelUri(String channelId) => Uri.parse(
+    '$_apiBase/api/v1/admin/channels/${Uri.encodeComponent(channelId)}',
+  );
 
   List<AdminChannel> _parseAdminChannelsJson(List<dynamic> raw) {
-    return raw.whereType<Map>().map((rawItem) {
-      final j = rawItem.cast<String, dynamic>();
-      final category = _s(j['category']);
-      return AdminChannel(
-        id: _s(j['id']),
-        name: _s(j['name']),
-        category: category.isEmpty ? kAppChannelCategories.first : category,
-        premium: j['premium'] as bool? ?? false,
-        live: j['live'] as bool? ?? false,
-        status: _s(j['status'], fallback: 'active'),
-        thumbnail: _s(j['thumbnail']),
-        streamUrl: _s(j['stream_url'] ?? j['streamUrl']),
-        viewers: (j['viewers'] as num?)?.toInt() ?? 0,
-        rating: _s(j['rating'], fallback: '5.0'),
-        drm: _s(j['drm'], fallback: 'none'),
-        drmClearKey: _s(j['drm_clear_key'] ?? j['drmClearKey']),
-      );
-    }).where((c) => c.id.isNotEmpty && c.name.isNotEmpty).toList();
+    return raw
+        .whereType<Map>()
+        .map((rawItem) {
+          final j = rawItem.cast<String, dynamic>();
+          final category = _s(j['category']);
+          return AdminChannel(
+            id: _s(j['id']),
+            name: _s(j['name']),
+            category: category.isEmpty ? kAppChannelCategories.first : category,
+            premium: j['premium'] as bool? ?? false,
+            live: j['live'] as bool? ?? false,
+            status: _s(j['status'], fallback: 'active'),
+            thumbnail: _s(j['thumbnail']),
+            streamUrl: _s(j['stream_url'] ?? j['streamUrl']),
+            viewers: (j['viewers'] as num?)?.toInt() ?? 0,
+            rating: _s(j['rating'], fallback: '5.0'),
+            drm: _s(j['drm'], fallback: 'none'),
+            drmClearKey: _s(j['drm_clear_key'] ?? j['drmClearKey']),
+          );
+        })
+        .where((c) => c.id.isNotEmpty && c.name.isNotEmpty)
+        .toList();
   }
 
   Future<bool> _refreshChannelsFromServer() async {
     if (!_hasAdminSession) return false;
     try {
       final res = await http
-          .get(Uri.parse('$_apiBase/api/v1/admin/channels'), headers: _adminHeadersForDelete())
+          .get(
+            Uri.parse('$_apiBase/api/v1/admin/channels'),
+            headers: _adminHeadersForDelete(),
+          )
           .timeout(const Duration(seconds: 12));
       if (res.statusCode < 200 || res.statusCode >= 300) return false;
       final map = jsonDecode(res.body) as Map<String, dynamic>;
@@ -501,7 +568,10 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
     if (!_hasAdminSession) return false;
     try {
       final res = await http
-          .get(Uri.parse('$_apiBase/api/v1/admin/slides'), headers: _adminHeadersForDelete())
+          .get(
+            Uri.parse('$_apiBase/api/v1/admin/slides'),
+            headers: _adminHeadersForDelete(),
+          )
           .timeout(const Duration(seconds: 12));
       if (res.statusCode < 200 || res.statusCode >= 300) return false;
       final map = jsonDecode(res.body) as Map<String, dynamic>;
@@ -521,7 +591,9 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
   }
 
   /// Same rule as [PublicApiService._publicGetHeaders]: on web, extra headers can force CORS preflight on GET.
-  Map<String, String> get _publicBootstrapHeaders => kIsWeb ? <String, String>{} : const {'Cache-Control': 'no-cache', 'Pragma': 'no-cache'};
+  Map<String, String> get _publicBootstrapHeaders => kIsWeb
+      ? <String, String>{}
+      : const {'Cache-Control': 'no-cache', 'Pragma': 'no-cache'};
 
   String _normalizedUserSearchQuery() {
     // Collapse whitespace; keep dashes (Device IDs use them). Uppercase helps WTV-… matches.
@@ -546,29 +618,34 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
     try {
       final searchQ = _normalizedUserSearchQuery();
       final browsingUsers = searchQ.isEmpty;
-      final bootstrapUri = Uri.parse('$_apiBase/api/v1/public/bootstrap').replace(
-        queryParameters: const {'since': '0'},
-      );
-      final bootstrapFuture = http.get(bootstrapUri, headers: _publicBootstrapHeaders).timeout(const Duration(seconds: 15));
+      final bootstrapUri = Uri.parse(
+        '$_apiBase/api/v1/public/bootstrap',
+      ).replace(queryParameters: const {'since': '0'});
+      final bootstrapFuture = http
+          .get(bootstrapUri, headers: _publicBootstrapHeaders)
+          .timeout(const Duration(seconds: 15));
       // While searching, keep sync payload small (no user dump) — users come from /admin/users.
       final adminFuture = _hasAdminSession
           ? http
-              .get(
-                Uri.parse('$_apiBase/api/v1/admin/sync').replace(
-                  queryParameters: {
-                    'limit': browsingUsers ? '$_usersBrowseLimit' : '1',
-                    if (!browsingUsers) 'skip_users': '1',
-                  },
-                ),
-                headers: _adminHeaders(),
-              )
-              .timeout(const Duration(seconds: 30))
+                .get(
+                  Uri.parse('$_apiBase/api/v1/admin/sync').replace(
+                    queryParameters: {
+                      'limit': browsingUsers ? '$_usersBrowseLimit' : '1',
+                      if (!browsingUsers) 'skip_users': '1',
+                    },
+                  ),
+                  headers: _adminHeaders(),
+                )
+                .timeout(const Duration(seconds: 30))
           : null;
 
       late final http.Response bootstrapRes;
       http.Response? adminRes;
       if (adminFuture != null) {
-        final pair = await Future.wait<http.Response>([bootstrapFuture, adminFuture]);
+        final pair = await Future.wait<http.Response>([
+          bootstrapFuture,
+          adminFuture,
+        ]);
         bootstrapRes = pair[0];
         adminRes = pair[1];
       } else {
@@ -577,7 +654,8 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
 
       if (seq != _hydrateSeq || !mounted) return false;
 
-      final bootstrapOk = bootstrapRes.statusCode >= 200 && bootstrapRes.statusCode < 300;
+      final bootstrapOk =
+          bootstrapRes.statusCode >= 200 && bootstrapRes.statusCode < 300;
       Map<String, dynamic>? bootstrapMap;
       if (bootstrapOk) {
         bootstrapMap = await _decodeJsonMapSafe(bootstrapRes.body);
@@ -601,9 +679,13 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
         if (bootstrapMap != null) {
           final map = bootstrapMap;
           final rawPlans = (map['plans'] as List?)?.cast<dynamic>() ?? const [];
-          final rawChannels = (map['channels'] as List?)?.cast<dynamic>() ?? const [];
-          final rawSlidesFromBootstrap = (map['slides'] as List?)?.cast<dynamic>() ?? const [];
-          final settings = (map['settings'] as Map?)?.cast<String, dynamic>() ?? const <String, dynamic>{};
+          final rawChannels =
+              (map['channels'] as List?)?.cast<dynamic>() ?? const [];
+          final rawSlidesFromBootstrap =
+              (map['slides'] as List?)?.cast<dynamic>() ?? const [];
+          final settings =
+              (map['settings'] as Map?)?.cast<String, dynamic>() ??
+              const <String, dynamic>{};
           for (final p in rawPlans) {
             if (p is! Map) continue;
             final j = p.cast<String, dynamic>();
@@ -611,17 +693,21 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
             final existing = _pricing[key];
             if (existing == null) continue;
             final priceRaw = j['price'];
-            final price = priceRaw is num ? priceRaw.toDouble() : double.tryParse(priceRaw?.toString().trim() ?? '');
+            final price = priceRaw is num
+                ? priceRaw.toDouble()
+                : double.tryParse(priceRaw?.toString().trim() ?? '');
             final daysRaw = j['duration_days'];
-            final days = daysRaw is num ? daysRaw.toInt() : int.tryParse(daysRaw?.toString().trim() ?? '');
+            final days = daysRaw is num
+                ? daysRaw.toInt()
+                : int.tryParse(daysRaw?.toString().trim() ?? '');
             final en = j['enabled'];
             final bool? enabled = en is bool
                 ? en
                 : en is num
-                    ? en != 0
-                    : en is String
-                        ? (en.toLowerCase() == 'true' || en == '1')
-                        : null;
+                ? en != 0
+                : en is String
+                ? (en.toLowerCase() == 'true' || en == '1')
+                : null;
             final name = (j['name'] as String?)?.trim();
             if (name != null && name.isNotEmpty) existing.name = name;
             if (price != null) existing.price = price;
@@ -632,18 +718,27 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
           }
           if (adminSyncMap == null) {
             _channels = _parseAdminChannelsJson(rawChannels);
-            _slides = rawSlidesFromBootstrap.whereType<Map>().map((rawItem) {
-              final j = rawItem.cast<String, dynamic>();
-              return AdminSlide(
-                id: _s(j['id']),
-                title: _s(j['title']),
-                subtitle: _s(j['subtitle']),
-                imageUrl: _s(j['image_url']),
-                premium: j['premium'] as bool? ?? false,
-                active: j['active'] as bool? ?? true,
-                sortOrder: (j['sort_order'] as num?)?.toInt() ?? 0,
-              );
-            }).where((s) => s.id.isNotEmpty && s.title.isNotEmpty && s.imageUrl.isNotEmpty).toList();
+            _slides = rawSlidesFromBootstrap
+                .whereType<Map>()
+                .map((rawItem) {
+                  final j = rawItem.cast<String, dynamic>();
+                  return AdminSlide(
+                    id: _s(j['id']),
+                    title: _s(j['title']),
+                    subtitle: _s(j['subtitle']),
+                    imageUrl: _s(j['image_url']),
+                    premium: j['premium'] as bool? ?? false,
+                    active: j['active'] as bool? ?? true,
+                    sortOrder: (j['sort_order'] as num?)?.toInt() ?? 0,
+                  );
+                })
+                .where(
+                  (s) =>
+                      s.id.isNotEmpty &&
+                      s.title.isNotEmpty &&
+                      s.imageUrl.isNotEmpty,
+                )
+                .toList();
           }
           final wa = _s(settings['whatsapp_number']);
           _settings.whatsappNumber = wa;
@@ -701,7 +796,9 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
           .get(
             Uri.parse('$_apiBase/api/v1/admin/users').replace(
               queryParameters: {
-                'limit': q.isEmpty ? '$_usersBrowseLimit' : '$_usersSearchLimit',
+                'limit': q.isEmpty
+                    ? '$_usersBrowseLimit'
+                    : '$_usersSearchLimit',
                 if (q.isNotEmpty) 'q': q,
               },
             ),
@@ -753,8 +850,9 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
     }
   }
 
-  String _pricingPriceText(double value) =>
-      value == value.roundToDouble() ? value.toInt().toString() : value.toStringAsFixed(2);
+  String _pricingPriceText(double value) => value == value.roundToDouble()
+      ? value.toInt().toString()
+      : value.toStringAsFixed(2);
 
   void _ensurePricingControllers() {
     final fields = _pricingFields;
@@ -762,8 +860,14 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
       final p = _pricing[key];
       if (p == null) continue;
       fields.name.putIfAbsent(key, () => TextEditingController(text: p.name));
-      fields.price.putIfAbsent(key, () => TextEditingController(text: _pricingPriceText(p.price)));
-      fields.days.putIfAbsent(key, () => TextEditingController(text: '${p.duration}'));
+      fields.price.putIfAbsent(
+        key,
+        () => TextEditingController(text: _pricingPriceText(p.price)),
+      );
+      fields.days.putIfAbsent(
+        key,
+        () => TextEditingController(text: '${p.duration}'),
+      );
     }
   }
 
@@ -786,7 +890,9 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
       if (p == null) continue;
       final name = fields.name[key]?.text.trim() ?? '';
       if (name.isNotEmpty) p.name = name;
-      final priceRaw = fields.price[key]?.text.replaceAll(RegExp(r'[^0-9.]'), '').trim() ?? '';
+      final priceRaw =
+          fields.price[key]?.text.replaceAll(RegExp(r'[^0-9.]'), '').trim() ??
+          '';
       final price = double.tryParse(priceRaw);
       if (price != null && price >= 0) {
         p.price = price;
@@ -804,13 +910,17 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
     final name = (j['name'] as String?)?.trim();
     if (name != null && name.isNotEmpty) p.name = name;
     final priceRaw = j['price'];
-    final price = priceRaw is num ? priceRaw.toDouble() : double.tryParse(priceRaw?.toString().trim() ?? '');
+    final price = priceRaw is num
+        ? priceRaw.toDouble()
+        : double.tryParse(priceRaw?.toString().trim() ?? '');
     if (price != null) {
       p.price = price;
       p.originalPrice = price;
     }
     final daysRaw = j['duration_days'];
-    final days = daysRaw is num ? daysRaw.toInt() : int.tryParse(daysRaw?.toString().trim() ?? '');
+    final days = daysRaw is num
+        ? daysRaw.toInt()
+        : int.tryParse(daysRaw?.toString().trim() ?? '');
     if (days != null && days > 0) p.duration = days;
     final en = j['enabled'];
     if (en is bool) {
@@ -824,12 +934,15 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
   Future<void> _persistPricingMapToPrefs() async {
     try {
       final sp = await SharedPreferences.getInstance();
-      final map = {for (final e in _pricing.entries) e.key: _pricingToJson(e.value)};
+      final map = {
+        for (final e in _pricing.entries) e.key: _pricingToJson(e.value),
+      };
       await sp.setString('washatvPricing', jsonEncode(map));
     } catch (_) {}
   }
 
-  String _s(Object? value, {String fallback = ''}) => value?.toString().trim() ?? fallback;
+  String _s(Object? value, {String fallback = ''}) =>
+      value?.toString().trim() ?? fallback;
   DateTime? _dt(Object? value) {
     final s = value?.toString();
     if (s == null || s.isEmpty) return null;
@@ -882,7 +995,8 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
         deviceId: deviceRaw.isEmpty ? null : deviceRaw,
         status: _s(j['status'], fallback: 'active'),
         subscription: _s(j['subscription'], fallback: 'free'),
-        createdAt: _dt(j['created_at']) ?? DateTime.fromMillisecondsSinceEpoch(0),
+        createdAt:
+            _dt(j['created_at']) ?? DateTime.fromMillisecondsSinceEpoch(0),
         premiumUntil: _dt(j['premium_until']),
         adminAccessUntil: _dt(j['admin_access_until']),
       );
@@ -892,9 +1006,12 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
   AdminDashboardStats? _parseStatsJson(Map<String, dynamic>? s) {
     if (s == null) return null;
     final totals = (s['totals'] as Map?)?.cast<String, dynamic>() ?? const {};
-    final growth = (s['user_growth'] as Map?)?.cast<String, dynamic>() ?? const {};
-    final revenue = (s['revenue_overview'] as Map?)?.cast<String, dynamic>() ?? const {};
-    final daily = (s['daily_registrations'] as Map?)?.cast<String, dynamic>() ?? const {};
+    final growth =
+        (s['user_growth'] as Map?)?.cast<String, dynamic>() ?? const {};
+    final revenue =
+        (s['revenue_overview'] as Map?)?.cast<String, dynamic>() ?? const {};
+    final daily =
+        (s['daily_registrations'] as Map?)?.cast<String, dynamic>() ?? const {};
     final mix = (s['plan_mix'] as Map?)?.cast<String, dynamic>() ?? const {};
     return AdminDashboardStats(
       totalUsers: _toInt(totals['users']),
@@ -902,11 +1019,15 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
       freeUsers: _toInt(totals['free_users']),
       activeChannels: _toInt(totals['active_channels']),
       revenue: _toDouble(totals['revenue']),
-      monthLabels: ((growth['labels'] as List?) ?? const []).map((e) => _swLabel(e.toString())).toList(),
+      monthLabels: ((growth['labels'] as List?) ?? const [])
+          .map((e) => _swLabel(e.toString()))
+          .toList(),
       newUsersPerMonth: _numList(growth['new_users']),
       premiumPurchasesPerMonth: _numList(growth['premium_purchases']),
       revenuePerMonth: _numList(revenue['amounts']),
-      dailyLabels: ((daily['labels'] as List?) ?? const []).map((e) => _swLabel(e.toString())).toList(),
+      dailyLabels: ((daily['labels'] as List?) ?? const [])
+          .map((e) => _swLabel(e.toString()))
+          .toList(),
       dailyRegistrations: _numList(daily['counts']),
       planWeekly: _toInt(mix['weekly']),
       planGold: _toInt(mix['gold']),
@@ -918,22 +1039,60 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
   Future<Map<String, dynamic>?> _fetchLegacyAdminBundle() async {
     try {
       final results = await Future.wait([
-        http.get(
-          Uri.parse('$_apiBase/api/v1/admin/users').replace(
-            queryParameters: {
-              'limit': '$_usersBrowseLimit',
-              if (_normalizedUserSearchQuery().isNotEmpty) 'q': _normalizedUserSearchQuery(),
-            },
-          ),
-          headers: _adminHeaders(),
-        ).timeout(const Duration(seconds: 20)),
-        http.get(Uri.parse('$_apiBase/api/v1/admin/channels'), headers: _adminHeaders()).timeout(const Duration(seconds: 15)),
-        http.get(Uri.parse('$_apiBase/api/v1/admin/slides'), headers: _adminHeaders()).timeout(const Duration(seconds: 15)),
-        http.get(Uri.parse('$_apiBase/api/v1/admin/transactions'), headers: _adminHeaders()).timeout(const Duration(seconds: 15)),
-        http.get(Uri.parse('$_apiBase/api/v1/admin/notifications'), headers: _adminHeaders()).timeout(const Duration(seconds: 15)),
-        http.get(Uri.parse('$_apiBase/api/v1/admin/stats/overview'), headers: _adminHeaders()).timeout(const Duration(seconds: 15)),
-        http.get(Uri.parse('$_apiBase/api/v1/admin/subscriptions'), headers: _adminHeaders()).timeout(const Duration(seconds: 15)),
-        http.get(Uri.parse('$_apiBase/api/v1/admin/logs'), headers: _adminHeaders()).timeout(const Duration(seconds: 15)),
+        http
+            .get(
+              Uri.parse('$_apiBase/api/v1/admin/users').replace(
+                queryParameters: {
+                  'limit': '$_usersBrowseLimit',
+                  if (_normalizedUserSearchQuery().isNotEmpty)
+                    'q': _normalizedUserSearchQuery(),
+                },
+              ),
+              headers: _adminHeaders(),
+            )
+            .timeout(const Duration(seconds: 20)),
+        http
+            .get(
+              Uri.parse('$_apiBase/api/v1/admin/channels'),
+              headers: _adminHeaders(),
+            )
+            .timeout(const Duration(seconds: 15)),
+        http
+            .get(
+              Uri.parse('$_apiBase/api/v1/admin/slides'),
+              headers: _adminHeaders(),
+            )
+            .timeout(const Duration(seconds: 15)),
+        http
+            .get(
+              Uri.parse('$_apiBase/api/v1/admin/transactions'),
+              headers: _adminHeaders(),
+            )
+            .timeout(const Duration(seconds: 15)),
+        http
+            .get(
+              Uri.parse('$_apiBase/api/v1/admin/notifications'),
+              headers: _adminHeaders(),
+            )
+            .timeout(const Duration(seconds: 15)),
+        http
+            .get(
+              Uri.parse('$_apiBase/api/v1/admin/stats/overview'),
+              headers: _adminHeaders(),
+            )
+            .timeout(const Duration(seconds: 15)),
+        http
+            .get(
+              Uri.parse('$_apiBase/api/v1/admin/subscriptions'),
+              headers: _adminHeaders(),
+            )
+            .timeout(const Duration(seconds: 15)),
+        http
+            .get(
+              Uri.parse('$_apiBase/api/v1/admin/logs'),
+              headers: _adminHeaders(),
+            )
+            .timeout(const Duration(seconds: 15)),
       ]);
       for (final res in results) {
         if (res.statusCode == 401 || res.statusCode == 403) {
@@ -954,16 +1113,19 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
         bundle['slides'] = (jsonDecode(results[2].body) as Map)['slides'];
       }
       if (results[3].statusCode >= 200 && results[3].statusCode < 300) {
-        bundle['transactions'] = (jsonDecode(results[3].body) as Map)['transactions'];
+        bundle['transactions'] =
+            (jsonDecode(results[3].body) as Map)['transactions'];
       }
       if (results[4].statusCode >= 200 && results[4].statusCode < 300) {
-        bundle['notifications'] = (jsonDecode(results[4].body) as Map)['notifications'];
+        bundle['notifications'] =
+            (jsonDecode(results[4].body) as Map)['notifications'];
       }
       if (results[5].statusCode >= 200 && results[5].statusCode < 300) {
         bundle['stats'] = (jsonDecode(results[5].body) as Map)['stats'];
       }
       if (results[6].statusCode >= 200 && results[6].statusCode < 300) {
-        bundle['subscriptions'] = (jsonDecode(results[6].body) as Map)['subscriptions'];
+        bundle['subscriptions'] =
+            (jsonDecode(results[6].body) as Map)['subscriptions'];
       }
       if (results[7].statusCode >= 200 && results[7].statusCode < 300) {
         bundle['logs'] = (jsonDecode(results[7].body) as Map)['logs'];
@@ -974,7 +1136,10 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
     }
   }
 
-  void _applyAdminSyncPayload(Map<String, dynamic> adminMap, {bool applyUsers = true}) {
+  void _applyAdminSyncPayload(
+    Map<String, dynamic> adminMap, {
+    bool applyUsers = true,
+  }) {
     if (applyUsers) {
       final rawUsers = adminMap['users'];
       if (rawUsers is List) _users = _parseUsersJson(rawUsers);
@@ -1015,7 +1180,8 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
           method: _s(j['method'], fallback: 'N/A'),
           status: _s(j['status'], fallback: 'completed'),
           transactionId: _s(j['provider_ref'], fallback: _s(j['id'])),
-          createdAt: _dt(j['completed_at']) ?? _dt(j['created_at']) ?? DateTime.now(),
+          createdAt:
+              _dt(j['completed_at']) ?? _dt(j['created_at']) ?? DateTime.now(),
           planKey: _s(j['plan_key']).isEmpty ? null : _s(j['plan_key']),
         );
       }).toList();
@@ -1024,7 +1190,9 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
     final rawNoti = adminMap['notifications'];
     if (rawNoti is List) _notifications = _parseNotificationsJson(rawNoti);
 
-    final stats = _parseStatsJson((adminMap['stats'] as Map?)?.cast<String, dynamic>());
+    final stats = _parseStatsJson(
+      (adminMap['stats'] as Map?)?.cast<String, dynamic>(),
+    );
     if (stats != null) {
       _dashboardStats = stats;
       _statsFetchedAt = DateTime.now();
@@ -1066,16 +1234,10 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
   Future<void> _onPullRefresh() async {
     final q = _normalizedUserSearchQuery();
     if (q.isNotEmpty && _page == AdminPageId.users) {
-      await Future.wait([
-        _searchUsersFromBackend(),
-        _refreshDashboardStats(),
-      ]);
+      await Future.wait([_searchUsersFromBackend(), _refreshDashboardStats()]);
       return;
     }
-    await Future.wait([
-      _hydrateFromBackend(),
-      _refreshDashboardStats(),
-    ]);
+    await Future.wait([_hydrateFromBackend(), _refreshDashboardStats()]);
   }
 
   /// Last 7 calendar months ending this month (labels + bucket starts).
@@ -1084,7 +1246,20 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
     final month0 = DateTime(now.year, now.month);
     final labels = <String>[];
     final starts = <DateTime>[];
-    const months = ['Jan', 'Feb', 'Mac', 'Apr', 'Mei', 'Jun', 'Jul', 'Ago', 'Sep', 'Okt', 'Nov', 'Des'];
+    const months = [
+      'Jan',
+      'Feb',
+      'Mac',
+      'Apr',
+      'Mei',
+      'Jun',
+      'Jul',
+      'Ago',
+      'Sep',
+      'Okt',
+      'Nov',
+      'Des',
+    ];
     for (var i = 6; i >= 0; i--) {
       final start = DateTime(month0.year, month0.month - i);
       starts.add(start);
@@ -1098,13 +1273,16 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
     return !dt.isBefore(monthStart) && dt.isBefore(next);
   }
 
-  bool _sameDay(DateTime a, DateTime b) => a.year == b.year && a.month == b.month && a.day == b.day;
+  bool _sameDay(DateTime a, DateTime b) =>
+      a.year == b.year && a.month == b.month && a.day == b.day;
 
   /// Calendar day in Tanzania (EAT, UTC+3) — matches backend Africa/Dar_es_Salaam cutoff at 00:00.
   bool _isTodayTanzania(DateTime dt) {
     final tzNow = DateTime.now().toUtc().add(const Duration(hours: 3));
     final tzDt = dt.toUtc().add(const Duration(hours: 3));
-    return tzNow.year == tzDt.year && tzNow.month == tzDt.month && tzNow.day == tzDt.day;
+    return tzNow.year == tzDt.year &&
+        tzNow.month == tzDt.month &&
+        tzNow.day == tzDt.day;
   }
 
   /// Today's completed collections only (Tanzania day). Never use lifetime API totals for this card.
@@ -1117,7 +1295,12 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
   AdminDashboardStats? _statsFromLocalLists() {
     if (_users.isEmpty && _payments.isEmpty && _channels.isEmpty) return null;
     final buckets = _lastSevenMonths();
-    final newUsers = buckets.starts.map((m) => _users.where((u) => _inMonth(u.createdAt, m)).length.toDouble()).toList();
+    final newUsers = buckets.starts
+        .map(
+          (m) =>
+              _users.where((u) => _inMonth(u.createdAt, m)).length.toDouble(),
+        )
+        .toList();
     final premiumBuys = buckets.starts
         .map(
           (m) => _payments
@@ -1134,9 +1317,17 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
         )
         .toList();
     final today = DateTime.now();
-    final dayStarts = List.generate(7, (i) => DateTime(today.year, today.month, today.day - (6 - i)));
+    final dayStarts = List.generate(
+      7,
+      (i) => DateTime(today.year, today.month, today.day - (6 - i)),
+    );
     const dayLabels = ['Jtt', 'Jnn', 'Jtn', 'Alh', 'Iju', 'Jmo', 'Jpi'];
-    final daily = dayStarts.map((d) => _users.where((u) => _sameDay(u.createdAt, d)).length.toDouble()).toList();
+    final daily = dayStarts
+        .map(
+          (d) =>
+              _users.where((u) => _sameDay(u.createdAt, d)).length.toDouble(),
+        )
+        .toList();
     final dailyLabels = dayStarts.map((d) => dayLabels[d.weekday - 1]).toList();
     final premium = _users.where((u) => u.effectivePremium).length;
     final total = _users.length;
@@ -1181,11 +1372,14 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
   PricingPlan _pricingFromJson(Map<String, dynamic> j, PricingPlan fallback) {
     return PricingPlan(
       name: j['name'] as String? ?? fallback.name,
-      originalPrice: (j['originalPrice'] as num?)?.toDouble() ?? fallback.originalPrice,
+      originalPrice:
+          (j['originalPrice'] as num?)?.toDouble() ?? fallback.originalPrice,
       price: (j['price'] as num?)?.toDouble() ?? fallback.price,
       discount: (j['discount'] as num?)?.toInt() ?? fallback.discount,
       duration: (j['duration'] as num?)?.toInt() ?? fallback.duration,
-      features: (j['features'] as List<dynamic>?)?.map((e) => e as String).toList() ?? fallback.features,
+      features:
+          (j['features'] as List<dynamic>?)?.map((e) => e as String).toList() ??
+          fallback.features,
       popular: j['popular'] as bool? ?? fallback.popular,
       enabled: j['enabled'] as bool? ?? fallback.enabled,
       colorKey: j['color'] as String? ?? fallback.colorKey,
@@ -1193,16 +1387,16 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
   }
 
   Map<String, dynamic> _pricingToJson(PricingPlan p) => {
-        'name': p.name,
-        'originalPrice': p.originalPrice,
-        'price': p.price,
-        'discount': p.discount,
-        'duration': p.duration,
-        'features': p.features,
-        'popular': p.popular,
-        'enabled': p.enabled,
-        'color': p.colorKey,
-      };
+    'name': p.name,
+    'originalPrice': p.originalPrice,
+    'price': p.price,
+    'discount': p.discount,
+    'duration': p.duration,
+    'features': p.features,
+    'popular': p.popular,
+    'enabled': p.enabled,
+    'color': p.colorKey,
+  };
 
   @override
   void dispose() {
@@ -1231,7 +1425,8 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
       _page = p;
       if (_isMobile) _sidebarOpen = false;
     });
-    if (p == AdminPageId.notifications && _hasAdminSession) unawaited(_loadReminderData());
+    if (p == AdminPageId.notifications && _hasAdminSession)
+      unawaited(_loadReminderData());
   }
 
   /// Header "Search..." finds users by Device ID / name / phone / USR id.
@@ -1276,72 +1471,85 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
             bottom: false,
             child: Stack(
               children: [
-          Row(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              if (!mobile)
-                AnimatedContainer(
-                  duration: const Duration(milliseconds: 300),
-                  curve: Curves.ease,
-                  width: _sidebarOpen ? 260 : 0,
-                  child: _sidebarOpen
-                      ? ClipRect(
-                          child: _buildSidebar(mobile),
-                        )
-                      : const SizedBox.shrink(),
-                ),
-              Expanded(
-                child: Column(
+                Row(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
-                    _buildHeader(mobile, w),
+                    if (!mobile)
+                      AnimatedContainer(
+                        duration: const Duration(milliseconds: 300),
+                        curve: Curves.ease,
+                        width: _sidebarOpen ? 260 : 0,
+                        child: _sidebarOpen
+                            ? ClipRect(child: _buildSidebar(mobile))
+                            : const SizedBox.shrink(),
+                      ),
                     Expanded(
-                      child: RefreshIndicator(
-                        color: const Color(0xFF818CF8),
-                        backgroundColor: AdminColors.bgSecondary,
-                        onRefresh: _onPullRefresh,
-                        // Users + Channels own their scroll views (virtualized). Nested
-                        // shrinkWrap grids/lists of many tiles caused Android ANRs.
-                        child: (_page == AdminPageId.users || _page == AdminPageId.channels)
-                            ? Padding(
-                                padding: EdgeInsets.fromLTRB(16, 16, 16, mobile ? 88 : 16),
-                                child: _page == AdminPageId.users ? _pageUsers() : _pageChannels(),
-                              )
-                            : SingleChildScrollView(
-                                physics: const AlwaysScrollableScrollPhysics(),
-                                padding: EdgeInsets.fromLTRB(16, 16, 16, mobile ? 88 : 16),
-                                child: _buildPage(),
-                              ),
+                      child: Column(
+                        children: [
+                          _buildHeader(mobile, w),
+                          Expanded(
+                            child: RefreshIndicator(
+                              color: const Color(0xFF818CF8),
+                              backgroundColor: AdminColors.bgSecondary,
+                              onRefresh: _onPullRefresh,
+                              // Users + Channels own their scroll views (virtualized). Nested
+                              // shrinkWrap grids/lists of many tiles caused Android ANRs.
+                              child:
+                                  (_page == AdminPageId.users ||
+                                      _page == AdminPageId.channels)
+                                  ? Padding(
+                                      padding: EdgeInsets.fromLTRB(
+                                        16,
+                                        16,
+                                        16,
+                                        mobile ? 88 : 16,
+                                      ),
+                                      child: _page == AdminPageId.users
+                                          ? _pageUsers()
+                                          : _pageChannels(),
+                                    )
+                                  : SingleChildScrollView(
+                                      physics:
+                                          const AlwaysScrollableScrollPhysics(),
+                                      padding: EdgeInsets.fromLTRB(
+                                        16,
+                                        16,
+                                        16,
+                                        mobile ? 88 : 16,
+                                      ),
+                                      child: _buildPage(),
+                                    ),
+                            ),
+                          ),
+                        ],
                       ),
                     ),
                   ],
                 ),
-              ),
-            ],
-          ),
-          if (mobile && _sidebarOpen) ...[
-            Positioned.fill(
-              child: GestureDetector(
-                onTap: () => setState(() => _sidebarOpen = false),
-                child: BackdropFilter(
-                  filter: ImageFilter.blur(sigmaX: 2, sigmaY: 2),
-                  child: Container(color: const Color(0x99000000)),
-                ),
-              ),
-            ),
-            Positioned(
-              left: 0,
-              top: 0,
-              bottom: 0,
-              width: 280,
-              child: Material(
-                color: AdminColors.bgSecondary,
-                elevation: 8,
-                child: _buildSidebar(true),
-              ),
-            ),
-          ],
-          Positioned(top: 12, right: 12, child: _toastStack()),
-            ],
+                if (mobile && _sidebarOpen) ...[
+                  Positioned.fill(
+                    child: GestureDetector(
+                      onTap: () => setState(() => _sidebarOpen = false),
+                      child: BackdropFilter(
+                        filter: ImageFilter.blur(sigmaX: 2, sigmaY: 2),
+                        child: Container(color: const Color(0x99000000)),
+                      ),
+                    ),
+                  ),
+                  Positioned(
+                    left: 0,
+                    top: 0,
+                    bottom: 0,
+                    width: 280,
+                    child: Material(
+                      color: AdminColors.bgSecondary,
+                      elevation: 8,
+                      child: _buildSidebar(true),
+                    ),
+                  ),
+                ],
+                Positioned(top: 12, right: 12, child: _toastStack()),
+              ],
             ),
           ),
           bottomNavigationBar: mobile ? _bottomNav() : null,
@@ -1363,17 +1571,34 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
         return Container(
           margin: const EdgeInsets.only(bottom: 8),
           padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-          decoration: BoxDecoration(color: bg, borderRadius: BorderRadius.circular(12), boxShadow: const [BoxShadow(color: Color(0x66000000), blurRadius: 20)]),
+          decoration: BoxDecoration(
+            color: bg,
+            borderRadius: BorderRadius.circular(12),
+            boxShadow: const [
+              BoxShadow(color: Color(0x66000000), blurRadius: 20),
+            ],
+          ),
           child: Row(
             mainAxisSize: MainAxisSize.min,
             children: [
               Icon(
-                t.type == _ToastType.success ? Icons.check_circle_outline : t.type == _ToastType.error ? Icons.cancel_outlined : Icons.info_outline,
+                t.type == _ToastType.success
+                    ? Icons.check_circle_outline
+                    : t.type == _ToastType.error
+                    ? Icons.cancel_outlined
+                    : Icons.info_outline,
                 color: Colors.white,
                 size: 16,
               ),
               const SizedBox(width: 8),
-              Text(t.message, style: const TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.w600)),
+              Text(
+                t.message,
+                style: const TextStyle(
+                  color: Colors.white,
+                  fontSize: 12,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
             ],
           ),
         );
@@ -1396,8 +1621,17 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
           if (showBrand)
             ShaderMask(
               blendMode: BlendMode.srcIn,
-              shaderCallback: (r) => const LinearGradient(colors: [Color(0xFF818CF8), Color(0xFFA78BFA)]).createShader(r),
-              child: const Text('WASHA TV', style: TextStyle(fontWeight: FontWeight.w800, fontSize: 14, color: Colors.white)),
+              shaderCallback: (r) => const LinearGradient(
+                colors: [Color(0xFF818CF8), Color(0xFFA78BFA)],
+              ).createShader(r),
+              child: const Text(
+                'WASHA TV',
+                style: TextStyle(
+                  fontWeight: FontWeight.w800,
+                  fontSize: 14,
+                  color: Colors.white,
+                ),
+              ),
             ),
           Expanded(
             child: Padding(
@@ -1409,13 +1643,29 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
                 onSubmitted: _onGlobalSearchSubmitted,
                 decoration: InputDecoration(
                   hintText: 'Tafuta user (Device ID / jina / simu)...',
-                  hintStyle: const TextStyle(color: Color(0xFF6B7280), fontSize: 13),
-                  prefixIcon: const Icon(Icons.search, size: 18, color: Color(0xFF6B7280)),
+                  hintStyle: const TextStyle(
+                    color: Color(0xFF6B7280),
+                    fontSize: 13,
+                  ),
+                  prefixIcon: const Icon(
+                    Icons.search,
+                    size: 18,
+                    color: Color(0xFF6B7280),
+                  ),
                   filled: true,
                   fillColor: AdminColors.bgPrimary,
-                  contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-                  enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: const BorderSide(color: Color(0x1AFFFFFF))),
-                  focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: const BorderSide(color: Color(0xFF6366F1))),
+                  contentPadding: const EdgeInsets.symmetric(
+                    horizontal: 12,
+                    vertical: 10,
+                  ),
+                  enabledBorder: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(12),
+                    borderSide: const BorderSide(color: Color(0x1AFFFFFF)),
+                  ),
+                  focusedBorder: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(12),
+                    borderSide: const BorderSide(color: Color(0xFF6366F1)),
+                  ),
                 ),
               ),
             ),
@@ -1426,7 +1676,10 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
               IconButton(
                 tooltip: 'Arifa na vikumbusho',
                 onPressed: () => _navigate(AdminPageId.notifications),
-                icon: const Icon(Icons.notifications_none_rounded, color: Color(0xFF9CA3AF)),
+                icon: const Icon(
+                  Icons.notifications_none_rounded,
+                  color: Color(0xFF9CA3AF),
+                ),
               ),
               if ((_reminderSummary?.expiringUnsent ?? 0) > 0)
                 const Positioned(right: 10, top: 10, child: _PulseDot()),
@@ -1454,7 +1707,9 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
                   height: 40,
                   decoration: BoxDecoration(
                     borderRadius: BorderRadius.circular(12),
-                    gradient: const LinearGradient(colors: [Color(0xFF6366F1), Color(0xFF9333EA)]),
+                    gradient: const LinearGradient(
+                      colors: [Color(0xFF6366F1), Color(0xFF9333EA)],
+                    ),
                   ),
                   child: const Icon(Icons.bolt, color: Colors.white, size: 20),
                 ),
@@ -1465,10 +1720,25 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
                     children: [
                       ShaderMask(
                         blendMode: BlendMode.srcIn,
-                        shaderCallback: (r) => const LinearGradient(colors: [Color(0xFF818CF8), Color(0xFFA78BFA)]).createShader(r),
-                        child: const Text('WASHA Admin', style: TextStyle(fontWeight: FontWeight.w800, fontSize: 18, color: Colors.white)),
+                        shaderCallback: (r) => const LinearGradient(
+                          colors: [Color(0xFF818CF8), Color(0xFFA78BFA)],
+                        ).createShader(r),
+                        child: const Text(
+                          'WASHA Admin',
+                          style: TextStyle(
+                            fontWeight: FontWeight.w800,
+                            fontSize: 18,
+                            color: Colors.white,
+                          ),
+                        ),
                       ),
-                      const Text('Paneli ya Usimamizi', style: TextStyle(fontSize: 10, color: Color(0xFF6B7280))),
+                      const Text(
+                        'Paneli ya Usimamizi',
+                        style: TextStyle(
+                          fontSize: 10,
+                          color: Color(0xFF6B7280),
+                        ),
+                      ),
                     ],
                   ),
                 ),
@@ -1484,23 +1754,61 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
             child: ListView(
               padding: const EdgeInsets.symmetric(horizontal: 12),
               children: [
-                _navRow(AdminPageId.dashboard, Icons.dashboard_rounded, 'Dashibodi'),
+                _navRow(
+                  AdminPageId.dashboard,
+                  Icons.dashboard_rounded,
+                  'Dashibodi',
+                ),
                 _navRow(AdminPageId.users, Icons.groups_rounded, 'Watumiaji'),
-                _navRow(AdminPageId.channels, Icons.satellite_alt_rounded, 'Chaneli'),
+                _navRow(
+                  AdminPageId.channels,
+                  Icons.satellite_alt_rounded,
+                  'Chaneli',
+                ),
                 _navRow(AdminPageId.slides, Icons.slideshow_rounded, 'Mabango'),
-                _navRow(AdminPageId.subscriptions, Icons.workspace_premium_rounded, 'Usajili'),
-                _navRow(AdminPageId.pricing, Icons.sell_rounded, 'Bei za vifurushi'),
-                _navRow(AdminPageId.payments, Icons.credit_card_rounded, 'Malipo'),
-                _navRow(AdminPageId.notifications, Icons.notifications_rounded, 'Arifa na vikumbusho'),
-                _navRow(AdminPageId.analytics, Icons.show_chart_rounded, 'Takwimu'),
-                _navRow(AdminPageId.settings, Icons.settings_rounded, 'Mipangilio'),
-                _navRow(AdminPageId.logs, Icons.history_rounded, 'Kumbukumbu za shughuli'),
+                _navRow(
+                  AdminPageId.subscriptions,
+                  Icons.workspace_premium_rounded,
+                  'Usajili',
+                ),
+                _navRow(
+                  AdminPageId.pricing,
+                  Icons.sell_rounded,
+                  'Bei za vifurushi',
+                ),
+                _navRow(
+                  AdminPageId.payments,
+                  Icons.credit_card_rounded,
+                  'Malipo',
+                ),
+                _navRow(
+                  AdminPageId.notifications,
+                  Icons.notifications_rounded,
+                  'Arifa na vikumbusho',
+                ),
+                _navRow(
+                  AdminPageId.analytics,
+                  Icons.show_chart_rounded,
+                  'Takwimu',
+                ),
+                _navRow(
+                  AdminPageId.settings,
+                  Icons.settings_rounded,
+                  'Mipangilio',
+                ),
+                _navRow(
+                  AdminPageId.logs,
+                  Icons.history_rounded,
+                  'Kumbukumbu za shughuli',
+                ),
               ],
             ),
           ),
           Container(
             padding: const EdgeInsets.all(16),
-            decoration: const BoxDecoration(border: Border(top: BorderSide(color: AdminColors.borderSubtle))),
+            decoration: const BoxDecoration(
+              border: Border(top: BorderSide(color: AdminColors.borderSubtle)),
+            ),
             child: Row(
               children: [
                 Container(
@@ -1508,25 +1816,50 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
                   height: 36,
                   decoration: const BoxDecoration(
                     shape: BoxShape.circle,
-                    gradient: LinearGradient(colors: [Color(0xFFFBBF24), Color(0xFFF97316)]),
+                    gradient: LinearGradient(
+                      colors: [Color(0xFFFBBF24), Color(0xFFF97316)],
+                    ),
                   ),
                   alignment: Alignment.center,
-                  child: const Text('SA', style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: Colors.white)),
+                  child: const Text(
+                    'SA',
+                    style: TextStyle(
+                      fontSize: 11,
+                      fontWeight: FontWeight.bold,
+                      color: Colors.white,
+                    ),
+                  ),
                 ),
                 const SizedBox(width: 12),
                 Expanded(
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      const Text('Msimamizi', style: TextStyle(fontWeight: FontWeight.w600, fontSize: 13)),
-                      Text(_sessionRemainingLabel(), style: const TextStyle(fontSize: 10, color: Color(0xFF6B7280))),
+                      const Text(
+                        'Msimamizi',
+                        style: TextStyle(
+                          fontWeight: FontWeight.w600,
+                          fontSize: 13,
+                        ),
+                      ),
+                      Text(
+                        _sessionRemainingLabel(),
+                        style: const TextStyle(
+                          fontSize: 10,
+                          color: Color(0xFF6B7280),
+                        ),
+                      ),
                     ],
                   ),
                 ),
                 IconButton(
                   tooltip: 'Toka',
                   onPressed: _adminLogout,
-                  icon: const Icon(Icons.logout, size: 18, color: Color(0xFF9CA3AF)),
+                  icon: const Icon(
+                    Icons.logout,
+                    size: 18,
+                    color: Color(0xFF9CA3AF),
+                  ),
                 ),
               ],
             ),
@@ -1548,15 +1881,39 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
           onTap: () => _navigate(id),
           child: Container(
             decoration: BoxDecoration(
-              border: Border(left: BorderSide(color: active ? AdminColors.accentPrimary : Colors.transparent, width: 3)),
+              border: Border(
+                left: BorderSide(
+                  color: active
+                      ? AdminColors.accentPrimary
+                      : Colors.transparent,
+                  width: 3,
+                ),
+              ),
               borderRadius: BorderRadius.circular(10),
             ),
             padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
             child: Row(
               children: [
-                SizedBox(width: 24, child: Icon(icon, size: 18, color: active ? AdminColors.accentPrimary : const Color(0xFF94A3B8))),
+                SizedBox(
+                  width: 24,
+                  child: Icon(
+                    icon,
+                    size: 18,
+                    color: active
+                        ? AdminColors.accentPrimary
+                        : const Color(0xFF94A3B8),
+                  ),
+                ),
                 const SizedBox(width: 8),
-                Text(label, style: TextStyle(fontSize: 13, color: active ? AdminColors.accentPrimary : AdminColors.textPrimary)),
+                Text(
+                  label,
+                  style: TextStyle(
+                    fontSize: 13,
+                    color: active
+                        ? AdminColors.accentPrimary
+                        : AdminColors.textPrimary,
+                  ),
+                ),
               ],
             ),
           ),
@@ -1575,7 +1932,12 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
       (AdminPageId.settings, Icons.settings_rounded, 'Mipangilio'),
     ];
     return Container(
-      padding: EdgeInsets.fromLTRB(4, 8, 4, 8 + MediaQuery.paddingOf(context).bottom),
+      padding: EdgeInsets.fromLTRB(
+        4,
+        8,
+        4,
+        8 + MediaQuery.paddingOf(context).bottom,
+      ),
       decoration: const BoxDecoration(
         color: Color(0xF2111827),
         border: Border(top: BorderSide(color: Color(0x14FFFFFF))),
@@ -1597,9 +1959,24 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
                 child: Column(
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    Icon(e.$2, size: 16, color: active ? AdminColors.accentPrimary : const Color(0xFF6B7280)),
+                    Icon(
+                      e.$2,
+                      size: 16,
+                      color: active
+                          ? AdminColors.accentPrimary
+                          : const Color(0xFF6B7280),
+                    ),
                     const SizedBox(height: 4),
-                    Text(e.$3, style: TextStyle(fontSize: 10, fontWeight: FontWeight.w600, color: active ? AdminColors.accentPrimary : const Color(0xFF6B7280))),
+                    Text(
+                      e.$3,
+                      style: TextStyle(
+                        fontSize: 10,
+                        fontWeight: FontWeight.w600,
+                        color: active
+                            ? AdminColors.accentPrimary
+                            : const Color(0xFF6B7280),
+                      ),
+                    ),
                   ],
                 ),
               ),
@@ -1641,17 +2018,34 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
   Widget _pageDashboard() {
     final stats = _effectiveStats;
     final loadingStats = _hasAdminSession && stats == null;
-    final totalUsers = stats?.totalUsers ?? (loadingStats ? null : _users.length);
-    final premiumUsers = stats?.premiumUsers ?? (loadingStats ? null : _users.where((u) => u.effectivePremium).length);
-    final freeUsers = stats?.freeUsers ??
-        (loadingStats ? null : ((totalUsers ?? 0) - (premiumUsers ?? 0)).clamp(0, totalUsers ?? 0));
-    final activeChannels = stats?.activeChannels ?? (loadingStats ? null : _channels.where((c) => c.status == 'active').length);
+    final totalUsers =
+        stats?.totalUsers ?? (loadingStats ? null : _users.length);
+    final premiumUsers =
+        stats?.premiumUsers ??
+        (loadingStats ? null : _users.where((u) => u.effectivePremium).length);
+    final freeUsers =
+        stats?.freeUsers ??
+        (loadingStats
+            ? null
+            : ((totalUsers ?? 0) - (premiumUsers ?? 0)).clamp(
+                0,
+                totalUsers ?? 0,
+              ));
+    final activeChannels =
+        stats?.activeChannels ??
+        (loadingStats
+            ? null
+            : _channels.where((c) => c.status == 'active').length);
     // Always derive from local payments for Tanzania "today" — production API may still
     // return lifetime totals until the backend redeploys.
-    final revenue = loadingStats && _payments.isEmpty ? null : _todayRevenueTzs();
+    final revenue = loadingStats && _payments.isEmpty
+        ? null
+        : _todayRevenueTzs();
     final recentUsers = _users.take(5).toList();
-    final recentPayments =
-        _payments.where((p) => p.status == 'completed').take(5).toList();
+    final recentPayments = _payments
+        .where((p) => p.status == 'completed')
+        .take(5)
+        .toList();
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -1659,7 +2053,11 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
         _pageTitleRow(
           title: 'Dashibodi ya Admin',
           subtitle: _dashboardSubtitle(),
-          action: _btnPrimary(label: 'Ongeza chaneli', icon: Icons.add, onTap: () => _showChannelEditor()),
+          action: _btnPrimary(
+            label: 'Ongeza chaneli',
+            icon: Icons.add,
+            onTap: () => _showChannelEditor(),
+          ),
         ),
         const SizedBox(height: 16),
         _dashboardReminderCallout(),
@@ -1675,11 +2073,41 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
               mainAxisSpacing: 12,
               childAspectRatio: cols <= 2 ? 1.12 : 1.28,
               children: [
-                _statCard(label: 'Watumiaji wote', value: loadingStats ? '…' : '${totalUsers ?? 0}', icon: Icons.groups_rounded, iconBg: const Color(0x336366F1), iconColor: const Color(0xFF818CF8)),
-                _statCard(label: 'Premium', value: loadingStats ? '…' : '${premiumUsers ?? 0}', icon: Icons.workspace_premium_rounded, iconBg: const Color(0x33F59E0B), iconColor: const Color(0xFFFBBF24)),
-                _statCard(label: 'Bure', value: loadingStats ? '…' : '${freeUsers ?? 0}', icon: Icons.person_outline_rounded, iconBg: const Color(0x3394A3B8), iconColor: const Color(0xFFCBD5E1)),
-                _statCard(label: 'Chaneli', value: loadingStats ? '…' : '${activeChannels ?? 0}', icon: Icons.satellite_alt_rounded, iconBg: const Color(0x3310B981), iconColor: const Color(0xFF34D399)),
-                _statCard(label: 'Mapato ya leo', value: loadingStats ? '…' : fmtTzs(revenue ?? 0), icon: Icons.attach_money_rounded, iconBg: const Color(0x33A855F7), iconColor: const Color(0xFFC084FC)),
+                _statCard(
+                  label: 'Watumiaji wote',
+                  value: loadingStats ? '…' : '${totalUsers ?? 0}',
+                  icon: Icons.groups_rounded,
+                  iconBg: const Color(0x336366F1),
+                  iconColor: const Color(0xFF818CF8),
+                ),
+                _statCard(
+                  label: 'Premium',
+                  value: loadingStats ? '…' : '${premiumUsers ?? 0}',
+                  icon: Icons.workspace_premium_rounded,
+                  iconBg: const Color(0x33F59E0B),
+                  iconColor: const Color(0xFFFBBF24),
+                ),
+                _statCard(
+                  label: 'Bure',
+                  value: loadingStats ? '…' : '${freeUsers ?? 0}',
+                  icon: Icons.person_outline_rounded,
+                  iconBg: const Color(0x3394A3B8),
+                  iconColor: const Color(0xFFCBD5E1),
+                ),
+                _statCard(
+                  label: 'Chaneli',
+                  value: loadingStats ? '…' : '${activeChannels ?? 0}',
+                  icon: Icons.satellite_alt_rounded,
+                  iconBg: const Color(0x3310B981),
+                  iconColor: const Color(0xFF34D399),
+                ),
+                _statCard(
+                  label: 'Mapato ya leo',
+                  value: loadingStats ? '…' : fmtTzs(revenue ?? 0),
+                  icon: Icons.attach_money_rounded,
+                  iconBg: const Color(0x33A855F7),
+                  iconColor: const Color(0xFFC084FC),
+                ),
               ],
             );
           },
@@ -1693,7 +2121,9 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
               _chartCard('Muhtasari wa mapato (TSh)', 300, _revenueBarChart()),
             ];
             if (stacked) {
-              return Column(children: [charts[0], const SizedBox(height: 16), charts[1]]);
+              return Column(
+                children: [charts[0], const SizedBox(height: 16), charts[1]],
+              );
             }
             return Row(
               crossAxisAlignment: CrossAxisAlignment.start,
@@ -1719,9 +2149,22 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
                     .map(
                       (u) => [
                         _userCell(u.name),
-                        _compactPill(_swStatus(u.status), u.status == 'active' ? AdminColors.accentSuccess : AdminColors.accentDanger),
-                        _compactPill(u.effectivePremium ? 'premium' : 'bure', u.effectivePremium ? AdminColors.accentWarning : const Color(0xFF6B7280)),
-                        _recentCellText(_fmtDate(u.createdAt), color: AdminColors.textSecondary),
+                        _compactPill(
+                          _swStatus(u.status),
+                          u.status == 'active'
+                              ? AdminColors.accentSuccess
+                              : AdminColors.accentDanger,
+                        ),
+                        _compactPill(
+                          u.effectivePremium ? 'premium' : 'bure',
+                          u.effectivePremium
+                              ? AdminColors.accentWarning
+                              : const Color(0xFF6B7280),
+                        ),
+                        _recentCellText(
+                          _fmtDate(u.createdAt),
+                          color: AdminColors.textSecondary,
+                        ),
                       ],
                     )
                     .toList(),
@@ -1735,16 +2178,24 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
                     .map(
                       (p) => [
                         _recentCellText(p.userName, weight: FontWeight.w500),
-                        _recentCellText(fmtTzs(p.amount), weight: FontWeight.w800),
+                        _recentCellText(
+                          fmtTzs(p.amount),
+                          weight: FontWeight.w800,
+                        ),
                         _paymentStatusPill(p.status),
-                        _recentCellText(_fmtDate(p.createdAt), color: AdminColors.textSecondary),
+                        _recentCellText(
+                          _fmtDate(p.createdAt),
+                          color: AdminColors.textSecondary,
+                        ),
                       ],
                     )
                     .toList(),
               ),
             ];
             if (stacked) {
-              return Column(children: [blocks[0], const SizedBox(height: 16), blocks[1]]);
+              return Column(
+                children: [blocks[0], const SizedBox(height: 16), blocks[1]],
+              );
             }
             return Row(
               crossAxisAlignment: CrossAxisAlignment.start,
@@ -1763,7 +2214,8 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
   /// "N vinaisha ndani ya siku 3 · M vimeisha" → opens the reminders page.
   Widget _dashboardReminderCallout() {
     final s = _reminderSummary;
-    if (s == null || (s.expiring == 0 && s.expired == 0)) return const SizedBox.shrink();
+    if (s == null || (s.expiring == 0 && s.expired == 0))
+      return const SizedBox.shrink();
     return Padding(
       padding: const EdgeInsets.only(bottom: 16),
       child: Material(
@@ -1788,18 +2240,27 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
                     children: [
                       Text(
                         'Vifurushi ${s.expiring} vinaisha ndani ya siku ${s.days} · ${s.expired} vimeisha',
-                        style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w700),
+                        style: const TextStyle(
+                          fontSize: 13,
+                          fontWeight: FontWeight.w700,
+                        ),
                       ),
                       Text(
                         s.expiringUnsent > 0
                             ? '${s.expiringUnsent} bado hawajakumbushwa — bonyeza kutuma vikumbusho'
                             : 'Bonyeza kuona watumiaji na kutuma vikumbusho',
-                        style: const TextStyle(fontSize: 11.5, color: AdminColors.textSecondary),
+                        style: const TextStyle(
+                          fontSize: 11.5,
+                          color: AdminColors.textSecondary,
+                        ),
                       ),
                     ],
                   ),
                 ),
-                const Icon(Icons.chevron_right_rounded, color: Color(0xFFFBBF24)),
+                const Icon(
+                  Icons.chevron_right_rounded,
+                  color: Color(0xFFFBBF24),
+                ),
               ],
             ),
           ),
@@ -1839,14 +2300,22 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
                         label,
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(color: AdminColors.textSecondary, fontSize: 11, fontWeight: FontWeight.w600, height: 1.15),
+                        style: const TextStyle(
+                          color: AdminColors.textSecondary,
+                          fontSize: 11,
+                          fontWeight: FontWeight.w600,
+                          height: 1.15,
+                        ),
                       ),
                     ),
                     const SizedBox(width: 6),
                     Container(
                       width: 28,
                       height: 28,
-                      decoration: BoxDecoration(color: iconBg, borderRadius: BorderRadius.circular(8)),
+                      decoration: BoxDecoration(
+                        color: iconBg,
+                        borderRadius: BorderRadius.circular(8),
+                      ),
                       child: Icon(icon, color: iconColor, size: 16),
                     ),
                   ],
@@ -1860,7 +2329,14 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
                   child: FittedBox(
                     fit: BoxFit.scaleDown,
                     alignment: Alignment.bottomLeft,
-                    child: Text(value, style: const TextStyle(fontSize: 22, fontWeight: FontWeight.w800, letterSpacing: -0.5)),
+                    child: Text(
+                      value,
+                      style: const TextStyle(
+                        fontSize: 22,
+                        fontWeight: FontWeight.w800,
+                        letterSpacing: -0.5,
+                      ),
+                    ),
                   ),
                 ),
               ),
@@ -1882,7 +2358,10 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text(title, style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 13)),
+          Text(
+            title,
+            style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 13),
+          ),
           const SizedBox(height: 16),
           SizedBox(height: height, child: chart),
         ],
@@ -1895,23 +2374,42 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
     final labels = stats?.monthLabels.isNotEmpty == true
         ? stats!.monthLabels
         : const ['Jan', 'Feb', 'Mac', 'Apr', 'Mei', 'Jun', 'Jul'];
-    final newUsers = stats?.newUsersPerMonth ?? List<double>.filled(labels.length, 0);
-    final premiumBuys = stats?.premiumPurchasesPerMonth ?? List<double>.filled(labels.length, 0);
+    final newUsers =
+        stats?.newUsersPerMonth ?? List<double>.filled(labels.length, 0);
+    final premiumBuys =
+        stats?.premiumPurchasesPerMonth ??
+        List<double>.filled(labels.length, 0);
     final n = labels.length;
     final maxY = [
       ...newUsers,
       ...premiumBuys,
     ].fold<double>(0, (a, b) => b > a ? b : a);
     final yMax = maxY <= 0 ? 1.0 : maxY * 1.15;
-    final totalSpots = List.generate(n, (i) => FlSpot(i.toDouble(), i < newUsers.length ? newUsers[i] : 0));
-    final premiumSpots = List.generate(n, (i) => FlSpot(i.toDouble(), i < premiumBuys.length ? premiumBuys[i] : 0));
+    final totalSpots = List.generate(
+      n,
+      (i) => FlSpot(i.toDouble(), i < newUsers.length ? newUsers[i] : 0),
+    );
+    final premiumSpots = List.generate(
+      n,
+      (i) => FlSpot(i.toDouble(), i < premiumBuys.length ? premiumBuys[i] : 0),
+    );
     return LineChart(
       LineChartData(
-        gridData: FlGridData(show: true, drawVerticalLine: false, horizontalInterval: yMax / 4, getDrawingHorizontalLine: (_) => FlLine(color: const Color(0x08FFFFFF), strokeWidth: 1)),
+        gridData: FlGridData(
+          show: true,
+          drawVerticalLine: false,
+          horizontalInterval: yMax / 4,
+          getDrawingHorizontalLine: (_) =>
+              FlLine(color: const Color(0x08FFFFFF), strokeWidth: 1),
+        ),
         borderData: FlBorderData(show: false),
         titlesData: FlTitlesData(
-          topTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
-          rightTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
+          topTitles: const AxisTitles(
+            sideTitles: SideTitles(showTitles: false),
+          ),
+          rightTitles: const AxisTitles(
+            sideTitles: SideTitles(showTitles: false),
+          ),
           bottomTitles: AxisTitles(
             sideTitles: SideTitles(
               showTitles: true,
@@ -1921,7 +2419,10 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
                 padding: const EdgeInsets.only(top: 8),
                 child: Text(
                   labels[v.toInt().clamp(0, n > 0 ? n - 1 : 0)],
-                  style: const TextStyle(color: AdminColors.textSecondary, fontSize: 10),
+                  style: const TextStyle(
+                    color: AdminColors.textSecondary,
+                    fontSize: 10,
+                  ),
                 ),
               ),
             ),
@@ -1931,8 +2432,13 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
               showTitles: true,
               reservedSize: 36,
               getTitlesWidget: (v, m) => Text(
-                v >= 1000 ? '${(v / 1000).toStringAsFixed(1)}k' : v.toInt().toString(),
-                style: const TextStyle(color: AdminColors.textSecondary, fontSize: 10),
+                v >= 1000
+                    ? '${(v / 1000).toStringAsFixed(1)}k'
+                    : v.toInt().toString(),
+                style: const TextStyle(
+                  color: AdminColors.textSecondary,
+                  fontSize: 10,
+                ),
               ),
             ),
           ),
@@ -1944,7 +2450,10 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
             color: AdminColors.accentPrimary,
             barWidth: 2,
             dotData: const FlDotData(show: true),
-            belowBarData: BarAreaData(show: true, color: const Color(0x146366F1)),
+            belowBarData: BarAreaData(
+              show: true,
+              color: const Color(0x146366F1),
+            ),
           ),
           LineChartBarData(
             spots: premiumSpots,
@@ -1952,7 +2461,10 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
             color: AdminColors.accentWarning,
             barWidth: 2,
             dotData: const FlDotData(show: true),
-            belowBarData: BarAreaData(show: true, color: const Color(0x14F59E0B)),
+            belowBarData: BarAreaData(
+              show: true,
+              color: const Color(0x14F59E0B),
+            ),
           ),
         ],
         minX: 0,
@@ -1968,18 +2480,28 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
     final labels = stats?.monthLabels.isNotEmpty == true
         ? stats!.monthLabels
         : const ['Jan', 'Feb', 'Mac', 'Apr', 'Mei', 'Jun', 'Jul'];
-    final vals = stats?.revenuePerMonth ?? List<double>.filled(labels.length, 0);
+    final vals =
+        stats?.revenuePerMonth ?? List<double>.filled(labels.length, 0);
     final n = labels.length;
     final maxVal = vals.fold<double>(0, (a, b) => b > a ? b : a);
     final maxY = maxVal <= 0 ? 1.0 : maxVal * 1.15;
     return BarChart(
       BarChartData(
-        gridData: FlGridData(show: true, drawVerticalLine: false, getDrawingHorizontalLine: (_) => FlLine(color: const Color(0x08FFFFFF), strokeWidth: 1)),
+        gridData: FlGridData(
+          show: true,
+          drawVerticalLine: false,
+          getDrawingHorizontalLine: (_) =>
+              FlLine(color: const Color(0x08FFFFFF), strokeWidth: 1),
+        ),
         borderData: FlBorderData(show: false),
         maxY: maxY,
         titlesData: FlTitlesData(
-          topTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
-          rightTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
+          topTitles: const AxisTitles(
+            sideTitles: SideTitles(showTitles: false),
+          ),
+          rightTitles: const AxisTitles(
+            sideTitles: SideTitles(showTitles: false),
+          ),
           bottomTitles: AxisTitles(
             sideTitles: SideTitles(
               showTitles: true,
@@ -1988,7 +2510,10 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
                 padding: const EdgeInsets.only(top: 8),
                 child: Text(
                   labels[v.toInt().clamp(0, n > 0 ? n - 1 : 0)],
-                  style: const TextStyle(color: AdminColors.textSecondary, fontSize: 10),
+                  style: const TextStyle(
+                    color: AdminColors.textSecondary,
+                    fontSize: 10,
+                  ),
                 ),
               ),
             ),
@@ -1999,7 +2524,10 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
               reservedSize: 42,
               getTitlesWidget: (v, m) => Text(
                 fmtTzsAxis(v),
-                style: const TextStyle(color: AdminColors.textSecondary, fontSize: 10),
+                style: const TextStyle(
+                  color: AdminColors.textSecondary,
+                  fontSize: 10,
+                ),
               ),
             ),
           ),
@@ -2013,7 +2541,9 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
                 toY: i < vals.length ? vals[i] : 0,
                 color: const Color(0xB36366F1),
                 width: 18,
-                borderRadius: const BorderRadius.vertical(top: Radius.circular(6)),
+                borderRadius: const BorderRadius.vertical(
+                  top: Radius.circular(6),
+                ),
               ),
             ],
           ),
@@ -2029,7 +2559,10 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
     required List<int> columnFlex,
     required List<List<Widget>> rows,
   }) {
-    assert(columns.length == columnFlex.length, 'columnFlex must match columns');
+    assert(
+      columns.length == columnFlex.length,
+      'columnFlex must match columns',
+    );
     for (final r in rows) {
       assert(r.length == columns.length, 'row length must match columns');
     }
@@ -2045,11 +2578,31 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
         children: [
           Row(
             children: [
-              Expanded(child: Text(title, style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 13), maxLines: 1, overflow: TextOverflow.ellipsis)),
+              Expanded(
+                child: Text(
+                  title,
+                  style: const TextStyle(
+                    fontWeight: FontWeight.w600,
+                    fontSize: 13,
+                  ),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
               TextButton(
                 onPressed: onViewAll,
-                style: TextButton.styleFrom(padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4), minimumSize: Size.zero, tapTargetSize: MaterialTapTargetSize.shrinkWrap),
-                child: const Text('Ona zote', style: TextStyle(fontSize: 10, color: Color(0xFF818CF8))),
+                style: TextButton.styleFrom(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 8,
+                    vertical: 4,
+                  ),
+                  minimumSize: Size.zero,
+                  tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                ),
+                child: const Text(
+                  'Ona zote',
+                  style: TextStyle(fontSize: 10, color: Color(0xFF818CF8)),
+                ),
               ),
             ],
           ),
@@ -2057,10 +2610,12 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
           _recentTableHeaderRow(columns, columnFlex),
           const Divider(height: 1, color: Color(0x14FFFFFF)),
           const SizedBox(height: 4),
-          ...rows.map((cells) => Padding(
-                padding: const EdgeInsets.symmetric(vertical: 6),
-                child: _recentDataRow(cells, columnFlex),
-              )),
+          ...rows.map(
+            (cells) => Padding(
+              padding: const EdgeInsets.symmetric(vertical: 6),
+              child: _recentDataRow(cells, columnFlex),
+            ),
+          ),
         ],
       ),
     );
@@ -2078,7 +2633,12 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
               columns[i].toUpperCase(),
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
-              style: const TextStyle(color: AdminColors.textSecondary, fontSize: 10, fontWeight: FontWeight.w600, letterSpacing: 0.3),
+              style: const TextStyle(
+                color: AdminColors.textSecondary,
+                fontSize: 10,
+                fontWeight: FontWeight.w600,
+                letterSpacing: 0.3,
+              ),
             ),
           ),
         );
@@ -2106,7 +2666,11 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
       s,
       maxLines: 1,
       overflow: TextOverflow.ellipsis,
-      style: TextStyle(fontSize: 12, fontWeight: weight, color: color ?? AdminColors.textPrimary),
+      style: TextStyle(
+        fontSize: 12,
+        fontWeight: weight,
+        color: color ?? AdminColors.textPrimary,
+      ),
     );
   }
 
@@ -2117,13 +2681,21 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
       alignment: Alignment.centerLeft,
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
-        decoration: BoxDecoration(color: color.withValues(alpha: 0.2), borderRadius: BorderRadius.circular(999)),
+        decoration: BoxDecoration(
+          color: color.withValues(alpha: 0.2),
+          borderRadius: BorderRadius.circular(999),
+        ),
         child: Text(
           text,
           maxLines: 1,
           overflow: TextOverflow.ellipsis,
           softWrap: false,
-          style: TextStyle(fontSize: 9, fontWeight: FontWeight.w600, color: color, height: 1.1),
+          style: TextStyle(
+            fontSize: 9,
+            fontWeight: FontWeight.w600,
+            color: color,
+            height: 1.1,
+          ),
         ),
       ),
     );
@@ -2133,13 +2705,15 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
     final c = status == 'completed'
         ? AdminColors.accentSuccess
         : status == 'failed'
-            ? AdminColors.accentDanger
-            : AdminColors.accentWarning;
+        ? AdminColors.accentDanger
+        : AdminColors.accentWarning;
     return _compactPill(_swStatus(status), c);
   }
 
   Widget _userCell(String name) {
-    final ini = name.length >= 2 ? name.substring(0, 2).toUpperCase() : name.toUpperCase();
+    final ini = name.length >= 2
+        ? name.substring(0, 2).toUpperCase()
+        : name.toUpperCase();
     return Row(
       children: [
         Container(
@@ -2147,10 +2721,19 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
           height: 24,
           decoration: BoxDecoration(
             shape: BoxShape.circle,
-            gradient: const LinearGradient(colors: [Color(0xFF6366F1), Color(0xFF9333EA)]),
+            gradient: const LinearGradient(
+              colors: [Color(0xFF6366F1), Color(0xFF9333EA)],
+            ),
           ),
           alignment: Alignment.center,
-          child: Text(ini, style: const TextStyle(fontSize: 8, fontWeight: FontWeight.bold, color: Colors.white)),
+          child: Text(
+            ini,
+            style: const TextStyle(
+              fontSize: 8,
+              fontWeight: FontWeight.bold,
+              color: Colors.white,
+            ),
+          ),
         ),
         const SizedBox(width: 8),
         Expanded(
@@ -2168,17 +2751,25 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
   Widget _badge(String text, Color color) {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-      decoration: BoxDecoration(color: color.withValues(alpha: 0.2), borderRadius: BorderRadius.circular(999)),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.2),
+        borderRadius: BorderRadius.circular(999),
+      ),
       child: Text(
         text,
         maxLines: 1,
         overflow: TextOverflow.ellipsis,
-        style: TextStyle(fontSize: 10, fontWeight: FontWeight.w600, color: color),
+        style: TextStyle(
+          fontSize: 10,
+          fontWeight: FontWeight.w600,
+          color: color,
+        ),
       ),
     );
   }
 
-  String _fmtDate(DateTime d) => MaterialLocalizations.of(context).formatCompactDate(d);
+  String _fmtDate(DateTime d) =>
+      MaterialLocalizations.of(context).formatCompactDate(d);
 
   String _formatLogDateTime(DateTime d) {
     String t(int n) => n.toString().padLeft(2, '0');
@@ -2215,8 +2806,8 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
     final subtitle = q.isEmpty
         ? '$totalLabel total · Device ID = kitambulisho cha Wasifu kwenye app'
         : _usersSearchLoading
-            ? 'Inatafuta…'
-            : '${filtered.isNotEmpty ? (_usersMatched > 0 ? _usersMatched : filtered.length) : 0} matokeo · $totalLabel jumla';
+        ? 'Inatafuta…'
+        : '${filtered.isNotEmpty ? (_usersMatched > 0 ? _usersMatched : filtered.length) : 0} matokeo · $totalLabel jumla';
 
     return LayoutBuilder(
       builder: (context, constraints) {
@@ -2232,10 +2823,20 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        const Text('Watumiaji', style: TextStyle(fontSize: 24, fontWeight: FontWeight.w800)),
+                        const Text(
+                          'Watumiaji',
+                          style: TextStyle(
+                            fontSize: 24,
+                            fontWeight: FontWeight.w800,
+                          ),
+                        ),
                         Text(
                           subtitle,
-                          style: const TextStyle(fontSize: 12, color: AdminColors.textSecondary, height: 1.35),
+                          style: const TextStyle(
+                            fontSize: 12,
+                            color: AdminColors.textSecondary,
+                            height: 1.35,
+                          ),
                         ),
                       ],
                     ),
@@ -2251,37 +2852,57 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
                         hintText: 'Jina, simu, Device ID (WTV-…), USR-…',
                         filled: true,
                         fillColor: AdminColors.bgPrimary,
-                        contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                        contentPadding: const EdgeInsets.symmetric(
+                          horizontal: 12,
+                          vertical: 10,
+                        ),
                         suffixIcon: _usersSearchLoading
                             ? const Padding(
                                 padding: EdgeInsets.all(12),
                                 child: SizedBox(
                                   width: 16,
                                   height: 16,
-                                  child: CircularProgressIndicator(strokeWidth: 2),
+                                  child: CircularProgressIndicator(
+                                    strokeWidth: 2,
+                                  ),
                                 ),
                               )
                             : (q.isNotEmpty
-                                ? IconButton(
-                                    tooltip: 'Futa',
-                                    icon: const Icon(Icons.clear_rounded, size: 18),
-                                    onPressed: () {
-                                      _userSearch.clear();
-                                      _onUserSearchChanged('');
-                                    },
-                                  )
-                                : null),
-                        enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: const BorderSide(color: Color(0x1AFFFFFF))),
+                                  ? IconButton(
+                                      tooltip: 'Futa',
+                                      icon: const Icon(
+                                        Icons.clear_rounded,
+                                        size: 18,
+                                      ),
+                                      onPressed: () {
+                                        _userSearch.clear();
+                                        _onUserSearchChanged('');
+                                      },
+                                    )
+                                  : null),
+                        enabledBorder: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(12),
+                          borderSide: const BorderSide(
+                            color: Color(0x1AFFFFFF),
+                          ),
+                        ),
                       ),
                     ),
                   ),
                 ],
               )
             else ...[
-              const Text('Watumiaji', style: TextStyle(fontSize: 24, fontWeight: FontWeight.w800)),
+              const Text(
+                'Watumiaji',
+                style: TextStyle(fontSize: 24, fontWeight: FontWeight.w800),
+              ),
               Text(
                 subtitle,
-                style: const TextStyle(fontSize: 12, color: AdminColors.textSecondary, height: 1.35),
+                style: const TextStyle(
+                  fontSize: 12,
+                  color: AdminColors.textSecondary,
+                  height: 1.35,
+                ),
               ),
               const SizedBox(height: 10),
               TextField(
@@ -2293,7 +2914,10 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
                   hintText: 'Jina, simu, Device ID (WTV-…), USR-…',
                   filled: true,
                   fillColor: AdminColors.bgPrimary,
-                  contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
+                  contentPadding: const EdgeInsets.symmetric(
+                    horizontal: 12,
+                    vertical: 12,
+                  ),
                   suffixIcon: _usersSearchLoading
                       ? const Padding(
                           padding: EdgeInsets.all(12),
@@ -2304,16 +2928,19 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
                           ),
                         )
                       : (q.isNotEmpty
-                          ? IconButton(
-                              tooltip: 'Futa',
-                              icon: const Icon(Icons.clear_rounded, size: 18),
-                              onPressed: () {
-                                _userSearch.clear();
-                                _onUserSearchChanged('');
-                              },
-                            )
-                          : null),
-                  enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: const BorderSide(color: Color(0x1AFFFFFF))),
+                            ? IconButton(
+                                tooltip: 'Futa',
+                                icon: const Icon(Icons.clear_rounded, size: 18),
+                                onPressed: () {
+                                  _userSearch.clear();
+                                  _onUserSearchChanged('');
+                                },
+                              )
+                            : null),
+                  enabledBorder: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(12),
+                    borderSide: const BorderSide(color: Color(0x1AFFFFFF)),
+                  ),
                 ),
               ),
             ],
@@ -2325,7 +2952,9 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
                       children: [
                         const SizedBox(height: 48),
                         Icon(
-                          q.isEmpty ? Icons.groups_outlined : Icons.search_off_rounded,
+                          q.isEmpty
+                              ? Icons.groups_outlined
+                              : Icons.search_off_rounded,
                           size: 40,
                           color: AdminColors.textSecondary,
                         ),
@@ -2334,17 +2963,24 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
                           _usersSearchLoading
                               ? 'Inatafuta mtumiaji…'
                               : q.isEmpty
-                                  ? 'Hakuna watumiaji bado'
-                                  : 'Hakuna matokeo ya "$q"',
+                              ? 'Hakuna watumiaji bado'
+                              : 'Hakuna matokeo ya "$q"',
                           textAlign: TextAlign.center,
-                          style: const TextStyle(fontSize: 14, color: AdminColors.textSecondary),
+                          style: const TextStyle(
+                            fontSize: 14,
+                            color: AdminColors.textSecondary,
+                          ),
                         ),
                         if (q.isNotEmpty && !_usersSearchLoading) ...[
                           const SizedBox(height: 8),
                           const Text(
                             'Tumia Device ID kamili kutoka Wasifu (WTV-XXXX-XXXXXXXX)\nau ID ya ndani (USR-…).',
                             textAlign: TextAlign.center,
-                            style: TextStyle(fontSize: 12, color: AdminColors.textSecondary, height: 1.4),
+                            style: TextStyle(
+                              fontSize: 12,
+                              color: AdminColors.textSecondary,
+                              height: 1.4,
+                            ),
                           ),
                         ],
                       ],
@@ -2366,213 +3002,315 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
     final id = u.displayDeviceId;
     return RepaintBoundary(
       child: Container(
-      decoration: BoxDecoration(
-        borderRadius: BorderRadius.circular(18),
-        gradient: const LinearGradient(
-          begin: Alignment.topLeft,
-          end: Alignment.bottomRight,
-          colors: [Color(0xFF1A2332), Color(0xFF151C28)],
-        ),
-        border: Border.all(color: const Color(0x14FFFFFF)),
-        boxShadow: const [BoxShadow(color: Color(0x28000000), blurRadius: 12, offset: Offset(0, 4))],
-      ),
-      child: Padding(
-        padding: const EdgeInsets.all(14),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            Row(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Container(
-                  width: 44,
-                  height: 44,
-                  decoration: BoxDecoration(
-                    borderRadius: BorderRadius.circular(14),
-                    gradient: const LinearGradient(colors: [Color(0xFF6366F1), Color(0xFF8B5CF6)]),
-                  ),
-                  alignment: Alignment.center,
-                  child: Text(
-                    u.name.length >= 2 ? u.name.substring(0, 2).toUpperCase() : u.name.toUpperCase(),
-                    style: const TextStyle(fontWeight: FontWeight.w800, fontSize: 13, color: Colors.white),
-                  ),
-                ),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(u.name, maxLines: 2, overflow: TextOverflow.ellipsis, style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 15)),
-                      const SizedBox(height: 4),
-                      Text(u.id, style: const TextStyle(fontSize: 10, color: AdminColors.textSecondary)),
-                    ],
-                  ),
-                ),
-                _badge(_swStatus(u.status), u.status == 'active' ? AdminColors.accentSuccess : AdminColors.accentDanger),
-              ],
-            ),
-            const SizedBox(height: 12),
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-              decoration: BoxDecoration(color: const Color(0x33000000), borderRadius: BorderRadius.circular(12), border: Border.all(color: const Color(0x12FFFFFF))),
-              child: Row(
-                children: [
-                  const Icon(Icons.smartphone_rounded, size: 16, color: Color(0xFF818CF8)),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: SelectableText(
-                      id,
-                      style: const TextStyle(fontSize: 12, color: Color(0xFFE2E8F0), height: 1.25),
-                    ),
-                  ),
-                  Material(
-                    color: const Color(0x226366F1),
-                    borderRadius: BorderRadius.circular(10),
-                    child: InkWell(
-                      onTap: () {
-                        Clipboard.setData(ClipboardData(text: id));
-                        _showToast('Device ID imenakiliwa', _ToastType.success);
-                      },
-                      borderRadius: BorderRadius.circular(10),
-                      child: const Padding(
-                        padding: EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-                        child: Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            Icon(Icons.copy_rounded, size: 14, color: Color(0xFF818CF8)),
-                            SizedBox(width: 4),
-                            Text('Nakili', style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: Color(0xFF818CF8))),
-                          ],
-                        ),
-                      ),
-                    ),
-                  ),
-                  const SizedBox(width: 6),
-                  IconButton(
-                    tooltip: 'Tuma arifa kwa mtumiaji huyu',
-                    visualDensity: VisualDensity.compact,
-                    onPressed: () => _modalSendNotification(deviceId: id),
-                    icon: const Icon(Icons.notifications_active_outlined, size: 18, color: Color(0xFF818CF8)),
-                  ),
-                ],
-              ),
-            ),
-            const SizedBox(height: 10),
-            Wrap(
-              spacing: 10,
-              runSpacing: 8,
-              crossAxisAlignment: WrapCrossAlignment.center,
-              children: [
-                _miniLabel(Icons.phone_rounded, u.phone),
-                _planBadgeCell(u),
-                _adminAccessInline(u),
-              ],
-            ),
-            const SizedBox(height: 12),
-            const Divider(height: 1, color: Color(0x14FFFFFF)),
-            const SizedBox(height: 10),
-            Wrap(
-              spacing: 8,
-              runSpacing: 8,
-              alignment: WrapAlignment.start,
-              children: [
-                _userActionChip(
-                  icon: Icons.edit_outlined,
-                  label: 'Jina',
-                  color: const Color(0xFF818CF8),
-                  onTap: () async {
-                    final n = await _promptText('Badilisha jina', u.name);
-                    if (n != null && n.isNotEmpty) {
-                      setState(() => u.name = n);
-                      try {
-                        await _syncUserToBackend(u, {'name': n});
-                      } catch (_) {}
-                    }
-                    if (n != null && n.isNotEmpty) _showToast('Imehakikiwa', _ToastType.success);
-                  },
-                ),
-                _userActionChip(
-                  icon: Icons.schedule_rounded,
-                  label: 'Muda wa premium',
-                  color: const Color(0xFF34D399),
-                  onTap: u.status == 'suspended' ? null : () => _showGrantAccessDialog(u),
-                ),
-                _userActionChip(
-                  icon: Icons.workspace_premium_outlined,
-                  label: u.subscription == 'premium' ? 'Malipo: ON' : 'Malipo: OFF',
-                  color: u.subscription == 'premium' ? const Color(0xFFFBBF24) : const Color(0xFF6B7280),
-                  onTap: () async {
-                    final turningOff = u.subscription == 'premium';
-                    final next = turningOff ? 'free' : 'premium';
-                    try {
-                      if (turningOff) {
-                        await _revokeAllPremiumAccess(u, confirm: false);
-                      } else {
-                        // Backend materializes premium_until (never forever-null).
-                        await _syncUserToBackend(u, {'subscription': next});
-                        if (mounted) {
-                          setState(() {});
-                          _showToast('Mfumo: premium (${_fmtAccessDate(u.premiumUntil ?? DateTime.now().add(const Duration(days: 30)))})', _ToastType.success);
-                        }
-                      }
-                    } catch (e) {
-                      _showToast('Imeshindwa: $e', _ToastType.error);
-                    }
-                  },
-                ),
-                if (u.effectivePremium)
-                  _userActionChip(
-                    icon: Icons.remove_circle_outline,
-                    label: 'Ondoa premium',
-                    color: const Color(0xFFEF4444),
-                    onTap: () async {
-                      try {
-                        await _revokeAllPremiumAccess(u);
-                      } catch (e) {
-                        if (mounted) _showToast('Imeshindwa: $e', _ToastType.error);
-                      }
-                    },
-                  ),
-                _userActionChip(
-                  icon: u.status == 'suspended' ? Icons.lock_open_rounded : Icons.block_rounded,
-                  label: u.status == 'suspended' ? 'Fungua kifaa' : 'Zuia kifaa',
-                  color: u.status == 'suspended' ? AdminColors.accentSuccess : AdminColors.accentDanger,
-                  onTap: () async {
-                    final blocking = u.status != 'suspended';
-                    try {
-                      await _syncUserToBackend(u, {'status': blocking ? 'suspended' : 'active'});
-                      if (mounted) {
-                        setState(() {});
-                        _showToast(
-                          blocking ? 'Kifaa kimezuiwa — hakitaweza kutazama channel yoyote' : 'Kifaa kimefunguliwa',
-                          _ToastType.success,
-                        );
-                      }
-                    } catch (e) {
-                      if (mounted) _showToast('Imeshindwa: $e', _ToastType.error);
-                    }
-                  },
-                ),
-              ],
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(18),
+          gradient: const LinearGradient(
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
+            colors: [Color(0xFF1A2332), Color(0xFF151C28)],
+          ),
+          border: Border.all(color: const Color(0x14FFFFFF)),
+          boxShadow: const [
+            BoxShadow(
+              color: Color(0x28000000),
+              blurRadius: 12,
+              offset: Offset(0, 4),
             ),
           ],
         ),
+        child: Padding(
+          padding: const EdgeInsets.all(14),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Container(
+                    width: 44,
+                    height: 44,
+                    decoration: BoxDecoration(
+                      borderRadius: BorderRadius.circular(14),
+                      gradient: const LinearGradient(
+                        colors: [Color(0xFF6366F1), Color(0xFF8B5CF6)],
+                      ),
+                    ),
+                    alignment: Alignment.center,
+                    child: Text(
+                      u.name.length >= 2
+                          ? u.name.substring(0, 2).toUpperCase()
+                          : u.name.toUpperCase(),
+                      style: const TextStyle(
+                        fontWeight: FontWeight.w800,
+                        fontSize: 13,
+                        color: Colors.white,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          u.name,
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                            fontWeight: FontWeight.w700,
+                            fontSize: 15,
+                          ),
+                        ),
+                        const SizedBox(height: 4),
+                        Text(
+                          u.id,
+                          style: const TextStyle(
+                            fontSize: 10,
+                            color: AdminColors.textSecondary,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  _badge(
+                    _swStatus(u.status),
+                    u.status == 'active'
+                        ? AdminColors.accentSuccess
+                        : AdminColors.accentDanger,
+                  ),
+                ],
+              ),
+              const SizedBox(height: 12),
+              Container(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 10,
+                  vertical: 8,
+                ),
+                decoration: BoxDecoration(
+                  color: const Color(0x33000000),
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(color: const Color(0x12FFFFFF)),
+                ),
+                child: Row(
+                  children: [
+                    const Icon(
+                      Icons.smartphone_rounded,
+                      size: 16,
+                      color: Color(0xFF818CF8),
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: SelectableText(
+                        id,
+                        style: const TextStyle(
+                          fontSize: 12,
+                          color: Color(0xFFE2E8F0),
+                          height: 1.25,
+                        ),
+                      ),
+                    ),
+                    Material(
+                      color: const Color(0x226366F1),
+                      borderRadius: BorderRadius.circular(10),
+                      child: InkWell(
+                        onTap: () {
+                          Clipboard.setData(ClipboardData(text: id));
+                          _showToast(
+                            'Device ID imenakiliwa',
+                            _ToastType.success,
+                          );
+                        },
+                        borderRadius: BorderRadius.circular(10),
+                        child: const Padding(
+                          padding: EdgeInsets.symmetric(
+                            horizontal: 10,
+                            vertical: 6,
+                          ),
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Icon(
+                                Icons.copy_rounded,
+                                size: 14,
+                                color: Color(0xFF818CF8),
+                              ),
+                              SizedBox(width: 4),
+                              Text(
+                                'Nakili',
+                                style: TextStyle(
+                                  fontSize: 11,
+                                  fontWeight: FontWeight.w600,
+                                  color: Color(0xFF818CF8),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 6),
+                    IconButton(
+                      tooltip: 'Tuma arifa kwa mtumiaji huyu',
+                      visualDensity: VisualDensity.compact,
+                      onPressed: () => _modalSendNotification(deviceId: id),
+                      icon: const Icon(
+                        Icons.notifications_active_outlined,
+                        size: 18,
+                        color: Color(0xFF818CF8),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 10),
+              Wrap(
+                spacing: 10,
+                runSpacing: 8,
+                crossAxisAlignment: WrapCrossAlignment.center,
+                children: [
+                  _miniLabel(Icons.phone_rounded, u.phone),
+                  _planBadgeCell(u),
+                  _adminAccessInline(u),
+                ],
+              ),
+              const SizedBox(height: 12),
+              const Divider(height: 1, color: Color(0x14FFFFFF)),
+              const SizedBox(height: 10),
+              Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                alignment: WrapAlignment.start,
+                children: [
+                  _userActionChip(
+                    icon: Icons.edit_outlined,
+                    label: 'Jina',
+                    color: const Color(0xFF818CF8),
+                    onTap: () async {
+                      final n = await _promptText('Badilisha jina', u.name);
+                      if (n != null && n.isNotEmpty) {
+                        setState(() => u.name = n);
+                        try {
+                          await _syncUserToBackend(u, {'name': n});
+                        } catch (_) {}
+                      }
+                      if (n != null && n.isNotEmpty)
+                        _showToast('Imehakikiwa', _ToastType.success);
+                    },
+                  ),
+                  _userActionChip(
+                    icon: Icons.schedule_rounded,
+                    label: 'Muda wa premium',
+                    color: const Color(0xFF34D399),
+                    onTap: u.status == 'suspended'
+                        ? null
+                        : () => _showGrantAccessDialog(u),
+                  ),
+                  _userActionChip(
+                    icon: Icons.workspace_premium_outlined,
+                    label: u.subscription == 'premium'
+                        ? 'Malipo: ON'
+                        : 'Malipo: OFF',
+                    color: u.subscription == 'premium'
+                        ? const Color(0xFFFBBF24)
+                        : const Color(0xFF6B7280),
+                    onTap: () async {
+                      final turningOff = u.subscription == 'premium';
+                      final next = turningOff ? 'free' : 'premium';
+                      try {
+                        if (turningOff) {
+                          await _revokeAllPremiumAccess(u, confirm: false);
+                        } else {
+                          // Backend materializes premium_until (never forever-null).
+                          await _syncUserToBackend(u, {'subscription': next});
+                          if (mounted) {
+                            setState(() {});
+                            _showToast(
+                              'Mfumo: premium (${_fmtAccessDate(u.premiumUntil ?? DateTime.now().add(const Duration(days: 30)))})',
+                              _ToastType.success,
+                            );
+                          }
+                        }
+                      } catch (e) {
+                        _showToast('Imeshindwa: $e', _ToastType.error);
+                      }
+                    },
+                  ),
+                  if (u.effectivePremium)
+                    _userActionChip(
+                      icon: Icons.remove_circle_outline,
+                      label: 'Ondoa premium',
+                      color: const Color(0xFFEF4444),
+                      onTap: () async {
+                        try {
+                          await _revokeAllPremiumAccess(u);
+                        } catch (e) {
+                          if (mounted)
+                            _showToast('Imeshindwa: $e', _ToastType.error);
+                        }
+                      },
+                    ),
+                  _userActionChip(
+                    icon: u.status == 'suspended'
+                        ? Icons.lock_open_rounded
+                        : Icons.block_rounded,
+                    label: u.status == 'suspended'
+                        ? 'Fungua kifaa'
+                        : 'Zuia kifaa',
+                    color: u.status == 'suspended'
+                        ? AdminColors.accentSuccess
+                        : AdminColors.accentDanger,
+                    onTap: () async {
+                      final blocking = u.status != 'suspended';
+                      try {
+                        await _syncUserToBackend(u, {
+                          'status': blocking ? 'suspended' : 'active',
+                        });
+                        if (mounted) {
+                          setState(() {});
+                          _showToast(
+                            blocking
+                                ? 'Kifaa kimezuiwa — hakitaweza kutazama channel yoyote'
+                                : 'Kifaa kimefunguliwa',
+                            _ToastType.success,
+                          );
+                        }
+                      } catch (e) {
+                        if (mounted)
+                          _showToast('Imeshindwa: $e', _ToastType.error);
+                      }
+                    },
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
       ),
-    ),
     );
   }
 
   Widget _miniLabel(IconData icon, String text) {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-      decoration: BoxDecoration(color: const Color(0x22000000), borderRadius: BorderRadius.circular(10)),
+      decoration: BoxDecoration(
+        color: const Color(0x22000000),
+        borderRadius: BorderRadius.circular(10),
+      ),
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
           Icon(icon, size: 14, color: AdminColors.textSecondary),
           const SizedBox(width: 6),
           Flexible(
-            child: Text(text, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 12, color: AdminColors.textSecondary)),
+            child: Text(
+              text,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(
+                fontSize: 12,
+                color: AdminColors.textSecondary,
+              ),
+            ),
           ),
         ],
       ),
@@ -2584,13 +3322,19 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
     if (end == null) {
       return Container(
         padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-        decoration: BoxDecoration(color: const Color(0x22000000), borderRadius: BorderRadius.circular(10)),
+        decoration: BoxDecoration(
+          color: const Color(0x22000000),
+          borderRadius: BorderRadius.circular(10),
+        ),
         child: const Row(
           mainAxisSize: MainAxisSize.min,
           children: [
             Icon(Icons.timer_off_outlined, size: 14, color: Color(0xFF6B7280)),
             SizedBox(width: 6),
-            Text('Msimamizi: —', style: TextStyle(fontSize: 11, color: AdminColors.textSecondary)),
+            Text(
+              'Msimamizi: —',
+              style: TextStyle(fontSize: 11, color: AdminColors.textSecondary),
+            ),
           ],
         ),
       );
@@ -2598,13 +3342,23 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
     if (!end.isAfter(DateTime.now())) {
       return Container(
         padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-        decoration: BoxDecoration(color: const Color(0x22000000), borderRadius: BorderRadius.circular(10)),
-        child: const Text('Msimamizi: Imeisha', style: TextStyle(fontSize: 11, color: Color(0xFF9CA3AF))),
+        decoration: BoxDecoration(
+          color: const Color(0x22000000),
+          borderRadius: BorderRadius.circular(10),
+        ),
+        child: const Text(
+          'Msimamizi: Imeisha',
+          style: TextStyle(fontSize: 11, color: Color(0xFF9CA3AF)),
+        ),
       );
     }
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-      decoration: BoxDecoration(color: const Color(0x2234D399), borderRadius: BorderRadius.circular(10), border: Border.all(color: const Color(0x2234D399))),
+      decoration: BoxDecoration(
+        color: const Color(0x2234D399),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: const Color(0x2234D399)),
+      ),
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
@@ -2615,7 +3369,11 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
               '${_humanRemaining(end)} · hadi ${_fmtAccessDate(end)}',
               maxLines: 2,
               overflow: TextOverflow.ellipsis,
-              style: const TextStyle(fontSize: 11, color: Color(0xFFBEF264), fontWeight: FontWeight.w500),
+              style: const TextStyle(
+                fontSize: 11,
+                color: Color(0xFFBEF264),
+                fontWeight: FontWeight.w500,
+              ),
             ),
           ),
         ],
@@ -2623,7 +3381,12 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
     );
   }
 
-  Widget _userActionChip({required IconData icon, required String label, required Color color, VoidCallback? onTap}) {
+  Widget _userActionChip({
+    required IconData icon,
+    required String label,
+    required Color color,
+    VoidCallback? onTap,
+  }) {
     return Material(
       color: const Color(0x18FFFFFF),
       borderRadius: BorderRadius.circular(12),
@@ -2635,9 +3398,20 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
           child: Row(
             mainAxisSize: MainAxisSize.min,
             children: [
-              Icon(icon, size: 16, color: onTap == null ? const Color(0xFF4B5563) : color),
+              Icon(
+                icon,
+                size: 16,
+                color: onTap == null ? const Color(0xFF4B5563) : color,
+              ),
               const SizedBox(width: 6),
-              Text(label, style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: onTap == null ? const Color(0xFF4B5563) : Colors.white)),
+              Text(
+                label,
+                style: TextStyle(
+                  fontSize: 12,
+                  fontWeight: FontWeight.w600,
+                  color: onTap == null ? const Color(0xFF4B5563) : Colors.white,
+                ),
+              ),
             ],
           ),
         ),
@@ -2661,13 +3435,20 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
       crossAxisAlignment: CrossAxisAlignment.start,
       mainAxisSize: MainAxisSize.min,
       children: [
-        _badge(premium ? 'premium' : 'free', premium ? AdminColors.accentWarning : const Color(0xFF6B7280)),
+        _badge(
+          premium ? 'premium' : 'free',
+          premium ? AdminColors.accentWarning : const Color(0xFF6B7280),
+        ),
         if (source != null)
           Padding(
             padding: const EdgeInsets.only(top: 4),
             child: Text(
               source,
-              style: const TextStyle(fontSize: 9, color: AdminColors.textSecondary, height: 1.2),
+              style: const TextStyle(
+                fontSize: 9,
+                color: AdminColors.textSecondary,
+                height: 1.2,
+              ),
             ),
           ),
       ],
@@ -2696,11 +3477,16 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
     final sub = _s(j['subscription']);
     if (sub.isNotEmpty) u.subscription = sub;
     // Always overwrite dates — null from server means access was removed.
-    if (j.containsKey('premium_until')) u.premiumUntil = _dt(j['premium_until']);
-    if (j.containsKey('admin_access_until')) u.adminAccessUntil = _dt(j['admin_access_until']);
+    if (j.containsKey('premium_until'))
+      u.premiumUntil = _dt(j['premium_until']);
+    if (j.containsKey('admin_access_until'))
+      u.adminAccessUntil = _dt(j['admin_access_until']);
   }
 
-  Future<void> _syncUserToBackend(AdminUser u, Map<String, dynamic> patch) async {
+  Future<void> _syncUserToBackend(
+    AdminUser u,
+    Map<String, dynamic> patch,
+  ) async {
     if (!_hasAdminSession) return;
     final res = await http
         .patch(
@@ -2719,7 +3505,10 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
     }
   }
 
-  Future<void> _revokeAllPremiumAccess(AdminUser u, {bool confirm = true}) async {
+  Future<void> _revokeAllPremiumAccess(
+    AdminUser u, {
+    bool confirm = true,
+  }) async {
     if (!_hasAdminSession) {
       _showToast('Hakuna kikao cha msimamizi', _ToastType.error);
       return;
@@ -2743,7 +3532,9 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
       if (!mounted) return;
       if (res.statusCode < 200 || res.statusCode >= 300) {
         final body = res.body.trim();
-        final detail = body.isNotEmpty && body.length < 200 ? body : 'HTTP ${res.statusCode}';
+        final detail = body.isNotEmpty && body.length < 200
+            ? body
+            : 'HTTP ${res.statusCode}';
         _showToast('Imeshindwa kuondoa premium: $detail', _ToastType.error);
         return;
       }
@@ -2764,7 +3555,8 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
     }
   }
 
-  Future<({List<AdminUser> users, int matched, int total, int? premiumTotal})> _fetchUsersForBulkRevoke({
+  Future<({List<AdminUser> users, int matched, int total, int? premiumTotal})>
+  _fetchUsersForBulkRevoke({
     required String query,
     required bool premiumOnly,
   }) async {
@@ -2793,7 +3585,10 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
     if (premiumOnly && !serverPremiumOnly) {
       try {
         final subRes = await http
-            .get(Uri.parse('$_apiBase/api/v1/admin/subscriptions'), headers: _adminHeaders())
+            .get(
+              Uri.parse('$_apiBase/api/v1/admin/subscriptions'),
+              headers: _adminHeaders(),
+            )
             .timeout(const Duration(seconds: 20));
         if (subRes.statusCode >= 200 && subRes.statusCode < 300) {
           final subMap = jsonDecode(subRes.body) as Map<String, dynamic>;
@@ -2809,7 +3604,8 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
               final existing = byId[id];
               if (existing != null) {
                 if (!existing.effectivePremium) {
-                  existing.premiumUntil = _dt(j['end_date']) ?? existing.premiumUntil;
+                  existing.premiumUntil =
+                      _dt(j['end_date']) ?? existing.premiumUntil;
                 }
                 continue;
               }
@@ -2820,9 +3616,13 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
                 deviceId: null,
                 status: 'active',
                 subscription: 'premium',
-                createdAt: _dt(j['created_at']) ?? DateTime.fromMillisecondsSinceEpoch(0),
+                createdAt:
+                    _dt(j['created_at']) ??
+                    DateTime.fromMillisecondsSinceEpoch(0),
                 // Subscriptions API marks active via paid OR admin window; end_date is paid only.
-                premiumUntil: _dt(j['end_date']) ?? DateTime.now().add(const Duration(hours: 1)),
+                premiumUntil:
+                    _dt(j['end_date']) ??
+                    DateTime.now().add(const Duration(hours: 1)),
               );
             }
             users = byId.values.toList();
@@ -2834,12 +3634,15 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
     }
 
     // Client-side safety net: keep only users who still look premium when filtering.
-    var filtered = premiumOnly ? users.where((u) => u.effectivePremium).toList() : users;
+    var filtered = premiumOnly
+        ? users.where((u) => u.effectivePremium).toList()
+        : users;
     if (q.isNotEmpty) {
       final needle = q.toLowerCase();
       final compact = needle.replaceAll(RegExp(r'[\s\-_.]+'), '');
       filtered = filtered.where((u) {
-        final hay = '${u.name} ${u.phone} ${u.displayDeviceId} ${u.id}'.toLowerCase();
+        final hay = '${u.name} ${u.phone} ${u.displayDeviceId} ${u.id}'
+            .toLowerCase();
         if (hay.contains(needle)) return true;
         if (compact.length >= 4) {
           final compactHay = hay.replaceAll(RegExp(r'[\s\-_.]+'), '');
@@ -2864,7 +3667,9 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
 
     return (
       users: filtered,
-      matched: premiumOnly || q.isNotEmpty ? filtered.length : asInt(matchedRaw, filtered.length),
+      matched: premiumOnly || q.isNotEmpty
+          ? filtered.length
+          : asInt(matchedRaw, filtered.length),
       total: asInt(totalRaw, filtered.length),
       premiumTotal: premiumRaw == null
           ? (premiumOnly ? filtered.length : null)
@@ -2888,7 +3693,9 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
       }
       if (res.statusCode < 200 || res.statusCode >= 300) {
         final body = res.body.trim();
-        final detail = body.isNotEmpty && body.length < 220 ? body : 'HTTP ${res.statusCode}';
+        final detail = body.isNotEmpty && body.length < 220
+            ? body
+            : 'HTTP ${res.statusCode}';
         throw Exception(detail);
       }
       final map = jsonDecode(res.body) as Map<String, dynamic>;
@@ -2932,7 +3739,9 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
     for (final id in ids) {
       final res = await http
           .post(
-            Uri.parse('$_apiBase/api/v1/admin/users/${Uri.encodeComponent(id)}/revoke-premium'),
+            Uri.parse(
+              '$_apiBase/api/v1/admin/users/${Uri.encodeComponent(id)}/revoke-premium',
+            ),
             headers: _adminHeadersForDelete(),
           )
           .timeout(const Duration(seconds: 15));
@@ -2986,7 +3795,10 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
         error = null;
       });
       try {
-        final result = await _fetchUsersForBulkRevoke(query: query, premiumOnly: premiumOnly);
+        final result = await _fetchUsersForBulkRevoke(
+          query: query,
+          premiumOnly: premiumOnly,
+        );
         if (!mounted) return;
         set(() {
           users = result.users;
@@ -3027,7 +3839,9 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
             final selectedCount = selected.length;
 
             String sourceLabel(AdminUser u) {
-              final paid = u.premiumUntil != null && u.premiumUntil!.isAfter(DateTime.now());
+              final paid =
+                  u.premiumUntil != null &&
+                  u.premiumUntil!.isAfter(DateTime.now());
               final adm = u.adminAccessActive;
               if (paid && adm) return 'Malipo + msimamizi';
               if (paid) return 'Malipo';
@@ -3038,8 +3852,11 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
 
             String expiryLabel(AdminUser u) {
               final ends = <DateTime>[
-                if (u.premiumUntil != null && u.premiumUntil!.isAfter(DateTime.now())) u.premiumUntil!,
-                if (u.adminAccessUntil != null && u.adminAccessUntil!.isAfter(DateTime.now()))
+                if (u.premiumUntil != null &&
+                    u.premiumUntil!.isAfter(DateTime.now()))
+                  u.premiumUntil!,
+                if (u.adminAccessUntil != null &&
+                    u.adminAccessUntil!.isAfter(DateTime.now()))
                   u.adminAccessUntil!,
               ];
               if (ends.isEmpty) return '—';
@@ -3049,8 +3866,13 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
 
             return AlertDialog(
               backgroundColor: AdminColors.bgSecondary,
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-              insetPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 24),
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(20),
+              ),
+              insetPadding: const EdgeInsets.symmetric(
+                horizontal: 16,
+                vertical: 24,
+              ),
               titlePadding: const EdgeInsets.fromLTRB(20, 18, 12, 0),
               contentPadding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
               actionsPadding: const EdgeInsets.fromLTRB(16, 0, 16, 14),
@@ -3063,18 +3885,32 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
                       color: const Color(0x33F43F5E),
                       borderRadius: BorderRadius.circular(12),
                     ),
-                    child: const Icon(Icons.person_off_rounded, color: Color(0xFFFB7185), size: 20),
+                    child: const Icon(
+                      Icons.person_off_rounded,
+                      color: Color(0xFFFB7185),
+                      size: 20,
+                    ),
                   ),
                   const SizedBox(width: 12),
                   const Expanded(
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        Text('Ondoa premium', style: TextStyle(fontWeight: FontWeight.w800, fontSize: 18)),
+                        Text(
+                          'Ondoa premium',
+                          style: TextStyle(
+                            fontWeight: FontWeight.w800,
+                            fontSize: 18,
+                          ),
+                        ),
                         SizedBox(height: 2),
                         Text(
                           'Chagua watumiaji — watarudishwa free na watalipa tena',
-                          style: TextStyle(fontSize: 11.5, color: AdminColors.textSecondary, height: 1.3),
+                          style: TextStyle(
+                            fontSize: 11.5,
+                            color: AdminColors.textSecondary,
+                            height: 1.3,
+                          ),
                         ),
                       ],
                     ),
@@ -3112,26 +3948,36 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
                                 child: SizedBox(
                                   width: 16,
                                   height: 16,
-                                  child: CircularProgressIndicator(strokeWidth: 2),
+                                  child: CircularProgressIndicator(
+                                    strokeWidth: 2,
+                                  ),
                                 ),
                               )
                             : (searchCtrl.text.isNotEmpty
-                                ? IconButton(
-                                    tooltip: 'Futa',
-                                    icon: const Icon(Icons.clear_rounded, size: 18),
-                                    onPressed: acting
-                                        ? null
-                                        : () {
-                                            searchCtrl.clear();
-                                            query = '';
-                                            unawaited(load(setModal));
-                                          },
-                                  )
-                                : IconButton(
-                                    tooltip: 'Onyesha upya',
-                                    icon: const Icon(Icons.refresh_rounded, size: 18),
-                                    onPressed: acting ? null : () => unawaited(load(setModal)),
-                                  )),
+                                  ? IconButton(
+                                      tooltip: 'Futa',
+                                      icon: const Icon(
+                                        Icons.clear_rounded,
+                                        size: 18,
+                                      ),
+                                      onPressed: acting
+                                          ? null
+                                          : () {
+                                              searchCtrl.clear();
+                                              query = '';
+                                              unawaited(load(setModal));
+                                            },
+                                    )
+                                  : IconButton(
+                                      tooltip: 'Onyesha upya',
+                                      icon: const Icon(
+                                        Icons.refresh_rounded,
+                                        size: 18,
+                                      ),
+                                      onPressed: acting
+                                          ? null
+                                          : () => unawaited(load(setModal)),
+                                    )),
                       ),
                     ),
                     const SizedBox(height: 10),
@@ -3143,8 +3989,13 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
                         FilterChip(
                           selected: premiumOnly,
                           label: Text(
-                            premiumTotal != null ? 'Premium tu ($premiumTotal)' : 'Premium tu',
-                            style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600),
+                            premiumTotal != null
+                                ? 'Premium tu ($premiumTotal)'
+                                : 'Premium tu',
+                            style: const TextStyle(
+                              fontSize: 12,
+                              fontWeight: FontWeight.w600,
+                            ),
                           ),
                           onSelected: acting
                               ? null
@@ -3157,14 +4008,19 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
                           selectedColor: const Color(0x33FBBF24),
                           checkmarkColor: const Color(0xFFFBBF24),
                           side: BorderSide(
-                            color: premiumOnly ? const Color(0x66FBBF24) : const Color(0x22FFFFFF),
+                            color: premiumOnly
+                                ? const Color(0x66FBBF24)
+                                : const Color(0x22FFFFFF),
                           ),
                         ),
                         FilterChip(
                           selected: !premiumOnly,
                           label: Text(
                             'Wote ($total)',
-                            style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600),
+                            style: const TextStyle(
+                              fontSize: 12,
+                              fontWeight: FontWeight.w600,
+                            ),
                           ),
                           onSelected: acting
                               ? null
@@ -3177,24 +4033,32 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
                           selectedColor: const Color(0x336366F1),
                           checkmarkColor: const Color(0xFFA5B4FC),
                           side: BorderSide(
-                            color: !premiumOnly ? const Color(0x666366F1) : const Color(0x22FFFFFF),
+                            color: !premiumOnly
+                                ? const Color(0x666366F1)
+                                : const Color(0x22FFFFFF),
                           ),
                         ),
                         TextButton.icon(
                           onPressed: acting || users.isEmpty
                               ? null
                               : () => setModal(() {
-                                    if (allVisibleSelected) {
-                                      selected.removeAll(visibleIds);
-                                    } else {
-                                      selected.addAll(visibleIds);
-                                    }
-                                  }),
+                                  if (allVisibleSelected) {
+                                    selected.removeAll(visibleIds);
+                                  } else {
+                                    selected.addAll(visibleIds);
+                                  }
+                                }),
                           icon: Icon(
-                            allVisibleSelected ? Icons.deselect_rounded : Icons.select_all_rounded,
+                            allVisibleSelected
+                                ? Icons.deselect_rounded
+                                : Icons.select_all_rounded,
                             size: 16,
                           ),
-                          label: Text(allVisibleSelected ? 'Ondoa uteuzi' : 'Chagua vyote vinavyoonekana'),
+                          label: Text(
+                            allVisibleSelected
+                                ? 'Ondoa uteuzi'
+                                : 'Chagua vyote vinavyoonekana',
+                          ),
                         ),
                       ],
                     ),
@@ -3203,12 +4067,14 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
                       loading
                           ? 'Inapakia orodha…'
                           : error != null
-                              ? 'Hitilafu: $error'
-                              : '${users.length} wanaonekana · $matched matokeo'
-                                  '${selectedCount > 0 ? ' · $selectedCount wamechaguliwa' : ''}',
+                          ? 'Hitilafu: $error'
+                          : '${users.length} wanaonekana · $matched matokeo'
+                                '${selectedCount > 0 ? ' · $selectedCount wamechaguliwa' : ''}',
                       style: TextStyle(
                         fontSize: 11.5,
-                        color: error != null ? const Color(0xFFFB7185) : AdminColors.textSecondary,
+                        color: error != null
+                            ? const Color(0xFFFB7185)
+                            : AdminColors.textSecondary,
                       ),
                     ),
                     const SizedBox(height: 8),
@@ -3221,76 +4087,90 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
                         ),
                         clipBehavior: Clip.antiAlias,
                         child: loading && users.isEmpty
-                            ? const Center(child: CircularProgressIndicator(strokeWidth: 2.4))
+                            ? const Center(
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2.4,
+                                ),
+                              )
                             : users.isEmpty
-                                ? Center(
-                                    child: Padding(
-                                      padding: const EdgeInsets.all(20),
-                                      child: Text(
-                                        premiumOnly
-                                            ? 'Hakuna watumiaji wa premium wanaolingana.'
-                                            : 'Hakuna watumiaji wanaolingana.',
-                                        textAlign: TextAlign.center,
-                                        style: const TextStyle(color: AdminColors.textSecondary, height: 1.35),
+                            ? Center(
+                                child: Padding(
+                                  padding: const EdgeInsets.all(20),
+                                  child: Text(
+                                    premiumOnly
+                                        ? 'Hakuna watumiaji wa premium wanaolingana.'
+                                        : 'Hakuna watumiaji wanaolingana.',
+                                    textAlign: TextAlign.center,
+                                    style: const TextStyle(
+                                      color: AdminColors.textSecondary,
+                                      height: 1.35,
+                                    ),
+                                  ),
+                                ),
+                              )
+                            : ListView.separated(
+                                itemCount: users.length,
+                                separatorBuilder: (_, _) => const Divider(
+                                  height: 1,
+                                  color: Color(0x12FFFFFF),
+                                ),
+                                itemBuilder: (context, i) {
+                                  final u = users[i];
+                                  final checked = selected.contains(u.id);
+                                  final premium = u.effectivePremium;
+                                  return CheckboxListTile(
+                                    value: checked,
+                                    onChanged: acting
+                                        ? null
+                                        : (v) => setModal(() {
+                                            if (v == true) {
+                                              selected.add(u.id);
+                                            } else {
+                                              selected.remove(u.id);
+                                            }
+                                          }),
+                                    dense: true,
+                                    controlAffinity:
+                                        ListTileControlAffinity.leading,
+                                    activeColor: const Color(0xFFF43F5E),
+                                    title: Text(
+                                      u.name,
+                                      style: const TextStyle(
+                                        fontSize: 13,
+                                        fontWeight: FontWeight.w700,
                                       ),
                                     ),
-                                  )
-                                : ListView.separated(
-                                    itemCount: users.length,
-                                    separatorBuilder: (_, _) =>
-                                        const Divider(height: 1, color: Color(0x12FFFFFF)),
-                                    itemBuilder: (context, i) {
-                                      final u = users[i];
-                                      final checked = selected.contains(u.id);
-                                      final premium = u.effectivePremium;
-                                      return CheckboxListTile(
-                                        value: checked,
-                                        onChanged: acting
-                                            ? null
-                                            : (v) => setModal(() {
-                                                  if (v == true) {
-                                                    selected.add(u.id);
-                                                  } else {
-                                                    selected.remove(u.id);
-                                                  }
-                                                }),
-                                        dense: true,
-                                        controlAffinity: ListTileControlAffinity.leading,
-                                        activeColor: const Color(0xFFF43F5E),
-                                        title: Text(
-                                          u.name,
-                                          style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w700),
-                                        ),
-                                        subtitle: Padding(
-                                          padding: const EdgeInsets.only(top: 2),
-                                          child: Column(
-                                            crossAxisAlignment: CrossAxisAlignment.start,
-                                            children: [
-                                              Text(
-                                                '${u.phone} · ${u.displayDeviceId}',
-                                                style: const TextStyle(
-                                                  fontSize: 11,
-                                                  color: AdminColors.textSecondary,
-                                                  height: 1.25,
-                                                ),
-                                              ),
-                                              const SizedBox(height: 2),
-                                              Text(
-                                                '${premium ? 'PREMIUM' : 'FREE'} · ${sourceLabel(u)} · ${expiryLabel(u)}',
-                                                style: TextStyle(
-                                                  fontSize: 10.5,
-                                                  fontWeight: FontWeight.w600,
-                                                  color: premium
-                                                      ? const Color(0xFFFBBF24)
-                                                      : AdminColors.textSecondary,
-                                                ),
-                                              ),
-                                            ],
+                                    subtitle: Padding(
+                                      padding: const EdgeInsets.only(top: 2),
+                                      child: Column(
+                                        crossAxisAlignment:
+                                            CrossAxisAlignment.start,
+                                        children: [
+                                          Text(
+                                            '${u.phone} · ${u.displayDeviceId}',
+                                            style: const TextStyle(
+                                              fontSize: 11,
+                                              color: AdminColors.textSecondary,
+                                              height: 1.25,
+                                            ),
                                           ),
-                                        ),
-                                      );
-                                    },
-                                  ),
+                                          const SizedBox(height: 2),
+                                          Text(
+                                            '${premium ? 'PREMIUM' : 'FREE'} · ${sourceLabel(u)} · ${expiryLabel(u)}',
+                                            style: TextStyle(
+                                              fontSize: 10.5,
+                                              fontWeight: FontWeight.w600,
+                                              color: premium
+                                                  ? const Color(0xFFFBBF24)
+                                                  : AdminColors.textSecondary,
+                                            ),
+                                          ),
+                                        ],
+                                      ),
+                                    ),
+                                  );
+                                },
+                              ),
                       ),
                     ),
                   ],
@@ -3305,7 +4185,9 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
                         style: OutlinedButton.styleFrom(
                           foregroundColor: AdminColors.textSecondary,
                           side: const BorderSide(color: Color(0x26FFFFFF)),
-                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(12),
+                          ),
                         ),
                         child: const Text('Ghairi'),
                       ),
@@ -3317,14 +4199,17 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
                         style: FilledButton.styleFrom(
                           backgroundColor: const Color(0xFFDC2626),
                           foregroundColor: Colors.white,
-                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(12),
+                          ),
                           padding: const EdgeInsets.symmetric(vertical: 12),
                         ),
                         onPressed: acting || selected.isEmpty
                             ? null
                             : () async {
                                 final ok = await _showDeleteConfirmModal(
-                                  title: 'Rudisha free $selectedCount watumiaji?',
+                                  title:
+                                      'Rudisha free $selectedCount watumiaji?',
                                   message:
                                       'Watumiaji $selectedCount wataondolewa premium (malipo + muda wa msimamizi). '
                                       'Watakuwa free tena na watalazimika kulipa ili kuona channels za premium.',
@@ -3333,7 +4218,9 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
                                 if (!ok || !ctx.mounted) return;
                                 setModal(() => acting = true);
                                 try {
-                                  final n = await _bulkRevokePremiumIds(Set<String>.from(selected));
+                                  final n = await _bulkRevokePremiumIds(
+                                    Set<String>.from(selected),
+                                  );
                                   if (!ctx.mounted) return;
                                   Navigator.pop(ctx);
                                   if (!mounted) return;
@@ -3348,22 +4235,28 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
                                 } catch (e) {
                                   if (!ctx.mounted) return;
                                   setModal(() => acting = false);
-                                  _showToast('Imeshindwa: $e', _ToastType.error);
+                                  _showToast(
+                                    'Imeshindwa: $e',
+                                    _ToastType.error,
+                                  );
                                 }
                               },
                         icon: acting
                             ? const SizedBox(
                                 width: 16,
                                 height: 16,
-                                child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2,
+                                  color: Colors.white,
+                                ),
                               )
                             : const Icon(Icons.person_off_rounded, size: 18),
                         label: Text(
                           acting
                               ? 'Inaondoa…'
                               : selectedCount == 0
-                                  ? 'Chagua watumiaji'
-                                  : 'Ondoa premium ($selectedCount)',
+                              ? 'Chagua watumiaji'
+                              : 'Ondoa premium ($selectedCount)',
                           style: const TextStyle(fontWeight: FontWeight.w700),
                         ),
                       ),
@@ -3405,7 +4298,9 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
       });
       final end = u.adminAccessUntil;
       _showToast(
-        end != null ? 'Premium hadi ${_fmtAccessDate(end)}' : 'Muda wa premium umeongezwa',
+        end != null
+            ? 'Premium hadi ${_fmtAccessDate(end)}'
+            : 'Muda wa premium umeongezwa',
         _ToastType.success,
       );
     } catch (e) {
@@ -3439,9 +4334,14 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
         title: Text(title, style: const TextStyle(fontWeight: FontWeight.w800)),
         content: Text(message, style: const TextStyle(height: 1.35)),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Ghairi')),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Ghairi'),
+          ),
           FilledButton(
-            style: FilledButton.styleFrom(backgroundColor: const Color(0xFFDC2626)),
+            style: FilledButton.styleFrom(
+              backgroundColor: const Color(0xFFDC2626),
+            ),
             onPressed: () => Navigator.pop(ctx, true),
             child: Text(confirmLabel),
           ),
@@ -3457,133 +4357,193 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
 
     try {
       await showDialog<void>(
-      context: context,
-      builder: (ctx) => StatefulBuilder(
-        builder: (ctx, setModal) => AlertDialog(
-          backgroundColor: AdminColors.bgSecondary,
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-          title: const Text('Pa premium kwa muda', style: TextStyle(fontWeight: FontWeight.w800)),
-          content: SizedBox(
-            width: 420,
-            child: SingleChildScrollView(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Text('Mtumiaji: ${u.name}', style: const TextStyle(fontWeight: FontWeight.w600)),
-                  const SizedBox(height: 6),
-                  SelectableText(
-                    'Device ID: ${u.displayDeviceId}',
-                    style: const TextStyle(fontSize: 12, color: AdminColors.textSecondary),
-                  ),
-                  const SizedBox(height: 6),
-                  Text(
-                    u.adminAccessActive
-                        ? 'Muda wa sasa wa msimamizi unaisha: ${_fmtAccessDate(u.adminAccessUntil!)}. Mpya utaongezwa juu ya hii.'
-                        : 'Hakuna muda wa msimamizi unaofanya kazi. Unaanza kutoka sasa.',
-                    style: const TextStyle(fontSize: 11, color: AdminColors.textSecondary, height: 1.35),
-                  ),
-                  const SizedBox(height: 14),
-                  const Text('Vinjari haraka', style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600)),
-                  const SizedBox(height: 8),
-                  Wrap(
-                    spacing: 8,
-                    runSpacing: 8,
-                    children: [
-                      _presetChip(ctx, u, 'Saa 1', const Duration(hours: 1)),
-                      _presetChip(ctx, u, 'Masaa 6', const Duration(hours: 6)),
-                      _presetChip(ctx, u, 'Siku 1', const Duration(days: 1)),
-                      _presetChip(ctx, u, 'Siku 7', const Duration(days: 7)),
-                      _presetChip(ctx, u, 'Siku 30', const Duration(days: 30)),
-                    ],
-                  ),
-                  const SizedBox(height: 16),
-                  const Text('Maongezi ya kujitegemea', style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600)),
-                  const SizedBox(height: 8),
-                  Row(
-                    children: [
-                      SizedBox(
-                        width: 72,
-                        child: TextField(
-                          controller: customAmount,
-                          keyboardType: TextInputType.number,
-                          style: const TextStyle(fontSize: 13),
-                          decoration: _inputDeco().copyWith(contentPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 10)),
-                        ),
+        context: context,
+        builder: (ctx) => StatefulBuilder(
+          builder: (ctx, setModal) => AlertDialog(
+            backgroundColor: AdminColors.bgSecondary,
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(20),
+            ),
+            title: const Text(
+              'Pa premium kwa muda',
+              style: TextStyle(fontWeight: FontWeight.w800),
+            ),
+            content: SizedBox(
+              width: 420,
+              child: SingleChildScrollView(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(
+                      'Mtumiaji: ${u.name}',
+                      style: const TextStyle(fontWeight: FontWeight.w600),
+                    ),
+                    const SizedBox(height: 6),
+                    SelectableText(
+                      'Device ID: ${u.displayDeviceId}',
+                      style: const TextStyle(
+                        fontSize: 12,
+                        color: AdminColors.textSecondary,
                       ),
-                      const SizedBox(width: 10),
-                      Expanded(
-                        child: DropdownButtonFormField<_AccessUnit>(
-                          isExpanded: true,
-                          value: unit,
-                          dropdownColor: AdminColors.bgSecondary,
-                          decoration: _inputDeco(),
-                          items: const [
-                            DropdownMenuItem(value: _AccessUnit.hours, child: Text('Saa')),
-                            DropdownMenuItem(value: _AccessUnit.days, child: Text('Siku')),
-                            DropdownMenuItem(value: _AccessUnit.weeks, child: Text('Wiki')),
-                            DropdownMenuItem(value: _AccessUnit.months, child: Text('Mwezi (30 siku)')),
-                          ],
-                          onChanged: (v) => setModal(() => unit = v ?? unit),
-                        ),
+                    ),
+                    const SizedBox(height: 6),
+                    Text(
+                      u.adminAccessActive
+                          ? 'Muda wa sasa wa msimamizi unaisha: ${_fmtAccessDate(u.adminAccessUntil!)}. Mpya utaongezwa juu ya hii.'
+                          : 'Hakuna muda wa msimamizi unaofanya kazi. Unaanza kutoka sasa.',
+                      style: const TextStyle(
+                        fontSize: 11,
+                        color: AdminColors.textSecondary,
+                        height: 1.35,
                       ),
-                    ],
-                  ),
-                ],
+                    ),
+                    const SizedBox(height: 14),
+                    const Text(
+                      'Vinjari haraka',
+                      style: TextStyle(
+                        fontSize: 11,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    Wrap(
+                      spacing: 8,
+                      runSpacing: 8,
+                      children: [
+                        _presetChip(ctx, u, 'Saa 1', const Duration(hours: 1)),
+                        _presetChip(
+                          ctx,
+                          u,
+                          'Masaa 6',
+                          const Duration(hours: 6),
+                        ),
+                        _presetChip(ctx, u, 'Siku 1', const Duration(days: 1)),
+                        _presetChip(ctx, u, 'Siku 7', const Duration(days: 7)),
+                        _presetChip(
+                          ctx,
+                          u,
+                          'Siku 30',
+                          const Duration(days: 30),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 16),
+                    const Text(
+                      'Maongezi ya kujitegemea',
+                      style: TextStyle(
+                        fontSize: 11,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    Row(
+                      children: [
+                        SizedBox(
+                          width: 72,
+                          child: TextField(
+                            controller: customAmount,
+                            keyboardType: TextInputType.number,
+                            style: const TextStyle(fontSize: 13),
+                            decoration: _inputDeco().copyWith(
+                              contentPadding: const EdgeInsets.symmetric(
+                                horizontal: 10,
+                                vertical: 10,
+                              ),
+                            ),
+                          ),
+                        ),
+                        const SizedBox(width: 10),
+                        Expanded(
+                          child: DropdownButtonFormField<_AccessUnit>(
+                            isExpanded: true,
+                            value: unit,
+                            dropdownColor: AdminColors.bgSecondary,
+                            decoration: _inputDeco(),
+                            items: const [
+                              DropdownMenuItem(
+                                value: _AccessUnit.hours,
+                                child: Text('Saa'),
+                              ),
+                              DropdownMenuItem(
+                                value: _AccessUnit.days,
+                                child: Text('Siku'),
+                              ),
+                              DropdownMenuItem(
+                                value: _AccessUnit.weeks,
+                                child: Text('Wiki'),
+                              ),
+                              DropdownMenuItem(
+                                value: _AccessUnit.months,
+                                child: Text('Mwezi (30 siku)'),
+                              ),
+                            ],
+                            onChanged: (v) => setModal(() => unit = v ?? unit),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
               ),
             ),
-          ),
-          actions: [
-            TextButton(
-              onPressed: u.adminAccessUntil != null
-                  ? () async {
-                      final ok = await _showDeleteConfirmModal(
-                        title: 'Futa muda wa msimamizi?',
-                        message:
-                            'Muda wa premium uliopewa na msimamizi kwa “${u.name}” utaondolewa. Malipo ya mfumo yatabaki ikiwa yapo.',
-                      );
-                      if (!mounted || !ok) return;
-                      await _clearAdminAccess(u);
-                      if (ctx.mounted) Navigator.pop(ctx);
-                    }
-                  : null,
-              child: const Text('Futa muda wa msimamizi'),
-            ),
-            if (u.effectivePremium)
+            actions: [
               TextButton(
-                onPressed: () async {
-                  final ok = await _showDeleteConfirmModal(
-                    title: 'Ondoa premium kabisa?',
-                    message:
-                        '“${u.name}” atapoteza ufikiaji wote wa premium (msimamizi na malipo).',
-                    confirmLabel: 'Ondoa premium',
-                  );
-                  if (!mounted || !ok) return;
-                  try {
-                    await _revokeAllPremiumAccess(u, confirm: false);
-                    if (ctx.mounted) Navigator.pop(ctx);
-                  } catch (e) {
-                    if (!mounted) return;
-                    _showToast('Imeshindwa: $e', _ToastType.error);
-                  }
-                },
-                child: const Text('Ondoa premium kabisa', style: TextStyle(color: Color(0xFFEF4444))),
+                onPressed: u.adminAccessUntil != null
+                    ? () async {
+                        final ok = await _showDeleteConfirmModal(
+                          title: 'Futa muda wa msimamizi?',
+                          message:
+                              'Muda wa premium uliopewa na msimamizi kwa “${u.name}” utaondolewa. Malipo ya mfumo yatabaki ikiwa yapo.',
+                        );
+                        if (!mounted || !ok) return;
+                        await _clearAdminAccess(u);
+                        if (ctx.mounted) Navigator.pop(ctx);
+                      }
+                    : null,
+                child: const Text('Futa muda wa msimamizi'),
               ),
-            TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Funga')),
-            FilledButton(
-              onPressed: () async {
-                final n = int.tryParse(customAmount.text.trim()) ?? 1;
-                if (n < 1) return;
-                final add = _durationFromUnit(n, unit);
-                await _applyAdminDuration(u, add);
-                Navigator.pop(ctx);
-              },
-              child: const Text('Ongeza muda'),
-            ),
-          ],
+              if (u.effectivePremium)
+                TextButton(
+                  onPressed: () async {
+                    final ok = await _showDeleteConfirmModal(
+                      title: 'Ondoa premium kabisa?',
+                      message:
+                          '“${u.name}” atapoteza ufikiaji wote wa premium (msimamizi na malipo).',
+                      confirmLabel: 'Ondoa premium',
+                    );
+                    if (!mounted || !ok) return;
+                    try {
+                      await _revokeAllPremiumAccess(u, confirm: false);
+                      if (ctx.mounted) Navigator.pop(ctx);
+                    } catch (e) {
+                      if (!mounted) return;
+                      _showToast('Imeshindwa: $e', _ToastType.error);
+                    }
+                  },
+                  child: const Text(
+                    'Ondoa premium kabisa',
+                    style: TextStyle(color: Color(0xFFEF4444)),
+                  ),
+                ),
+              TextButton(
+                onPressed: () => Navigator.pop(ctx),
+                child: const Text('Funga'),
+              ),
+              FilledButton(
+                onPressed: () async {
+                  final n = int.tryParse(customAmount.text.trim()) ?? 1;
+                  if (n < 1) return;
+                  final add = _durationFromUnit(n, unit);
+                  await _applyAdminDuration(u, add);
+                  Navigator.pop(ctx);
+                },
+                child: const Text('Ongeza muda'),
+              ),
+            ],
+          ),
         ),
-      ),
-    );
+      );
     } finally {
       customAmount.dispose();
     }
@@ -3623,8 +4583,14 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
         title: Text(title),
         content: TextField(controller: c, autofocus: true),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Ghairi')),
-          FilledButton(onPressed: () => Navigator.pop(ctx, c.text), child: const Text('OK')),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Ghairi'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, c.text),
+            child: const Text('OK'),
+          ),
         ],
       ),
     );
@@ -3641,12 +4607,26 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  const Text('Chaneli', style: TextStyle(fontSize: 24, fontWeight: FontWeight.w800)),
-                  Text('${_channels.length} channels', style: const TextStyle(fontSize: 12, color: AdminColors.textSecondary)),
+                  const Text(
+                    'Chaneli',
+                    style: TextStyle(fontSize: 24, fontWeight: FontWeight.w800),
+                  ),
+                  Text(
+                    '${_channels.length} channels',
+                    style: const TextStyle(
+                      fontSize: 12,
+                      color: AdminColors.textSecondary,
+                    ),
+                  ),
                 ],
               ),
             ),
-            _btnPrimary(label: 'Ongeza', icon: Icons.add, small: true, onTap: () => _showChannelEditor()),
+            _btnPrimary(
+              label: 'Ongeza',
+              icon: Icons.add,
+              small: true,
+              onTap: () => _showChannelEditor(),
+            ),
           ],
         ),
         const SizedBox(height: 12),
@@ -3655,15 +4635,28 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
             builder: (context, c) {
               final cross = c.maxWidth > 900 ? 4 : (c.maxWidth > 520 ? 3 : 2);
               final tileW = (c.maxWidth - (cross - 1) * 12) / cross;
-              final cacheW = (tileW * MediaQuery.devicePixelRatioOf(context)).round().clamp(64, 512);
+              final cacheW = (tileW * MediaQuery.devicePixelRatioOf(context))
+                  .round()
+                  .clamp(64, 512);
               if (_channels.isEmpty) {
                 return ListView(
                   physics: const AlwaysScrollableScrollPhysics(),
                   children: const [
                     SizedBox(height: 48),
-                    Icon(Icons.tv_off_outlined, size: 40, color: AdminColors.textSecondary),
+                    Icon(
+                      Icons.tv_off_outlined,
+                      size: 40,
+                      color: AdminColors.textSecondary,
+                    ),
                     SizedBox(height: 12),
-                    Text('Hakuna chaneli', textAlign: TextAlign.center, style: TextStyle(fontSize: 14, color: AdminColors.textSecondary)),
+                    Text(
+                      'Hakuna chaneli',
+                      textAlign: TextAlign.center,
+                      style: TextStyle(
+                        fontSize: 14,
+                        color: AdminColors.textSecondary,
+                      ),
+                    ),
                   ],
                 );
               }
@@ -3699,7 +4692,8 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
                                   cacheWidth: cacheW,
                                   filterQuality: FilterQuality.low,
                                   gaplessPlayback: true,
-                                  errorBuilder: (_, __, ___) => _imageFallback(Icons.tv, 'Hakuna picha'),
+                                  errorBuilder: (_, __, ___) =>
+                                      _imageFallback(Icons.tv, 'Hakuna picha'),
                                 ),
                                 if (ch.status != 'active')
                                   Positioned.fill(
@@ -3707,9 +4701,25 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
                                       color: const Color(0x66000000),
                                       alignment: Alignment.center,
                                       child: Container(
-                                        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-                                        decoration: BoxDecoration(color: const Color(0xE61F2937), borderRadius: BorderRadius.circular(8)),
-                                        child: const Text('IMEZIMWA', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800, letterSpacing: 0.8, color: Colors.white)),
+                                        padding: const EdgeInsets.symmetric(
+                                          horizontal: 10,
+                                          vertical: 4,
+                                        ),
+                                        decoration: BoxDecoration(
+                                          color: const Color(0xE61F2937),
+                                          borderRadius: BorderRadius.circular(
+                                            8,
+                                          ),
+                                        ),
+                                        child: const Text(
+                                          'IMEZIMWA',
+                                          style: TextStyle(
+                                            fontSize: 10,
+                                            fontWeight: FontWeight.w800,
+                                            letterSpacing: 0.8,
+                                            color: Colors.white,
+                                          ),
+                                        ),
                                       ),
                                     ),
                                   ),
@@ -3719,8 +4729,19 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
                                   child: Row(
                                     mainAxisSize: MainAxisSize.min,
                                     children: [
-                                      if (ch.premium) _tinyBadge('Premium', const Color(0xFFF59E0B), darkText: true),
-                                      if (ch.live) ...[const SizedBox(width: 4), _tinyBadge('LIVE', const Color(0xFFEF4444))],
+                                      if (ch.premium)
+                                        _tinyBadge(
+                                          'Premium',
+                                          const Color(0xFFF59E0B),
+                                          darkText: true,
+                                        ),
+                                      if (ch.live) ...[
+                                        const SizedBox(width: 4),
+                                        _tinyBadge(
+                                          'LIVE',
+                                          const Color(0xFFEF4444),
+                                        ),
+                                      ],
                                     ],
                                   ),
                                 ),
@@ -3728,7 +4749,10 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
                                   Positioned(
                                     top: 8,
                                     left: 8,
-                                    child: _tinyBadge(_channelDrmShort(ch.effectiveDrm), const Color(0xFF4F46E5)),
+                                    child: _tinyBadge(
+                                      _channelDrmShort(ch.effectiveDrm),
+                                      const Color(0xFF4F46E5),
+                                    ),
                                   ),
                                 Positioned(
                                   left: 0,
@@ -3737,15 +4761,37 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
                                   child: Container(
                                     padding: const EdgeInsets.all(8),
                                     decoration: const BoxDecoration(
-                                      gradient: LinearGradient(begin: Alignment.topCenter, end: Alignment.bottomCenter, colors: [Color(0x00000000), Color(0xCC000000)]),
+                                      gradient: LinearGradient(
+                                        begin: Alignment.topCenter,
+                                        end: Alignment.bottomCenter,
+                                        colors: [
+                                          Color(0x00000000),
+                                          Color(0xCC000000),
+                                        ],
+                                      ),
                                     ),
                                     child: Column(
-                                      crossAxisAlignment: CrossAxisAlignment.start,
+                                      crossAxisAlignment:
+                                          CrossAxisAlignment.start,
                                       children: [
-                                        Text(ch.name, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 13, color: Colors.white)),
                                         Text(
-                                          ch.streamUrl.trim().isNotEmpty ? '${ch.category} · Stream' : ch.category,
-                                          style: const TextStyle(fontSize: 9, color: Color(0xFFD1D5DB)),
+                                          ch.name,
+                                          maxLines: 1,
+                                          overflow: TextOverflow.ellipsis,
+                                          style: const TextStyle(
+                                            fontWeight: FontWeight.w600,
+                                            fontSize: 13,
+                                            color: Colors.white,
+                                          ),
+                                        ),
+                                        Text(
+                                          ch.streamUrl.trim().isNotEmpty
+                                              ? '${ch.category} · Stream'
+                                              : ch.category,
+                                          style: const TextStyle(
+                                            fontSize: 9,
+                                            color: Color(0xFFD1D5DB),
+                                          ),
                                         ),
                                       ],
                                     ),
@@ -3758,22 +4804,42 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
                             padding: const EdgeInsets.fromLTRB(6, 2, 4, 6),
                             child: Row(
                               children: [
-                                Text('⭐${ch.rating}', style: const TextStyle(fontSize: 9, color: AdminColors.textSecondary)),
+                                Text(
+                                  '⭐${ch.rating}',
+                                  style: const TextStyle(
+                                    fontSize: 9,
+                                    color: AdminColors.textSecondary,
+                                  ),
+                                ),
                                 const Spacer(),
                                 IconButton(
                                   onPressed: () => _showChannelEditor(index: i),
-                                  icon: const Icon(Icons.edit_outlined, size: 18, color: Color(0xFF818CF8)),
+                                  icon: const Icon(
+                                    Icons.edit_outlined,
+                                    size: 18,
+                                    color: Color(0xFF818CF8),
+                                  ),
                                   tooltip: 'Hariri chaneli',
                                   padding: EdgeInsets.zero,
-                                  constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
+                                  constraints: const BoxConstraints(
+                                    minWidth: 32,
+                                    minHeight: 32,
+                                  ),
                                   visualDensity: VisualDensity.compact,
                                 ),
                                 IconButton(
                                   onPressed: () => _confirmDeleteChannel(ch.id),
-                                  icon: const Icon(Icons.delete_outline_rounded, size: 18, color: Color(0xFFF87171)),
+                                  icon: const Icon(
+                                    Icons.delete_outline_rounded,
+                                    size: 18,
+                                    color: Color(0xFFF87171),
+                                  ),
                                   tooltip: 'Futa chaneli',
                                   padding: EdgeInsets.zero,
-                                  constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
+                                  constraints: const BoxConstraints(
+                                    minWidth: 32,
+                                    minHeight: 32,
+                                  ),
                                   visualDensity: VisualDensity.compact,
                                 ),
                               ],
@@ -3794,14 +4860,19 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
 
   // --- Slides ---
   Widget _pageSlides() {
-    final slides = [..._slides]..sort((a, b) => a.sortOrder.compareTo(b.sortOrder));
+    final slides = [..._slides]
+      ..sort((a, b) => a.sortOrder.compareTo(b.sortOrder));
     final activeCount = slides.where((s) => s.active).length;
     final premiumCount = slides.where((s) => s.premium).length;
     final slideQuery = _slideQuery ?? '';
     final slideFilter = _slideFilter ?? 'all';
     final q = slideQuery.trim().toLowerCase();
     final filtered = slides.where((s) {
-      final byQuery = q.isEmpty || s.title.toLowerCase().contains(q) || s.subtitle.toLowerCase().contains(q) || s.id.toLowerCase().contains(q);
+      final byQuery =
+          q.isEmpty ||
+          s.title.toLowerCase().contains(q) ||
+          s.subtitle.toLowerCase().contains(q) ||
+          s.id.toLowerCase().contains(q);
       final byFilter = switch (slideFilter) {
         'active' => s.active,
         'inactive' => !s.active,
@@ -3812,7 +4883,8 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
     }).toList();
 
     /// Full list visible only with no filters — reorder updates `sort_order` on all slides.
-    final canReorderSlides = q.isEmpty && slideFilter == 'all' && filtered.length >= 2;
+    final canReorderSlides =
+        q.isEmpty && slideFilter == 'all' && filtered.length >= 2;
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -3826,7 +4898,11 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
             color: const Color(0xFF0F1419),
             border: Border.all(color: const Color(0x226366F1)),
             boxShadow: const [
-              BoxShadow(color: Color(0x12000000), blurRadius: 16, offset: Offset(0, 4)),
+              BoxShadow(
+                color: Color(0x12000000),
+                blurRadius: 16,
+                offset: Offset(0, 4),
+              ),
             ],
           ),
           child: Column(
@@ -3839,13 +4915,32 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        Text('Mabango', style: TextStyle(fontSize: 17, fontWeight: FontWeight.w700, letterSpacing: -0.3)),
+                        Text(
+                          'Mabango',
+                          style: TextStyle(
+                            fontSize: 17,
+                            fontWeight: FontWeight.w700,
+                            letterSpacing: -0.3,
+                          ),
+                        ),
                         SizedBox(height: 2),
-                        Text('Carousel ya app · haraka kuscan', style: TextStyle(fontSize: 11.5, color: AdminColors.textSecondary, height: 1.3)),
+                        Text(
+                          'Carousel ya app · haraka kuscan',
+                          style: TextStyle(
+                            fontSize: 11.5,
+                            color: AdminColors.textSecondary,
+                            height: 1.3,
+                          ),
+                        ),
                       ],
                     ),
                   ),
-                  _btnPrimary(label: 'Ongeza', icon: Icons.add_rounded, small: true, onTap: () => _showSlideEditor()),
+                  _btnPrimary(
+                    label: 'Ongeza',
+                    icon: Icons.add_rounded,
+                    small: true,
+                    onTap: () => _showSlideEditor(),
+                  ),
                 ],
               ),
               const SizedBox(height: 12),
@@ -3853,9 +4948,21 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
                 spacing: 8,
                 runSpacing: 8,
                 children: [
-                  _slideMetricPill('Total', '${slides.length}', const Color(0xFF818CF8)),
-                  _slideMetricPill('Active', '$activeCount', const Color(0xFF34D399)),
-                  _slideMetricPill('Premium', '$premiumCount', const Color(0xFFFBBF24)),
+                  _slideMetricPill(
+                    'Total',
+                    '${slides.length}',
+                    const Color(0xFF818CF8),
+                  ),
+                  _slideMetricPill(
+                    'Active',
+                    '$activeCount',
+                    const Color(0xFF34D399),
+                  ),
+                  _slideMetricPill(
+                    'Premium',
+                    '$premiumCount',
+                    const Color(0xFFFBBF24),
+                  ),
                 ],
               ),
             ],
@@ -3894,7 +5001,11 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
             padding: const EdgeInsets.only(bottom: 8),
             child: Text(
               'Weka filtari "All" na uondoe utafutaji ili kupanga slides kwa kuvuta kinara.',
-              style: TextStyle(fontSize: 11, height: 1.35, color: AdminColors.textSecondary.withValues(alpha: 0.95)),
+              style: TextStyle(
+                fontSize: 11,
+                height: 1.35,
+                color: AdminColors.textSecondary.withValues(alpha: 0.95),
+              ),
             ),
           ),
         if (filtered.isEmpty)
@@ -3908,11 +5019,24 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
             ),
             child: const Column(
               children: [
-                Icon(Icons.photo_library_outlined, size: 28, color: Color(0xFF64748B)),
+                Icon(
+                  Icons.photo_library_outlined,
+                  size: 28,
+                  color: Color(0xFF64748B),
+                ),
                 SizedBox(height: 8),
-                Text('Hakuna slide', style: TextStyle(fontWeight: FontWeight.w600, fontSize: 13)),
+                Text(
+                  'Hakuna slide',
+                  style: TextStyle(fontWeight: FontWeight.w600, fontSize: 13),
+                ),
                 SizedBox(height: 4),
-                Text('Badilisha filtari au ongeza mpya', style: TextStyle(fontSize: 11, color: AdminColors.textSecondary)),
+                Text(
+                  'Badilisha filtari au ongeza mpya',
+                  style: TextStyle(
+                    fontSize: 11,
+                    color: AdminColors.textSecondary,
+                  ),
+                ),
               ],
             ),
           )
@@ -3966,7 +5090,12 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
             itemBuilder: (context, i) {
               final s = filtered[i];
               final sourceIndex = _slides.indexWhere((e) => e.id == s.id);
-              return _slideListRow(s, sourceIndex, listIndex: i, showDragHandle: false);
+              return _slideListRow(
+                s,
+                sourceIndex,
+                listIndex: i,
+                showDragHandle: false,
+              );
             },
           ),
       ],
@@ -3984,7 +5113,9 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
       color: Colors.transparent,
       child: InkWell(
         borderRadius: BorderRadius.circular(12),
-        onTap: sourceIndex < 0 ? null : () => _showSlideEditor(index: sourceIndex),
+        onTap: sourceIndex < 0
+            ? null
+            : () => _showSlideEditor(index: sourceIndex),
         child: Ink(
           decoration: BoxDecoration(
             borderRadius: BorderRadius.circular(12),
@@ -4002,7 +5133,13 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
                     cursor: SystemMouseCursors.grab,
                     child: Padding(
                       padding: const EdgeInsets.only(right: 6),
-                      child: Icon(Icons.drag_indicator_rounded, size: 22, color: AdminColors.textSecondary.withValues(alpha: 0.75)),
+                      child: Icon(
+                        Icons.drag_indicator_rounded,
+                        size: 22,
+                        color: AdminColors.textSecondary.withValues(
+                          alpha: 0.75,
+                        ),
+                      ),
                     ),
                   ),
                 ),
@@ -4017,13 +5154,21 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
                       Image.network(
                         _safeImageUrl(s.imageUrl),
                         fit: BoxFit.cover,
-                        errorBuilder: (_, __, ___) => _slideThumbFallback(Icons.broken_image_outlined),
+                        errorBuilder: (_, __, ___) =>
+                            _slideThumbFallback(Icons.broken_image_outlined),
                       ),
                       if (!s.active)
                         Container(
                           color: const Color(0x77000000),
                           alignment: Alignment.center,
-                          child: const Text('IMEZIMWA', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: Colors.white)),
+                          child: const Text(
+                            'IMEZIMWA',
+                            style: TextStyle(
+                              fontSize: 10,
+                              fontWeight: FontWeight.w800,
+                              color: Colors.white,
+                            ),
+                          ),
                         ),
                     ],
                   ),
@@ -4038,7 +5183,11 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
                       s.title,
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 13, height: 1.25),
+                      style: const TextStyle(
+                        fontWeight: FontWeight.w600,
+                        fontSize: 13,
+                        height: 1.25,
+                      ),
                     ),
                     if (s.subtitle.isNotEmpty)
                       Padding(
@@ -4047,7 +5196,11 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
                           s.subtitle,
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
-                          style: const TextStyle(fontSize: 11.5, color: AdminColors.textSecondary, height: 1.2),
+                          style: const TextStyle(
+                            fontSize: 11.5,
+                            color: AdminColors.textSecondary,
+                            height: 1.2,
+                          ),
                         ),
                       ),
                     const SizedBox(height: 6),
@@ -4057,11 +5210,24 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
                       crossAxisAlignment: WrapCrossAlignment.center,
                       children: [
                         _tinyBadge('#${s.sortOrder}', const Color(0xFF334155)),
-                        _tinyBadge(s.premium ? 'PRO' : 'FREE', s.premium ? const Color(0xFFEAB308) : const Color(0xFF475569), darkText: s.premium),
-                        if (!s.active) _tinyBadge('Inactive', const Color(0xFFBE123C)),
+                        _tinyBadge(
+                          s.premium ? 'PRO' : 'FREE',
+                          s.premium
+                              ? const Color(0xFFEAB308)
+                              : const Color(0xFF475569),
+                          darkText: s.premium,
+                        ),
+                        if (!s.active)
+                          _tinyBadge('Inactive', const Color(0xFFBE123C)),
                         Text(
                           s.id,
-                          style: TextStyle(fontSize: 10, fontFamily: 'monospace', color: AdminColors.textSecondary.withValues(alpha: 0.85)),
+                          style: TextStyle(
+                            fontSize: 10,
+                            fontFamily: 'monospace',
+                            color: AdminColors.textSecondary.withValues(
+                              alpha: 0.85,
+                            ),
+                          ),
                         ),
                       ],
                     ),
@@ -4074,26 +5240,46 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
                 children: [
                   IconButton(
                     tooltip: 'Hariri',
-                    onPressed: sourceIndex < 0 ? null : () => _showSlideEditor(index: sourceIndex),
-                    icon: const Icon(Icons.edit_rounded, size: 18, color: Color(0xFF93C5FD)),
+                    onPressed: sourceIndex < 0
+                        ? null
+                        : () => _showSlideEditor(index: sourceIndex),
+                    icon: const Icon(
+                      Icons.edit_rounded,
+                      size: 18,
+                      color: Color(0xFF93C5FD),
+                    ),
                     visualDensity: VisualDensity.compact,
                     padding: EdgeInsets.zero,
-                    constraints: const BoxConstraints(minWidth: 34, minHeight: 34),
+                    constraints: const BoxConstraints(
+                      minWidth: 34,
+                      minHeight: 34,
+                    ),
                     style: IconButton.styleFrom(
                       backgroundColor: const Color(0x146366F1),
-                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(8),
+                      ),
                     ),
                   ),
                   IconButton(
                     tooltip: 'Futa',
                     onPressed: () => _confirmDeleteSlide(s.id),
-                    icon: const Icon(Icons.delete_outline_rounded, size: 18, color: Color(0xFFFCA5A5)),
+                    icon: const Icon(
+                      Icons.delete_outline_rounded,
+                      size: 18,
+                      color: Color(0xFFFCA5A5),
+                    ),
                     visualDensity: VisualDensity.compact,
                     padding: EdgeInsets.zero,
-                    constraints: const BoxConstraints(minWidth: 34, minHeight: 34),
+                    constraints: const BoxConstraints(
+                      minWidth: 34,
+                      minHeight: 34,
+                    ),
                     style: IconButton.styleFrom(
                       backgroundColor: const Color(0x14EF4444),
-                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(8),
+                      ),
                     ),
                   ),
                 ],
@@ -4109,7 +5295,8 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
     var newIdx = newIndex;
     if (newIdx > oldIndex) newIdx--;
     if (oldIndex == newIdx) return;
-    final ordered = [..._slides]..sort((a, b) => a.sortOrder.compareTo(b.sortOrder));
+    final ordered = [..._slides]
+      ..sort((a, b) => a.sortOrder.compareTo(b.sortOrder));
     final moved = ordered.removeAt(oldIndex);
     ordered.insert(newIdx, moved);
     for (var i = 0; i < ordered.length; i++) {
@@ -4140,7 +5327,10 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
       }
     } catch (_) {
       if (mounted) {
-        _showToast('Mpangilio umebadilika hapa, lakini sync ya server imeshindikana.', _ToastType.warning);
+        _showToast(
+          'Mpangilio umebadilika hapa, lakini sync ya server imeshindikana.',
+          _ToastType.warning,
+        );
       }
     }
   }
@@ -4156,11 +5346,25 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Container(width: 5, height: 5, decoration: BoxDecoration(color: tone, shape: BoxShape.circle)),
+          Container(
+            width: 5,
+            height: 5,
+            decoration: BoxDecoration(color: tone, shape: BoxShape.circle),
+          ),
           const SizedBox(width: 7),
-          Text(label, style: const TextStyle(fontSize: 10, color: AdminColors.textSecondary, fontWeight: FontWeight.w500)),
+          Text(
+            label,
+            style: const TextStyle(
+              fontSize: 10,
+              color: AdminColors.textSecondary,
+              fontWeight: FontWeight.w500,
+            ),
+          ),
           const SizedBox(width: 6),
-          Text(value, style: const TextStyle(fontSize: 12.5, fontWeight: FontWeight.w700)),
+          Text(
+            value,
+            style: const TextStyle(fontSize: 12.5, fontWeight: FontWeight.w700),
+          ),
         ],
       ),
     );
@@ -4195,7 +5399,9 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
       ),
       selectedColor: const Color(0x334F46E5),
       backgroundColor: const Color(0x22111B2C),
-      side: BorderSide(color: selected ? const Color(0x665B7CFA) : const Color(0x1FFFFFFF)),
+      side: BorderSide(
+        color: selected ? const Color(0x665B7CFA) : const Color(0x1FFFFFFF),
+      ),
     );
   }
 
@@ -4229,7 +5435,8 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
         final res = await http
             .delete(_adminSlideUri(id), headers: _adminHeadersForDelete())
             .timeout(const Duration(seconds: 12));
-        if (res.statusCode != 404 && (res.statusCode < 200 || res.statusCode >= 300)) {
+        if (res.statusCode != 404 &&
+            (res.statusCode < 200 || res.statusCode >= 300)) {
           throw Exception(_adminHttpError(res));
         }
         if (!mounted) return;
@@ -4247,7 +5454,10 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
     }
 
     setState(() => _slides.removeWhere((e) => e.id == id));
-    _showToast('Imefutwa local pekee. Ingia ili kusawazisha na server.', _ToastType.warning);
+    _showToast(
+      'Imefutwa local pekee. Ingia ili kusawazisha na server.',
+      _ToastType.warning,
+    );
   }
 
   void _showSlideEditor({int? index}) {
@@ -4258,7 +5468,9 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
     final imageUrl = TextEditingController(text: existing?.imageUrl ?? '');
     var premium = existing?.premium ?? false;
     var active = existing?.active ?? true;
-    final sortCtl = TextEditingController(text: '${existing?.sortOrder ?? (_slides.length + 1)}');
+    final sortCtl = TextEditingController(
+      text: '${existing?.sortOrder ?? (_slides.length + 1)}',
+    );
 
     showDialog<void>(
       context: context,
@@ -4266,8 +5478,13 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
         builder: (ctx, setModal) => AlertDialog(
           backgroundColor: AdminColors.bgSecondary,
           elevation: 0,
-          insetPadding: const EdgeInsets.symmetric(horizontal: 22, vertical: 22),
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
+          insetPadding: const EdgeInsets.symmetric(
+            horizontal: 22,
+            vertical: 22,
+          ),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(18),
+          ),
           titlePadding: const EdgeInsets.fromLTRB(18, 14, 10, 0),
           contentPadding: const EdgeInsets.fromLTRB(18, 10, 18, 0),
           actionsPadding: const EdgeInsets.fromLTRB(10, 0, 10, 10),
@@ -4279,13 +5496,21 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
                   color: const Color(0x186366F1),
                   borderRadius: BorderRadius.circular(10),
                 ),
-                child: const Icon(Icons.slideshow_rounded, size: 18, color: Color(0xFFA5B4FC)),
+                child: const Icon(
+                  Icons.slideshow_rounded,
+                  size: 18,
+                  color: Color(0xFFA5B4FC),
+                ),
               ),
               const SizedBox(width: 10),
               Expanded(
                 child: Text(
                   isEdit ? 'Hariri slide' : 'Slide mpya',
-                  style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 16, letterSpacing: -0.2),
+                  style: const TextStyle(
+                    fontWeight: FontWeight.w700,
+                    fontSize: 16,
+                    letterSpacing: -0.2,
+                  ),
                 ),
               ),
             ],
@@ -4302,7 +5527,9 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
                     child: AspectRatio(
                       aspectRatio: 16 / 9,
                       child: imageUrl.text.trim().isEmpty
-                          ? _slideThumbFallback(Icons.add_photo_alternate_outlined)
+                          ? _slideThumbFallback(
+                              Icons.add_photo_alternate_outlined,
+                            )
                           : Image.network(
                               _safeImageUrl(imageUrl.text.trim()),
                               fit: BoxFit.cover,
@@ -4312,11 +5539,17 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
                                   child: SizedBox(
                                     width: 22,
                                     height: 22,
-                                    child: CircularProgressIndicator(strokeWidth: 2, color: AdminColors.accentPrimary.withValues(alpha: 0.8)),
+                                    child: CircularProgressIndicator(
+                                      strokeWidth: 2,
+                                      color: AdminColors.accentPrimary
+                                          .withValues(alpha: 0.8),
+                                    ),
                                   ),
                                 );
                               },
-                              errorBuilder: (_, __, ___) => _slideThumbFallback(Icons.hide_image_outlined),
+                              errorBuilder: (_, __, ___) => _slideThumbFallback(
+                                Icons.hide_image_outlined,
+                              ),
                             ),
                     ),
                   ),
@@ -4324,13 +5557,19 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
                   TextField(
                     controller: title,
                     style: const TextStyle(fontSize: 13),
-                    decoration: _inputDeco().copyWith(labelText: 'Kichwa', isDense: true),
+                    decoration: _inputDeco().copyWith(
+                      labelText: 'Kichwa',
+                      isDense: true,
+                    ),
                   ),
                   const SizedBox(height: 8),
                   TextField(
                     controller: subtitle,
                     style: const TextStyle(fontSize: 13),
-                    decoration: _inputDeco().copyWith(labelText: 'Maelezo mafupi', isDense: true),
+                    decoration: _inputDeco().copyWith(
+                      labelText: 'Maelezo mafupi',
+                      isDense: true,
+                    ),
                   ),
                   const SizedBox(height: 8),
                   TextField(
@@ -4350,21 +5589,30 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
                       controller: sortCtl,
                       keyboardType: TextInputType.number,
                       style: const TextStyle(fontSize: 13),
-                      decoration: _inputDeco().copyWith(labelText: 'Mpangilio', isDense: true),
+                      decoration: _inputDeco().copyWith(
+                        labelText: 'Mpangilio',
+                        isDense: true,
+                      ),
                     ),
                   ),
                   const SizedBox(height: 6),
                   SwitchListTile(
                     dense: true,
                     contentPadding: EdgeInsets.zero,
-                    title: const Text('Ni slide ya premium', style: TextStyle(fontSize: 12.5)),
+                    title: const Text(
+                      'Ni slide ya premium',
+                      style: TextStyle(fontSize: 12.5),
+                    ),
                     value: premium,
                     onChanged: (v) => setModal(() => premium = v),
                   ),
                   SwitchListTile(
                     dense: true,
                     contentPadding: EdgeInsets.zero,
-                    title: const Text('Inaonekana kwenye app', style: TextStyle(fontSize: 12.5)),
+                    title: const Text(
+                      'Inaonekana kwenye app',
+                      style: TextStyle(fontSize: 12.5),
+                    ),
                     value: active,
                     onChanged: (v) => setModal(() => active = v),
                   ),
@@ -4375,20 +5623,30 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
           actions: [
             TextButton(
               onPressed: () => Navigator.pop(ctx),
-              child: Text('Ghairi', style: TextStyle(fontSize: 13, color: AdminColors.textSecondary)),
+              child: Text(
+                'Ghairi',
+                style: TextStyle(
+                  fontSize: 13,
+                  color: AdminColors.textSecondary,
+                ),
+              ),
             ),
             FilledButton(
               onPressed: () async {
                 final t = title.text.trim();
                 final st = subtitle.text.trim();
                 final img = imageUrl.text.trim();
-                final order = int.tryParse(sortCtl.text.trim()) ?? (_slides.length + 1);
+                final order =
+                    int.tryParse(sortCtl.text.trim()) ?? (_slides.length + 1);
                 if (t.isEmpty || img.isEmpty) {
                   _showToast('Jaza title na URL ya picha', _ToastType.error);
                   return;
                 }
                 if (!_hasAdminSession) {
-                  _showToast('Ingia kwanza (skrini ya kwanza) ili kuhifadhi kwenye server.', _ToastType.error);
+                  _showToast(
+                    'Ingia kwanza (skrini ya kwanza) ili kuhifadhi kwenye server.',
+                    _ToastType.error,
+                  );
                   return;
                 }
 
@@ -4413,7 +5671,11 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
                         )
                         .timeout(const Duration(seconds: 25));
                     if (res.statusCode < 200 || res.statusCode >= 300) {
-                      throw Exception(res.body.isNotEmpty ? res.body : 'HTTP ${res.statusCode}');
+                      throw Exception(
+                        res.body.isNotEmpty
+                            ? res.body
+                            : 'HTTP ${res.statusCode}',
+                      );
                     }
                     if (!mounted) return;
                     setState(() {
@@ -4443,7 +5705,11 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
                         )
                         .timeout(const Duration(seconds: 25));
                     if (res.statusCode < 200 || res.statusCode >= 300) {
-                      throw Exception(res.body.isNotEmpty ? res.body : 'HTTP ${res.statusCode}');
+                      throw Exception(
+                        res.body.isNotEmpty
+                            ? res.body
+                            : 'HTTP ${res.statusCode}',
+                      );
                     }
                     if (!mounted) return;
                     setState(() => _slides.insert(0, newSlide));
@@ -4452,19 +5718,30 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
                   if (!mounted) return;
                   Navigator.pop(ctx);
                   _showToast(
-                    isEdit ? 'Slide imehifadhiwa kwenye databesi' : 'Slide imeongezwa kwenye databesi',
+                    isEdit
+                        ? 'Slide imehifadhiwa kwenye databesi'
+                        : 'Slide imeongezwa kwenye databesi',
                     _ToastType.success,
                   );
                   unawaited(_hydrateFromBackend());
                 } catch (e) {
                   if (!mounted) return;
-                  _showToast('Imeshindikana kuhifadhi slide: $e', _ToastType.error);
+                  _showToast(
+                    'Imeshindikana kuhifadhi slide: $e',
+                    _ToastType.error,
+                  );
                 }
               },
               style: FilledButton.styleFrom(
-                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 9),
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 16,
+                  vertical: 9,
+                ),
                 tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                textStyle: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
+                textStyle: const TextStyle(
+                  fontSize: 13,
+                  fontWeight: FontWeight.w600,
+                ),
               ),
               child: Text(isEdit ? 'Hifadhi' : 'Ongeza'),
             ),
@@ -4477,8 +5754,18 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
   Widget _tinyBadge(String t, Color bg, {bool darkText = false}) {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-      decoration: BoxDecoration(color: bg, borderRadius: BorderRadius.circular(99)),
-      child: Text(t, style: TextStyle(fontSize: 9, fontWeight: FontWeight.w700, color: darkText ? const Color(0xFF111827) : Colors.white)),
+      decoration: BoxDecoration(
+        color: bg,
+        borderRadius: BorderRadius.circular(99),
+      ),
+      child: Text(
+        t,
+        style: TextStyle(
+          fontSize: 9,
+          fontWeight: FontWeight.w700,
+          color: darkText ? const Color(0xFF111827) : Colors.white,
+        ),
+      ),
     );
   }
 
@@ -4503,7 +5790,10 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
           children: [
             Icon(icon, color: const Color(0xFF9CA3AF), size: 28),
             const SizedBox(height: 8),
-            Text(label, style: const TextStyle(fontSize: 11, color: Color(0xFF9CA3AF))),
+            Text(
+              label,
+              style: const TextStyle(fontSize: 11, color: Color(0xFF9CA3AF)),
+            ),
           ],
         ),
       ),
@@ -4546,7 +5836,8 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
         final res = await http
             .delete(_adminChannelUri(id), headers: _adminHeadersForDelete())
             .timeout(const Duration(seconds: 12));
-        if (res.statusCode != 404 && (res.statusCode < 200 || res.statusCode >= 300)) {
+        if (res.statusCode != 404 &&
+            (res.statusCode < 200 || res.statusCode >= 300)) {
           throw Exception(_adminHttpError(res));
         }
         if (!mounted) return;
@@ -4563,7 +5854,10 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
       return;
     }
     setState(() => _channels.removeWhere((e) => e.id == id));
-    _showToast('Imefutwa local pekee. Ingia ili kusawazisha na server.', _ToastType.warning);
+    _showToast(
+      'Imefutwa local pekee. Ingia ili kusawazisha na server.',
+      _ToastType.warning,
+    );
   }
 
   void _showChannelEditor({int? index}) {
@@ -4589,8 +5883,13 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
         builder: (ctx, setModal) {
           return AlertDialog(
             backgroundColor: AdminColors.bgSecondary,
-            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-            title: Text(isEdit ? 'Hariri chaneli' : 'Ongeza chaneli', style: const TextStyle(fontWeight: FontWeight.w800)),
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(20),
+            ),
+            title: Text(
+              isEdit ? 'Hariri chaneli' : 'Ongeza chaneli',
+              style: const TextStyle(fontWeight: FontWeight.w800),
+            ),
             content: SingleChildScrollView(
               child: SizedBox(
                 width: 420,
@@ -4598,22 +5897,39 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    Text('Maelezo ya msingi', style: _channelFormSectionStyle()),
+                    Text(
+                      'Maelezo ya msingi',
+                      style: _channelFormSectionStyle(),
+                    ),
                     const SizedBox(height: 8),
                     TextField(
                       controller: name,
-                      decoration: _inputDeco().copyWith(labelText: 'Jina la chaneli', hintText: 'mf. ESPN Ultra HD'),
+                      decoration: _inputDeco().copyWith(
+                        labelText: 'Jina la chaneli',
+                        hintText: 'mf. ESPN Ultra HD',
+                      ),
                     ),
                     const SizedBox(height: 12),
                     DropdownButtonFormField<String>(
                       isExpanded: true,
                       value: category,
                       dropdownColor: AdminColors.bgSecondary,
-                      decoration: _inputDeco().copyWith(labelText: 'Jamii (kama kwenye app)'),
+                      decoration: _inputDeco().copyWith(
+                        labelText: 'Jamii (kama kwenye app)',
+                      ),
                       items: kAppChannelCategories
-                          .map((e) => DropdownMenuItem(value: e, child: Text(e, style: const TextStyle(fontSize: 13))))
+                          .map(
+                            (e) => DropdownMenuItem(
+                              value: e,
+                              child: Text(
+                                e,
+                                style: const TextStyle(fontSize: 13),
+                              ),
+                            ),
+                          )
                           .toList(),
-                      onChanged: (v) => setModal(() => category = v ?? category),
+                      onChanged: (v) =>
+                          setModal(() => category = v ?? category),
                     ),
                     const SizedBox(height: 12),
                     TextField(
@@ -4631,8 +5947,13 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
                       decoration: _inputDeco().copyWith(
                         labelText: 'URL ya mtangazo',
                         hintText: 'https://…/stream.m3u8',
-                        helperText: 'HLS, m3u8, au mp4 — inatumika kwenye player ya mtumiaji',
-                        prefixIcon: const Icon(Icons.play_circle_outline_rounded, color: Color(0xFF94A3B8), size: 20),
+                        helperText:
+                            'HLS, m3u8, au mp4 — inatumika kwenye player ya mtumiaji',
+                        prefixIcon: const Icon(
+                          Icons.play_circle_outline_rounded,
+                          color: Color(0xFF94A3B8),
+                          size: 20,
+                        ),
                       ),
                     ),
                     const SizedBox(height: 16),
@@ -4640,7 +5961,10 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
                     const SizedBox(height: 6),
                     SwitchListTile(
                       contentPadding: EdgeInsets.zero,
-                      title: const Text('Chaneli hai', style: TextStyle(fontSize: 13)),
+                      title: const Text(
+                        'Chaneli hai',
+                        style: TextStyle(fontSize: 13),
+                      ),
                       value: active,
                       activeThumbColor: AdminColors.accentSuccess,
                       onChanged: (v) => setModal(() => active = v ?? false),
@@ -4671,23 +5995,40 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
                     const SizedBox(height: 12),
                     SwitchListTile(
                       contentPadding: EdgeInsets.zero,
-                      title: const Text('Mtangazo wa moja kwa moja (Live)', style: TextStyle(fontSize: 13)),
+                      title: const Text(
+                        'Mtangazo wa moja kwa moja (Live)',
+                        style: TextStyle(fontSize: 13),
+                      ),
                       value: live,
                       activeThumbColor: const Color(0xFFEF4444),
                       onChanged: (v) => setModal(() => live = v ?? true),
                     ),
                     const SizedBox(height: 16),
-                    Text('Ulinzi wa maudhui (DRM)', style: _channelFormSectionStyle()),
+                    Text(
+                      'Ulinzi wa maudhui (DRM)',
+                      style: _channelFormSectionStyle(),
+                    ),
                     const SizedBox(height: 8),
                     DropdownButtonFormField<String>(
                       isExpanded: true,
                       value: drm,
                       dropdownColor: AdminColors.bgSecondary,
-                      decoration: _inputDeco().copyWith(labelText: 'Aina ya DRM'),
+                      decoration: _inputDeco().copyWith(
+                        labelText: 'Aina ya DRM',
+                      ),
                       items: const [
-                        DropdownMenuItem(value: 'none', child: Text('Hakuna DRM')),
-                        DropdownMenuItem(value: 'clearkey', child: Text('ClearKey')),
-                        DropdownMenuItem(value: 'widevine', child: Text('Widevine')),
+                        DropdownMenuItem(
+                          value: 'none',
+                          child: Text('Hakuna DRM'),
+                        ),
+                        DropdownMenuItem(
+                          value: 'clearkey',
+                          child: Text('ClearKey'),
+                        ),
+                        DropdownMenuItem(
+                          value: 'widevine',
+                          child: Text('Widevine'),
+                        ),
                       ],
                       onChanged: (v) => setModal(() => drm = v ?? 'none'),
                     ),
@@ -4707,9 +6048,14 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
                                 decoration: _inputDeco().copyWith(
                                   labelText: 'ClearKey',
                                   hintText: 'kid_hex:key_hex',
-                                  helperText: 'Hex kid:key, kid,key, au JSON {"keys":[{"kid":"…","k":"…"}]}',
+                                  helperText:
+                                      'Hex kid:key, kid,key, au JSON {"keys":[{"kid":"…","k":"…"}]}',
                                   helperMaxLines: 2,
-                                  prefixIcon: const Icon(Icons.vpn_key_outlined, color: Color(0xFF94A3B8), size: 20),
+                                  prefixIcon: const Icon(
+                                    Icons.vpn_key_outlined,
+                                    color: Color(0xFF94A3B8),
+                                    size: 20,
+                                  ),
                                 ),
                               ),
                             )
@@ -4720,7 +6066,10 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
               ),
             ),
             actions: [
-              TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Ghairi')),
+              TextButton(
+                onPressed: () => Navigator.pop(ctx),
+                child: const Text('Ghairi'),
+              ),
               FilledButton(
                 onPressed: () async {
                   final n = name.text.trim();
@@ -4732,7 +6081,10 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
                   final sUrl = stream.text.trim();
                   final ck = clearKey.text.trim();
                   if (drm == 'clearkey' && ck.isEmpty) {
-                    _showToast('Andika ClearKey kwa chaneli hii', _ToastType.error);
+                    _showToast(
+                      'Andika ClearKey kwa chaneli hii',
+                      _ToastType.error,
+                    );
                     return;
                   }
                   late AdminChannel syncChannel;
@@ -4757,17 +6109,16 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
                         premium: premium,
                         live: live,
                         status: active ? 'active' : 'inactive',
-                        thumbnail: tUrl.isEmpty ? 'https://picsum.photos/400/225?random=${DateTime.now().millisecondsSinceEpoch}' : tUrl,
+                        thumbnail: tUrl.isEmpty
+                            ? 'https://picsum.photos/400/225?random=${DateTime.now().millisecondsSinceEpoch}'
+                            : tUrl,
                         streamUrl: sUrl,
                         viewers: 0,
                         rating: '5.0',
                         drm: drm,
                         drmClearKey: drm == 'clearkey' ? ck : '',
                       );
-                      _channels.insert(
-                        0,
-                        created,
-                      );
+                      _channels.insert(0, created);
                       syncChannel = created;
                     }
                   });
@@ -4806,12 +6157,18 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
                       }
                       if (mounted) unawaited(_hydrateFromBackend());
                     } catch (_) {
-                      _showToast('Channel local saved, lakini server sync imeshindikana.', _ToastType.warning);
+                      _showToast(
+                        'Channel local saved, lakini server sync imeshindikana.',
+                        _ToastType.warning,
+                      );
                     }
                   }
                   if (!mounted) return;
                   Navigator.pop(ctx);
-                  _showToast(isEdit ? 'Mabadiliko yamehifadhiwa' : 'Chaneli imeongezwa', _ToastType.success);
+                  _showToast(
+                    isEdit ? 'Mabadiliko yamehifadhiwa' : 'Chaneli imeongezwa',
+                    _ToastType.success,
+                  );
                 },
                 child: Text(isEdit ? 'Hifadhi' : 'Ongeza'),
               ),
@@ -4823,18 +6180,21 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
   }
 
   TextStyle _channelFormSectionStyle() => const TextStyle(
-        fontSize: 11,
-        fontWeight: FontWeight.w700,
-        letterSpacing: 0.4,
-        color: AdminColors.textSecondary,
-      );
+    fontSize: 11,
+    fontWeight: FontWeight.w700,
+    letterSpacing: 0.4,
+    color: AdminColors.textSecondary,
+  );
 
   // --- Subscriptions ---
   Widget _pageSubscriptions() {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        const Text('Usajili', style: TextStyle(fontSize: 24, fontWeight: FontWeight.w800)),
+        const Text(
+          'Usajili',
+          style: TextStyle(fontSize: 24, fontWeight: FontWeight.w800),
+        ),
         const SizedBox(height: 4),
         const Text(
           'Waliobakiza siku 3 au chini wanaonyeshwa kwa rangi ya njano. Tuma vikumbusho kupitia ukurasa wa "Arifa na vikumbusho".',
@@ -4842,17 +6202,42 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
         ),
         const SizedBox(height: 12),
         _tableWrap(
-          columns: const ['ID', 'Mtumiaji', 'Kifurushi', 'Bei', 'Tarehe ya kuisha', 'Muda uliobaki', 'Hali'],
+          columns: const [
+            'ID',
+            'Mtumiaji',
+            'Kifurushi',
+            'Bei',
+            'Tarehe ya kuisha',
+            'Muda uliobaki',
+            'Hali',
+          ],
           rows: _subscriptions
               .map(
                 (s) => [
-                  Text(s.id, style: const TextStyle(fontSize: 12, color: AdminColors.textSecondary)),
+                  Text(
+                    s.id,
+                    style: const TextStyle(
+                      fontSize: 12,
+                      color: AdminColors.textSecondary,
+                    ),
+                  ),
                   Text(s.userName, style: const TextStyle(fontSize: 12)),
                   _planBadge(s.plan),
                   Text(fmtTzs(s.price), style: const TextStyle(fontSize: 12)),
-                  Text(_fmtDate(s.endDate), style: const TextStyle(fontSize: 12, color: AdminColors.textSecondary)),
+                  Text(
+                    _fmtDate(s.endDate),
+                    style: const TextStyle(
+                      fontSize: 12,
+                      color: AdminColors.textSecondary,
+                    ),
+                  ),
                   _subscriptionLeftBadge(s.endDate),
-                  _badge(_swStatus(s.status), s.status == 'active' ? AdminColors.accentSuccess : AdminColors.accentDanger),
+                  _badge(
+                    _swStatus(s.status),
+                    s.status == 'active'
+                        ? AdminColors.accentSuccess
+                        : AdminColors.accentDanger,
+                  ),
                 ],
               )
               .toList(),
@@ -4867,25 +6252,44 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
     if (left.isNegative) return _badge('Imeisha', AdminColors.accentDanger);
     final days = left.inDays;
     final label = days >= 1 ? 'Siku $days' : 'Saa ${max(1, left.inHours)}';
-    return _badge(label, days <= 3 ? AdminColors.accentWarning : AdminColors.accentSuccess);
+    return _badge(
+      label,
+      days <= 3 ? AdminColors.accentWarning : AdminColors.accentSuccess,
+    );
   }
 
   Widget _planBadge(String plan) {
     final c = plan == 'gold'
         ? AdminColors.accentWarning
         : plan == 'platinum'
-            ? const Color(0xFFA78BFA)
-            : const Color(0xFF60A5FA);
+        ? const Color(0xFFA78BFA)
+        : const Color(0xFF60A5FA);
     return _badge(plan.toUpperCase(), c);
   }
 
   // --- Pricing ---
   ({String slot, IconData icon, List<Color> grad}) _planSlotMeta(String key) {
     return switch (key) {
-      'weekly' => (slot: 'Wiki', icon: Icons.calendar_view_week_rounded, grad: const [Color(0xFF38BDF8), Color(0xFF2563EB)]),
-      'gold' => (slot: 'Mwezi', icon: Icons.workspace_premium_rounded, grad: const [Color(0xFFFBBF24), Color(0xFFF97316)]),
-      'platinum' => (slot: 'Miezi 3', icon: Icons.diamond_rounded, grad: const [Color(0xFFC084FC), Color(0xFF9333EA)]),
-      _ => (slot: key, icon: Icons.sell_rounded, grad: const [Color(0xFF6366F1), Color(0xFF4F46E5)]),
+      'weekly' => (
+        slot: 'Wiki',
+        icon: Icons.calendar_view_week_rounded,
+        grad: const [Color(0xFF38BDF8), Color(0xFF2563EB)],
+      ),
+      'gold' => (
+        slot: 'Mwezi',
+        icon: Icons.workspace_premium_rounded,
+        grad: const [Color(0xFFFBBF24), Color(0xFFF97316)],
+      ),
+      'platinum' => (
+        slot: 'Miezi 3',
+        icon: Icons.diamond_rounded,
+        grad: const [Color(0xFFC084FC), Color(0xFF9333EA)],
+      ),
+      _ => (
+        slot: key,
+        icon: Icons.sell_rounded,
+        grad: const [Color(0xFF6366F1), Color(0xFF4F46E5)],
+      ),
     };
   }
 
@@ -4901,18 +6305,34 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text('Bei za kifurushi', style: TextStyle(fontSize: 24, fontWeight: FontWeight.w800)),
+                  Text(
+                    'Bei za kifurushi',
+                    style: TextStyle(fontSize: 24, fontWeight: FontWeight.w800),
+                  ),
                   SizedBox(height: 6),
                   Text(
                     'Weka jina, bei (TSh) na muda kwa siku. Hifadhi — bei zitaonekana kwenye app ya mtumiaji.',
-                    style: TextStyle(fontSize: 12, height: 1.35, color: AdminColors.textSecondary),
+                    style: TextStyle(
+                      fontSize: 12,
+                      height: 1.35,
+                      color: AdminColors.textSecondary,
+                    ),
                   ),
                 ],
               ),
             ),
-            _btnOutline(label: 'Weka upya', icon: Icons.undo, onTap: _resetPricing),
+            _btnOutline(
+              label: 'Weka upya',
+              icon: Icons.undo,
+              onTap: _resetPricing,
+            ),
             const SizedBox(width: 8),
-            _btnPrimary(label: 'Hifadhi', icon: Icons.save, small: true, onTap: _savePricing),
+            _btnPrimary(
+              label: 'Hifadhi',
+              icon: Icons.save,
+              small: true,
+              onTap: _savePricing,
+            ),
           ],
         ),
         const SizedBox(height: 20),
@@ -4950,13 +6370,26 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
       child: Container(
         decoration: BoxDecoration(
           borderRadius: BorderRadius.circular(22),
-          border: Border.all(color: p.popular ? const Color(0x55FBBF24) : const Color(0x14FFFFFF)),
+          border: Border.all(
+            color: p.popular
+                ? const Color(0x55FBBF24)
+                : const Color(0x14FFFFFF),
+          ),
           gradient: LinearGradient(
             begin: Alignment.topLeft,
             end: Alignment.bottomRight,
-            colors: [AdminColors.bgTertiary, AdminColors.bgSecondary.withValues(alpha: 0.65)],
+            colors: [
+              AdminColors.bgTertiary,
+              AdminColors.bgSecondary.withValues(alpha: 0.65),
+            ],
           ),
-          boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.2), blurRadius: 18, offset: const Offset(0, 8))],
+          boxShadow: [
+            BoxShadow(
+              color: Colors.black.withValues(alpha: 0.2),
+              blurRadius: 18,
+              offset: const Offset(0, 8),
+            ),
+          ],
         ),
         padding: const EdgeInsets.all(20),
         child: Column(
@@ -4971,7 +6404,13 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
                   decoration: BoxDecoration(
                     borderRadius: BorderRadius.circular(16),
                     gradient: LinearGradient(colors: meta.grad),
-                    boxShadow: [BoxShadow(color: meta.grad.first.withValues(alpha: 0.35), blurRadius: 12, offset: const Offset(0, 4))],
+                    boxShadow: [
+                      BoxShadow(
+                        color: meta.grad.first.withValues(alpha: 0.35),
+                        blurRadius: 12,
+                        offset: const Offset(0, 4),
+                      ),
+                    ],
                   ),
                   child: Icon(meta.icon, color: Colors.white, size: 26),
                 ),
@@ -4982,13 +6421,25 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
                     children: [
                       Text(
                         meta.slot.toUpperCase(),
-                        style: const TextStyle(fontSize: 10, fontWeight: FontWeight.w800, letterSpacing: 1.2, color: AdminColors.textSecondary),
+                        style: const TextStyle(
+                          fontSize: 10,
+                          fontWeight: FontWeight.w800,
+                          letterSpacing: 1.2,
+                          color: AdminColors.textSecondary,
+                        ),
                       ),
                       const SizedBox(height: 10),
                       TextField(
                         controller: nameCtl,
-                        style: const TextStyle(fontWeight: FontWeight.w800, fontSize: 17, letterSpacing: 0.2),
-                        decoration: _inputDeco().copyWith(labelText: 'Jina la kifurushi', hintText: 'mf. DHAHABU'),
+                        style: const TextStyle(
+                          fontWeight: FontWeight.w800,
+                          fontSize: 17,
+                          letterSpacing: 0.2,
+                        ),
+                        decoration: _inputDeco().copyWith(
+                          labelText: 'Jina la kifurushi',
+                          hintText: 'mf. DHAHABU',
+                        ),
                       ),
                     ],
                   ),
@@ -4998,38 +6449,50 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
             const SizedBox(height: 8),
             Text(
               planPeriodSubtitle(p.duration),
-              style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w500, color: Color(0xFF94A3B8)),
+              style: const TextStyle(
+                fontSize: 12,
+                fontWeight: FontWeight.w500,
+                color: Color(0xFF94A3B8),
+              ),
             ),
             const SizedBox(height: 16),
             LayoutBuilder(
               builder: (context, c) {
                 final row = c.maxWidth > 400;
                 Widget priceField() => Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        const Text('Bei (TSh)', style: TextStyle(fontSize: 10, color: Color(0xFF6B7280))),
-                        const SizedBox(height: 4),
-                        TextField(
-                          controller: priceCtl,
-                          keyboardType: const TextInputType.numberWithOptions(decimal: true),
-                          style: const TextStyle(fontSize: 12),
-                          decoration: _inputDeco(),
-                        ),
-                      ],
-                    );
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text(
+                      'Bei (TSh)',
+                      style: TextStyle(fontSize: 10, color: Color(0xFF6B7280)),
+                    ),
+                    const SizedBox(height: 4),
+                    TextField(
+                      controller: priceCtl,
+                      keyboardType: const TextInputType.numberWithOptions(
+                        decimal: true,
+                      ),
+                      style: const TextStyle(fontSize: 12),
+                      decoration: _inputDeco(),
+                    ),
+                  ],
+                );
                 Widget daysField() => Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        const Text('Muda (siku)', style: TextStyle(fontSize: 10, color: Color(0xFF6B7280))),
-                        const SizedBox(height: 4),
-                        TextField(
-                          controller: daysCtl,
-                          keyboardType: TextInputType.number,
-                          style: const TextStyle(fontSize: 12),
-                          decoration: _inputDeco(),
-                        ),
-                      ],
-                    );
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text(
+                      'Muda (siku)',
+                      style: TextStyle(fontSize: 10, color: Color(0xFF6B7280)),
+                    ),
+                    const SizedBox(height: 4),
+                    TextField(
+                      controller: daysCtl,
+                      keyboardType: TextInputType.number,
+                      style: const TextStyle(fontSize: 12),
+                      decoration: _inputDeco(),
+                    ),
+                  ],
+                );
                 if (row) {
                   return Row(
                     crossAxisAlignment: CrossAxisAlignment.start,
@@ -5053,7 +6516,10 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
             const SizedBox(height: 8),
             SwitchListTile(
               contentPadding: EdgeInsets.zero,
-              title: const Text('Inapatikana kwenye app', style: TextStyle(fontSize: 13)),
+              title: const Text(
+                'Inapatikana kwenye app',
+                style: TextStyle(fontSize: 13),
+              ),
               value: p.enabled,
               activeTrackColor: const Color(0xFF6366F1),
               onChanged: (v) => setState(() => p.enabled = v),
@@ -5078,11 +6544,16 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
 
     _applyPricingControllersToPlans();
     final sp = await SharedPreferences.getInstance();
-    final map = {for (final e in _pricing.entries) e.key: _pricingToJson(e.value)};
+    final map = {
+      for (final e in _pricing.entries) e.key: _pricingToJson(e.value),
+    };
     await sp.setString('washatvPricing', jsonEncode(map));
 
     if (!_hasAdminSession) {
-      _showToast('Imehifadhiwa local pekee. Ingia tena kwenye skrini ya kwanza.', _ToastType.warning);
+      _showToast(
+        'Imehifadhiwa local pekee. Ingia tena kwenye skrini ya kwanza.',
+        _ToastType.warning,
+      );
       return;
     }
 
@@ -5107,7 +6578,9 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
             )
             .timeout(const Duration(seconds: 12));
         if (res.statusCode < 200 || res.statusCode >= 300) {
-          final detail = res.body.isNotEmpty ? res.body : 'HTTP ${res.statusCode}';
+          final detail = res.body.isNotEmpty
+              ? res.body
+              : 'HTTP ${res.statusCode}';
           throw Exception('pricing ${e.key}: $detail');
         }
         final body = jsonDecode(res.body) as Map<String, dynamic>;
@@ -5121,10 +6594,16 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
       _syncPricingControllersFromPlans();
       await _persistPricingMapToPrefs();
       if (!mounted) return;
-      _showToast('Bei zimehifadhiwa. App ya mtazamaji inasasisha ndani ya sekunde chache.', _ToastType.success);
+      _showToast(
+        'Bei zimehifadhiwa. App ya mtazamaji inasasisha ndani ya sekunde chache.',
+        _ToastType.success,
+      );
     } catch (e) {
       if (!mounted) return;
-      _showToast('Imeshindikana kuhifadhi bei kwenye server: $e', _ToastType.error);
+      _showToast(
+        'Imeshindikana kuhifadhi bei kwenye server: $e',
+        _ToastType.error,
+      );
     }
   }
 
@@ -5145,7 +6624,10 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        const Text('Malipo', style: TextStyle(fontSize: 24, fontWeight: FontWeight.w800)),
+        const Text(
+          'Malipo',
+          style: TextStyle(fontSize: 24, fontWeight: FontWeight.w800),
+        ),
         const SizedBox(height: 8),
         Container(
           width: double.infinity,
@@ -5157,7 +6639,11 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
           ),
           child: const Text(
             'Malipo yaliyokamilika yanathibitishwa kiotomatiki. Hakuna Idhini ya msimamizi inahitajika.',
-            style: TextStyle(fontSize: 11, color: AdminColors.textSecondary, height: 1.35),
+            style: TextStyle(
+              fontSize: 11,
+              color: AdminColors.textSecondary,
+              height: 1.35,
+            ),
           ),
         ),
         const SizedBox(height: 12),
@@ -5165,8 +6651,19 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
           columns: const ['Muamala', 'Mtumiaji', 'Kiasi', 'Hali'],
           rows: _payments.take(20).map((p) {
             return [
-              Text(p.transactionId, style: const TextStyle(fontSize: 11, color: AdminColors.textSecondary)),
-              Text(p.userName, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 12)),
+              Text(
+                p.transactionId,
+                style: const TextStyle(
+                  fontSize: 11,
+                  color: AdminColors.textSecondary,
+                ),
+              ),
+              Text(
+                p.userName,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(fontSize: 12),
+              ),
               Text(fmtTzs(p.amount), style: const TextStyle(fontSize: 12)),
               _paymentStatusPill(p.status),
             ];
@@ -5222,10 +6719,14 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
       _remindersError = null;
     });
     try {
-      Uri usersUri(String audience) => Uri.parse('$_apiBase/api/v1/admin/reminders/users')
-          .replace(queryParameters: {'audience': audience, 'limit': '200'});
+      Uri usersUri(String audience) => Uri.parse(
+        '$_apiBase/api/v1/admin/reminders/users',
+      ).replace(queryParameters: {'audience': audience, 'limit': '200'});
       final results = await Future.wait([
-        http.get(Uri.parse('$_apiBase/api/v1/admin/reminders/summary'), headers: _adminHeaders()),
+        http.get(
+          Uri.parse('$_apiBase/api/v1/admin/reminders/summary'),
+          headers: _adminHeaders(),
+        ),
         http.get(usersUri('expiring'), headers: _adminHeaders()),
         http.get(usersUri('expired'), headers: _adminHeaders()),
       ]).timeout(const Duration(seconds: 20));
@@ -5235,15 +6736,20 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
       }
       final summaryRes = results[0];
       if (summaryRes.statusCode == 404) {
-        throw Exception('Seva bado haina vikumbusho. Sasisha (deploy) backend mpya kwanza.');
+        throw Exception(
+          'Seva bado haina vikumbusho. Sasisha (deploy) backend mpya kwanza.',
+        );
       }
       if (summaryRes.statusCode < 200 || summaryRes.statusCode >= 300) {
         throw Exception('Seva imejibu ${summaryRes.statusCode}.');
       }
       final s = (jsonDecode(summaryRes.body) as Map).cast<String, dynamic>();
-      final templates = (s['templates'] as Map?)?.cast<String, dynamic>() ?? const {};
-      final exp = (templates['expiring'] as Map?)?.cast<String, dynamic>() ?? const {};
-      final gone = (templates['expired'] as Map?)?.cast<String, dynamic>() ?? const {};
+      final templates =
+          (s['templates'] as Map?)?.cast<String, dynamic>() ?? const {};
+      final exp =
+          (templates['expiring'] as Map?)?.cast<String, dynamic>() ?? const {};
+      final gone =
+          (templates['expired'] as Map?)?.cast<String, dynamic>() ?? const {};
       final summary = ReminderSummary(
         days: _toInt(s['days']) > 0 ? _toInt(s['days']) : 3,
         expiring: _toInt(s['expiring']),
@@ -5266,7 +6772,11 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
     } catch (e) {
       if (!mounted) return;
       final msg = e.toString().replaceFirst('Exception: ', '');
-      setState(() => _remindersError = msg.contains('Seva') ? msg : 'Imeshindwa kupakia vikumbusho. Angalia mtandao kisha ujaribu tena.');
+      setState(
+        () => _remindersError = msg.contains('Seva')
+            ? msg
+            : 'Imeshindwa kupakia vikumbusho. Angalia mtandao kisha ujaribu tena.',
+      );
     } finally {
       if (mounted) setState(() => _remindersLoading = false);
     }
@@ -5276,7 +6786,10 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
     if (!_hasAdminSession) return;
     try {
       final res = await http
-          .get(Uri.parse('$_apiBase/api/v1/admin/notifications'), headers: _adminHeaders())
+          .get(
+            Uri.parse('$_apiBase/api/v1/admin/notifications'),
+            headers: _adminHeaders(),
+          )
           .timeout(const Duration(seconds: 15));
       if (res.statusCode == 401 || res.statusCode == 403) {
         await _handleAdminUnauthorized();
@@ -5300,7 +6813,11 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
   /// "leo" / "kesho" / "baada ya siku N" / "jana" / "siku N zilizopita".
   String _swDayDistance(DateTime d) {
     final now = DateTime.now();
-    final days = DateTime(d.year, d.month, d.day).difference(DateTime(now.year, now.month, now.day)).inDays;
+    final days = DateTime(
+      d.year,
+      d.month,
+      d.day,
+    ).difference(DateTime(now.year, now.month, now.day)).inDays;
     if (days == 0) return 'leo';
     if (days == 1) return 'kesho';
     if (days > 1) return 'baada ya siku $days';
@@ -5318,8 +6835,12 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
     }
     if (target.startsWith('reminder:')) {
       final parts = target.split(':');
-      final who = parts.length > 1 && parts[1] == 'expired' ? 'walioisha' : 'wanaokaribia kuisha';
-      final how = parts.length > 2 && parts[2] == 'auto' ? 'otomatiki' : 'admin';
+      final who = parts.length > 1 && parts[1] == 'expired'
+          ? 'walioisha'
+          : 'wanaokaribia kuisha';
+      final how = parts.length > 2 && parts[2] == 'auto'
+          ? 'otomatiki'
+          : 'admin';
       return 'Kikumbusho · $who · $how';
     }
     return target;
@@ -5342,10 +6863,18 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
       builder: (ctx) => AlertDialog(
         backgroundColor: AdminColors.bgSecondary,
         title: const Text('Futa kwenye historia?'),
-        content: const Text('Hii inafuta rekodi hapa tu — arifa iliyokwisha tumwa haitaondoka kwenye simu za watumiaji.'),
+        content: const Text(
+          'Hii inafuta rekodi hapa tu — arifa iliyokwisha tumwa haitaondoka kwenye simu za watumiaji.',
+        ),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Ghairi')),
-          FilledButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Futa')),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Ghairi'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Futa'),
+          ),
         ],
       ),
     );
@@ -5353,7 +6882,9 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
     try {
       final res = await http
           .delete(
-            Uri.parse('$_apiBase/api/v1/admin/notifications/${Uri.encodeComponent(n.id)}'),
+            Uri.parse(
+              '$_apiBase/api/v1/admin/notifications/${Uri.encodeComponent(n.id)}',
+            ),
             headers: _adminHeadersForDelete(),
           )
           .timeout(const Duration(seconds: 12));
@@ -5361,7 +6892,8 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
         await _handleAdminUnauthorized();
         return;
       }
-      if (res.statusCode < 200 || res.statusCode >= 300) throw Exception('${res.statusCode}');
+      if (res.statusCode < 200 || res.statusCode >= 300)
+        throw Exception('${res.statusCode}');
       if (!mounted) return;
       setState(() => _notifications.removeWhere((x) => x.id == n.id));
       _showToast('Imefutwa kwenye historia', _ToastType.success);
@@ -5375,11 +6907,18 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
     final s = _reminderSummary ?? const ReminderSummary();
     final expiring = audience == 'expiring';
     if (!s.pushConfigured) {
-      _showToast('FCM haijasanidiwa kwenye seva — vikumbusho haviwezi kutumwa.', _ToastType.error);
+      _showToast(
+        'FCM haijasanidiwa kwenye seva — vikumbusho haviwezi kutumwa.',
+        _ToastType.error,
+      );
       return;
     }
-    final title = TextEditingController(text: expiring ? s.expiringTitle : s.expiredTitle);
-    final body = TextEditingController(text: expiring ? s.expiringBody : s.expiredBody);
+    final title = TextEditingController(
+      text: expiring ? s.expiringTitle : s.expiredTitle,
+    );
+    final body = TextEditingController(
+      text: expiring ? s.expiringBody : s.expiredBody,
+    );
     // Expiring: skip people already reminded for this subscription. Expired: reach everyone by default.
     var onlyUnsent = expiring;
     var sending = false;
@@ -5394,7 +6933,9 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
           final recipients = onlyUnsent ? unsent : total;
           return AlertDialog(
             backgroundColor: AdminColors.bgSecondary,
-            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(20),
+            ),
             title: Text(
               expiring ? 'Kumbusha wanaokaribia kuisha' : 'Kumbusha walioisha',
               style: const TextStyle(fontWeight: FontWeight.w800),
@@ -5410,7 +6951,10 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
                       expiring
                           ? 'Watumiaji ambao kifurushi chao kinaisha ndani ya siku ${s.days}.'
                           : 'Watumiaji ambao kifurushi chao kimeshaisha.',
-                      style: const TextStyle(fontSize: 12.5, color: AdminColors.textSecondary),
+                      style: const TextStyle(
+                        fontSize: 12.5,
+                        color: AdminColors.textSecondary,
+                      ),
                     ),
                     const SizedBox(height: 14),
                     TextField(
@@ -5429,18 +6973,29 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
                       expiring
                           ? '{jina} = jina la mtumiaji · {muda} = "leo", "kesho" au "baada ya siku 3"'
                           : '{jina} = jina la mtumiaji',
-                      style: const TextStyle(fontSize: 11, color: AdminColors.textSecondary),
+                      style: const TextStyle(
+                        fontSize: 11,
+                        color: AdminColors.textSecondary,
+                      ),
                     ),
                     const SizedBox(height: 8),
                     CheckboxListTile(
                       contentPadding: EdgeInsets.zero,
                       controlAffinity: ListTileControlAffinity.leading,
                       value: onlyUnsent,
-                      onChanged: sending ? null : (v) => setLocal(() => onlyUnsent = v ?? false),
-                      title: const Text('Ruka waliokwisha kukumbushwa', style: TextStyle(fontSize: 13)),
+                      onChanged: sending
+                          ? null
+                          : (v) => setLocal(() => onlyUnsent = v ?? false),
+                      title: const Text(
+                        'Ruka waliokwisha kukumbushwa',
+                        style: TextStyle(fontSize: 13),
+                      ),
                       subtitle: Text(
                         'Wote: $total · Hawajakumbushwa: $unsent',
-                        style: const TextStyle(fontSize: 11.5, color: AdminColors.textSecondary),
+                        style: const TextStyle(
+                          fontSize: 11.5,
+                          color: AdminColors.textSecondary,
+                        ),
                       ),
                     ),
                     const SizedBox(height: 4),
@@ -5455,7 +7010,10 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
                         recipients == 0
                             ? 'Hakuna mtumiaji wa kutumiwa kikumbusho hiki.'
                             : 'Watumiaji $recipients watapokea kikumbusho hiki.',
-                        style: const TextStyle(fontSize: 12.5, fontWeight: FontWeight.w600),
+                        style: const TextStyle(
+                          fontSize: 12.5,
+                          fontWeight: FontWeight.w600,
+                        ),
                       ),
                     ),
                   ],
@@ -5471,8 +7029,12 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
                 onPressed: sending || recipients == 0
                     ? null
                     : () async {
-                        if (title.text.trim().isEmpty || body.text.trim().isEmpty) {
-                          _showToast('Andika kichwa na ujumbe', _ToastType.error);
+                        if (title.text.trim().isEmpty ||
+                            body.text.trim().isEmpty) {
+                          _showToast(
+                            'Andika kichwa na ujumbe',
+                            _ToastType.error,
+                          );
                           return;
                         }
                         setLocal(() => sending = true);
@@ -5490,7 +7052,11 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
                         }
                       },
                 icon: sending
-                    ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2))
+                    ? const SizedBox(
+                        width: 16,
+                        height: 16,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
                     : const Icon(Icons.send_rounded, size: 16),
                 label: Text(sending ? 'Inatuma…' : 'Tuma kikumbusho'),
               ),
@@ -5512,7 +7078,12 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
           .post(
             Uri.parse('$_apiBase/api/v1/admin/reminders/send'),
             headers: _adminHeaders(),
-            body: jsonEncode({'audience': audience, 'title': title, 'body': body, 'only_unsent': onlyUnsent}),
+            body: jsonEncode({
+              'audience': audience,
+              'title': title,
+              'body': body,
+              'only_unsent': onlyUnsent,
+            }),
           )
           // Large audiences are sent in batches of 500 — give the server time.
           .timeout(const Duration(seconds: 120));
@@ -5521,7 +7092,11 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
         return false;
       }
       if (res.statusCode < 200 || res.statusCode >= 300) {
-        _showToast(_readApiError(res.body) ?? 'Kutuma kumeshindikana (${res.statusCode}).', _ToastType.error);
+        _showToast(
+          _readApiError(res.body) ??
+              'Kutuma kumeshindikana (${res.statusCode}).',
+          _ToastType.error,
+        );
         return false;
       }
       final out = (jsonDecode(res.body) as Map).cast<String, dynamic>();
@@ -5531,10 +7106,15 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
       if (total == 0) {
         _showToast('Hakuna mtumiaji aliyestahili kutumiwa.', _ToastType.info);
       } else if (sent == 0) {
-        _showToast('Hakuna kikumbusho kilichofika (vimeshindwa $failed). Huenda watumiaji hawajawasha arifa.', _ToastType.error);
+        _showToast(
+          'Hakuna kikumbusho kilichofika (vimeshindwa $failed). Huenda watumiaji hawajawasha arifa.',
+          _ToastType.error,
+        );
       } else {
         _showToast(
-          failed == 0 ? 'Vikumbusho $sent vimetumwa!' : 'Vimetumwa $sent, vimeshindwa $failed (jumla $total).',
+          failed == 0
+              ? 'Vikumbusho $sent vimetumwa!'
+              : 'Vimetumwa $sent, vimeshindwa $failed (jumla $total).',
           failed == 0 ? _ToastType.success : _ToastType.warning,
         );
       }
@@ -5542,7 +7122,10 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
       unawaited(_reloadNotifications());
       return true;
     } on TimeoutException {
-      _showToast('Seva inachukua muda mrefu. Angalia historia baada ya dakika moja kabla ya kutuma tena.', _ToastType.warning);
+      _showToast(
+        'Seva inachukua muda mrefu. Angalia historia baada ya dakika moja kabla ya kutuma tena.',
+        _ToastType.warning,
+      );
       unawaited(_reloadNotifications());
       return true;
     } catch (e) {
@@ -5551,7 +7134,11 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
     }
   }
 
-  Widget _reminderNotice(String text, {Color color = const Color(0xFFF59E0B), IconData icon = Icons.warning_amber_rounded}) {
+  Widget _reminderNotice(
+    String text, {
+    Color color = const Color(0xFFF59E0B),
+    IconData icon = Icons.warning_amber_rounded,
+  }) {
     return Container(
       width: double.infinity,
       margin: const EdgeInsets.only(bottom: 12),
@@ -5566,7 +7153,12 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
         children: [
           Icon(icon, size: 18, color: color),
           const SizedBox(width: 10),
-          Expanded(child: Text(text, style: const TextStyle(fontSize: 12.5, height: 1.4))),
+          Expanded(
+            child: Text(
+              text,
+              style: const TextStyle(fontSize: 12.5, height: 1.4),
+            ),
+          ),
         ],
       ),
     );
@@ -5599,7 +7191,10 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
               Container(
                 width: 36,
                 height: 36,
-                decoration: BoxDecoration(color: color.withValues(alpha: 0.18), borderRadius: BorderRadius.circular(10)),
+                decoration: BoxDecoration(
+                  color: color.withValues(alpha: 0.18),
+                  borderRadius: BorderRadius.circular(10),
+                ),
                 child: Icon(icon, size: 18, color: color),
               ),
               const SizedBox(width: 10),
@@ -5607,8 +7202,20 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text(title, style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 14)),
-                    Text(subtitle, style: const TextStyle(fontSize: 11.5, color: AdminColors.textSecondary)),
+                    Text(
+                      title,
+                      style: const TextStyle(
+                        fontWeight: FontWeight.w700,
+                        fontSize: 14,
+                      ),
+                    ),
+                    Text(
+                      subtitle,
+                      style: const TextStyle(
+                        fontSize: 11.5,
+                        color: AdminColors.textSecondary,
+                      ),
+                    ),
                   ],
                 ),
               ),
@@ -5620,14 +7227,21 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
             children: [
               Text(
                 _remindersLoading && _reminderSummary == null ? '…' : '$count',
-                style: TextStyle(fontSize: 30, fontWeight: FontWeight.w800, color: color),
+                style: TextStyle(
+                  fontSize: 30,
+                  fontWeight: FontWeight.w800,
+                  color: color,
+                ),
               ),
               const SizedBox(width: 8),
               Padding(
                 padding: const EdgeInsets.only(bottom: 6),
                 child: Text(
                   'watumiaji · $unsent hawajakumbushwa',
-                  style: const TextStyle(fontSize: 12, color: AdminColors.textSecondary),
+                  style: const TextStyle(
+                    fontSize: 12,
+                    color: AdminColors.textSecondary,
+                  ),
                 ),
               ),
             ],
@@ -5636,48 +7250,81 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
           SizedBox(
             width: double.infinity,
             child: FilledButton.icon(
-              onPressed: count == 0 ? null : () => unawaited(_openReminderComposer(audience)),
-              style: FilledButton.styleFrom(backgroundColor: color, foregroundColor: Colors.white),
+              onPressed: count == 0
+                  ? null
+                  : () => unawaited(_openReminderComposer(audience)),
+              style: FilledButton.styleFrom(
+                backgroundColor: color,
+                foregroundColor: Colors.white,
+              ),
               icon: const Icon(Icons.notifications_active_rounded, size: 16),
               label: Text(count == 0 ? 'Hakuna wa kukumbusha' : actionLabel),
             ),
           ),
           if (users.isNotEmpty)
             Theme(
-              data: Theme.of(context).copyWith(dividerColor: Colors.transparent),
+              data: Theme.of(
+                context,
+              ).copyWith(dividerColor: Colors.transparent),
               child: ExpansionTile(
                 tilePadding: EdgeInsets.zero,
                 childrenPadding: EdgeInsets.zero,
                 title: Text(
                   'Ona watumiaji (${users.length}${users.length < count ? ' kati ya $count' : ''})',
-                  style: const TextStyle(fontSize: 12.5, fontWeight: FontWeight.w600),
+                  style: const TextStyle(
+                    fontSize: 12.5,
+                    fontWeight: FontWeight.w600,
+                  ),
                 ),
                 children: users.take(60).map((u) {
                   final ends = u.endsAt;
-                  final name = u.name.isEmpty || u.name == 'Viewer' ? 'Mtumiaji' : u.name;
-                  final phone = u.phone.isEmpty || u.phone == 'N/A' ? '' : ' · ${u.phone}';
+                  final name = u.name.isEmpty || u.name == 'Viewer'
+                      ? 'Mtumiaji'
+                      : u.name;
+                  final phone = u.phone.isEmpty || u.phone == 'N/A'
+                      ? ''
+                      : ' · ${u.phone}';
                   return Container(
                     margin: const EdgeInsets.only(bottom: 6),
-                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-                    decoration: BoxDecoration(color: const Color(0x0DFFFFFF), borderRadius: BorderRadius.circular(10)),
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 10,
+                      vertical: 8,
+                    ),
+                    decoration: BoxDecoration(
+                      color: const Color(0x0DFFFFFF),
+                      borderRadius: BorderRadius.circular(10),
+                    ),
                     child: Row(
                       children: [
                         Expanded(
                           child: Column(
                             crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
-                              Text('$name$phone', style: const TextStyle(fontSize: 12.5, fontWeight: FontWeight.w600)),
+                              Text(
+                                '$name$phone',
+                                style: const TextStyle(
+                                  fontSize: 12.5,
+                                  fontWeight: FontWeight.w600,
+                                ),
+                              ),
                               if (ends != null)
                                 Text(
                                   '${expiring ? 'Kinaisha' : 'Kiliisha'} ${_swDayDistance(ends)} · ${_fmtAccessDate(ends)}',
-                                  style: const TextStyle(fontSize: 11, color: AdminColors.textSecondary),
+                                  style: const TextStyle(
+                                    fontSize: 11,
+                                    color: AdminColors.textSecondary,
+                                  ),
                                 ),
                             ],
                           ),
                         ),
                         _badge(
-                          u.remindedAt == null ? 'Hajakumbushwa' : 'Amekumbushwa ${_swDayDistance(u.remindedAt!)}',
-                          u.remindedAt == null ? const Color(0xFF94A3B8) : AdminColors.accentSuccess,
+                          u.remindedAt == null
+                              ? 'Hajakumbushwa'
+                              : 'Amekumbushwa ${_swDayDistance(u.remindedAt!)}',
+                          u.remindedAt == null
+                              ? const Color(0xFF94A3B8)
+                              : AdminColors.accentSuccess,
                         ),
                       ],
                     ),
@@ -5707,17 +7354,37 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
           Container(
             width: 34,
             height: 34,
-            decoration: BoxDecoration(color: color.withValues(alpha: 0.18), borderRadius: BorderRadius.circular(9)),
-            child: Icon(isReminder ? Icons.alarm_rounded : Icons.campaign_rounded, size: 16, color: color),
+            decoration: BoxDecoration(
+              color: color.withValues(alpha: 0.18),
+              borderRadius: BorderRadius.circular(9),
+            ),
+            child: Icon(
+              isReminder ? Icons.alarm_rounded : Icons.campaign_rounded,
+              size: 16,
+              color: color,
+            ),
           ),
           const SizedBox(width: 12),
           Expanded(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(n.title, style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 13)),
+                Text(
+                  n.title,
+                  style: const TextStyle(
+                    fontWeight: FontWeight.w700,
+                    fontSize: 13,
+                  ),
+                ),
                 const SizedBox(height: 2),
-                Text(n.message, style: const TextStyle(fontSize: 12, height: 1.35, color: AdminColors.textSecondary)),
+                Text(
+                  n.message,
+                  style: const TextStyle(
+                    fontSize: 12,
+                    height: 1.35,
+                    color: AdminColors.textSecondary,
+                  ),
+                ),
                 const SizedBox(height: 8),
                 Wrap(
                   spacing: 6,
@@ -5725,21 +7392,36 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
                   crossAxisAlignment: WrapCrossAlignment.center,
                   children: [
                     _badge(label, color),
-                    _badge(_notificationTargetLabel(n.target), AdminColors.accentPrimary),
+                    _badge(
+                      _notificationTargetLabel(n.target),
+                      AdminColors.accentPrimary,
+                    ),
                     if (n.sentCount + n.failedCount > 0)
                       Text(
                         'imefika ${n.sentCount}${n.failedCount > 0 ? ' · imeshindwa ${n.failedCount}' : ''}',
-                        style: const TextStyle(fontSize: 11, color: AdminColors.textSecondary),
+                        style: const TextStyle(
+                          fontSize: 11,
+                          color: AdminColors.textSecondary,
+                        ),
                       ),
                     Text(
                       _formatLogDateTime(n.createdAt),
-                      style: const TextStyle(fontSize: 11, color: AdminColors.textSecondary),
+                      style: const TextStyle(
+                        fontSize: 11,
+                        color: AdminColors.textSecondary,
+                      ),
                     ),
                   ],
                 ),
                 if (n.error != null) ...[
                   const SizedBox(height: 6),
-                  Text(n.error!, style: const TextStyle(fontSize: 11.5, color: Color(0xFFF87171))),
+                  Text(
+                    n.error!,
+                    style: const TextStyle(
+                      fontSize: 11.5,
+                      color: Color(0xFFF87171),
+                    ),
+                  ),
                 ],
               ],
             ),
@@ -5747,7 +7429,11 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
           IconButton(
             tooltip: 'Futa kwenye historia',
             onPressed: () => unawaited(_deleteNotification(n)),
-            icon: const Icon(Icons.delete_outline_rounded, size: 18, color: Color(0xFF6B7280)),
+            icon: const Icon(
+              Icons.delete_outline_rounded,
+              size: 18,
+              color: Color(0xFF6B7280),
+            ),
           ),
         ],
       ),
@@ -5762,7 +7448,8 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
       children: [
         _pageTitleRow(
           title: 'Arifa na vikumbusho',
-          subtitle: 'Tuma ujumbe kwa watumiaji na uwakumbushe kulipia vifurushi vyao',
+          subtitle:
+              'Tuma ujumbe kwa watumiaji na uwakumbushe kulipia vifurushi vyao',
           action: Wrap(
             spacing: 8,
             runSpacing: 8,
@@ -5775,13 +7462,22 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
                   unawaited(_reloadNotifications());
                 },
               ),
-              _btnPrimary(label: 'Tuma arifa', icon: Icons.send_rounded, small: true, onTap: _modalSendNotification),
+              _btnPrimary(
+                label: 'Tuma arifa',
+                icon: Icons.send_rounded,
+                small: true,
+                onTap: _modalSendNotification,
+              ),
             ],
           ),
         ),
         const SizedBox(height: 16),
         if (_remindersError != null)
-          _reminderNotice(_remindersError!, color: AdminColors.accentDanger, icon: Icons.error_outline_rounded),
+          _reminderNotice(
+            _remindersError!,
+            color: AdminColors.accentDanger,
+            icon: Icons.error_outline_rounded,
+          ),
         if (s != null && !s.pushConfigured)
           _reminderNotice(
             'FCM haijasanidiwa kwenye seva, kwa hiyo vikumbusho havitafika. '
@@ -5791,10 +7487,14 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
           _reminderNotice(
             s.autoReminders
                 ? 'Vikumbusho otomatiki vimewashwa: kila mtumiaji ambaye kifurushi chake kinaisha ndani ya siku $days '
-                    'hutumiwa kikumbusho mara moja, kati ya saa 2 asubuhi na saa 2 usiku.'
+                      'hutumiwa kikumbusho mara moja, kati ya saa 2 asubuhi na saa 2 usiku.'
                 : 'Vikumbusho otomatiki vimezimwa (REMINDER_AUTO_ENABLED=false). Tuma kwa mkono hapa chini.',
-            color: s.autoReminders ? AdminColors.accentSuccess : const Color(0xFF94A3B8),
-            icon: s.autoReminders ? Icons.auto_mode_rounded : Icons.pause_circle_outline_rounded,
+            color: s.autoReminders
+                ? AdminColors.accentSuccess
+                : const Color(0xFF94A3B8),
+            icon: s.autoReminders
+                ? Icons.auto_mode_rounded
+                : Icons.pause_circle_outline_rounded,
           ),
         LayoutBuilder(
           builder: (context, c) {
@@ -5820,15 +7520,23 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
               icon: Icons.event_busy_rounded,
               actionLabel: 'Tuma kwa walioisha',
             );
-            if (c.maxWidth < 900) return Column(children: [a, const SizedBox(height: 12), b]);
+            if (c.maxWidth < 900)
+              return Column(children: [a, const SizedBox(height: 12), b]);
             return Row(
               crossAxisAlignment: CrossAxisAlignment.start,
-              children: [Expanded(child: a), const SizedBox(width: 12), Expanded(child: b)],
+              children: [
+                Expanded(child: a),
+                const SizedBox(width: 12),
+                Expanded(child: b),
+              ],
             );
           },
         ),
         const SizedBox(height: 24),
-        const Text('Historia ya arifa', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w800)),
+        const Text(
+          'Historia ya arifa',
+          style: TextStyle(fontSize: 16, fontWeight: FontWeight.w800),
+        ),
         const SizedBox(height: 4),
         const Text(
           'Kila arifa na kikumbusho kilichotumwa, pamoja na kama kilifika.',
@@ -5839,7 +7547,10 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
           Container(
             width: double.infinity,
             padding: const EdgeInsets.all(24),
-            decoration: BoxDecoration(color: AdminColors.bgTertiary, borderRadius: BorderRadius.circular(16)),
+            decoration: BoxDecoration(
+              color: AdminColors.bgTertiary,
+              borderRadius: BorderRadius.circular(16),
+            ),
             child: const Text(
               'Hakuna arifa zilizotumwa bado.',
               textAlign: TextAlign.center,
@@ -5856,17 +7567,38 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        const Text('Takwimu', style: TextStyle(fontSize: 24, fontWeight: FontWeight.w800)),
+        const Text(
+          'Takwimu',
+          style: TextStyle(fontSize: 24, fontWeight: FontWeight.w800),
+        ),
         const SizedBox(height: 4),
-        Text(_dashboardSubtitle(), style: const TextStyle(fontSize: 12, color: AdminColors.textSecondary)),
+        Text(
+          _dashboardSubtitle(),
+          style: const TextStyle(
+            fontSize: 12,
+            color: AdminColors.textSecondary,
+          ),
+        ),
         const SizedBox(height: 16),
         LayoutBuilder(
           builder: (context, c) {
             final stacked = c.maxWidth < 1024;
             final a = _chartCard('Usajili wa kila siku', 250, _dailyRegChart());
-            final b = _chartCard('Vifurushi vilivyonunuliwa', 250, _subDoughnut());
-            if (stacked) return Column(children: [a, const SizedBox(height: 16), b]);
-            return Row(crossAxisAlignment: CrossAxisAlignment.start, children: [Expanded(child: a), const SizedBox(width: 16), Expanded(child: b)]);
+            final b = _chartCard(
+              'Vifurushi vilivyonunuliwa',
+              250,
+              _subDoughnut(),
+            );
+            if (stacked)
+              return Column(children: [a, const SizedBox(height: 16), b]);
+            return Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Expanded(child: a),
+                const SizedBox(width: 16),
+                Expanded(child: b),
+              ],
+            );
           },
         ),
       ],
@@ -5879,7 +7611,10 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
     final n = counts.length;
     final maxY = counts.fold<double>(0, (a, b) => b > a ? b : a);
     final yMax = maxY <= 0 ? 1.0 : maxY * 1.15;
-    final spots = List.generate(n, (i) => FlSpot(i.toDouble(), i < counts.length ? counts[i] : 0));
+    final spots = List.generate(
+      n,
+      (i) => FlSpot(i.toDouble(), i < counts.length ? counts[i] : 0),
+    );
     return LineChart(
       LineChartData(
         gridData: const FlGridData(show: false),
@@ -5893,7 +7628,10 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
             isCurved: true,
             color: AdminColors.accentPrimary,
             barWidth: 2,
-            belowBarData: BarAreaData(show: true, color: const Color(0x1A6366F1)),
+            belowBarData: BarAreaData(
+              show: true,
+              color: const Color(0x1A6366F1),
+            ),
           ),
         ],
       ),
@@ -5909,7 +7647,10 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
     final total = gold + plat + week + other;
     if (total <= 0) {
       return const Center(
-        child: Text('Hakuna malipo ya vifurushi yaliyokamilika bado', style: TextStyle(color: AdminColors.textSecondary, fontSize: 12)),
+        child: Text(
+          'Hakuna malipo ya vifurushi yaliyokamilika bado',
+          style: TextStyle(color: AdminColors.textSecondary, fontSize: 12),
+        ),
       );
     }
     return PieChart(
@@ -5918,13 +7659,37 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
         centerSpaceRadius: 44,
         sections: [
           if (gold > 0)
-            PieChartSectionData(value: gold, color: const Color(0xFFF59E0B), title: 'Dhahabu', radius: 48, titleStyle: const TextStyle(fontSize: 10, color: Colors.white)),
+            PieChartSectionData(
+              value: gold,
+              color: const Color(0xFFF59E0B),
+              title: 'Dhahabu',
+              radius: 48,
+              titleStyle: const TextStyle(fontSize: 10, color: Colors.white),
+            ),
           if (plat > 0)
-            PieChartSectionData(value: plat, color: const Color(0xFF8B5CF6), title: 'Platinum', radius: 48, titleStyle: const TextStyle(fontSize: 10, color: Colors.white)),
+            PieChartSectionData(
+              value: plat,
+              color: const Color(0xFF8B5CF6),
+              title: 'Platinum',
+              radius: 48,
+              titleStyle: const TextStyle(fontSize: 10, color: Colors.white),
+            ),
           if (week > 0)
-            PieChartSectionData(value: week, color: const Color(0xFF3B82F6), title: 'Wiki', radius: 48, titleStyle: const TextStyle(fontSize: 10, color: Colors.white)),
+            PieChartSectionData(
+              value: week,
+              color: const Color(0xFF3B82F6),
+              title: 'Wiki',
+              radius: 48,
+              titleStyle: const TextStyle(fontSize: 10, color: Colors.white),
+            ),
           if (other > 0)
-            PieChartSectionData(value: other, color: const Color(0xFF6B7280), title: 'Nyingine', radius: 48, titleStyle: const TextStyle(fontSize: 10, color: Colors.white)),
+            PieChartSectionData(
+              value: other,
+              color: const Color(0xFF6B7280),
+              title: 'Nyingine',
+              radius: 48,
+              titleStyle: const TextStyle(fontSize: 10, color: Colors.white),
+            ),
         ],
       ),
     );
@@ -5941,7 +7706,11 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
       ),
       child: Row(
         children: [
-          const Icon(Icons.verified_user_rounded, color: Color(0xFF34D399), size: 24),
+          const Icon(
+            Icons.verified_user_rounded,
+            color: Color(0xFF34D399),
+            size: 24,
+          ),
           const SizedBox(width: 10),
           Expanded(
             child: Column(
@@ -5953,12 +7722,18 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
                 ),
                 Text(
                   _sessionRemainingLabel(),
-                  style: const TextStyle(fontSize: 11.5, color: AdminColors.textSecondary),
+                  style: const TextStyle(
+                    fontSize: 11.5,
+                    color: AdminColors.textSecondary,
+                  ),
                 ),
               ],
             ),
           ),
-          TextButton(onPressed: () => unawaited(_adminLogout()), child: const Text('Toka')),
+          TextButton(
+            onPressed: () => unawaited(_adminLogout()),
+            child: const Text('Toka'),
+          ),
         ],
       ),
     );
@@ -6015,11 +7790,18 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
         constraints: const BoxConstraints(maxWidth: 560),
         child: Container(
           padding: const EdgeInsets.all(24),
-          decoration: BoxDecoration(color: AdminColors.bgTertiary, borderRadius: BorderRadius.circular(16), border: Border.all(color: const Color(0x0DFFFFFF))),
+          decoration: BoxDecoration(
+            color: AdminColors.bgTertiary,
+            borderRadius: BorderRadius.circular(16),
+            border: Border.all(color: const Color(0x0DFFFFFF)),
+          ),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              const Text('Mipangilio', style: TextStyle(fontSize: 24, fontWeight: FontWeight.w800)),
+              const Text(
+                'Mipangilio',
+                style: TextStyle(fontSize: 24, fontWeight: FontWeight.w800),
+              ),
               const SizedBox(height: 16),
               _adminSessionCard(),
               const SizedBox(height: 16),
@@ -6036,12 +7818,18 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
                   children: [
                     const Row(
                       children: [
-                        Icon(Icons.person_off_rounded, color: Color(0xFFFB7185)),
+                        Icon(
+                          Icons.person_off_rounded,
+                          color: Color(0xFFFB7185),
+                        ),
                         SizedBox(width: 10),
                         Expanded(
                           child: Text(
                             'Ondoa premium kwa watumiaji',
-                            style: TextStyle(fontSize: 15, fontWeight: FontWeight.w800),
+                            style: TextStyle(
+                              fontSize: 15,
+                              fontWeight: FontWeight.w800,
+                            ),
                           ),
                         ),
                       ],
@@ -6050,7 +7838,11 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
                     const Text(
                       'Chuja orodha ya watumiaji (premium), chagua unaotaka, kisha warudishe free. '
                       'Watapoteza ufikiaji wa malipo na muda wa msimamizi — watalazimika kulipa tena.',
-                      style: TextStyle(fontSize: 11.5, height: 1.4, color: AdminColors.textSecondary),
+                      style: TextStyle(
+                        fontSize: 11.5,
+                        height: 1.4,
+                        color: AdminColors.textSecondary,
+                      ),
                     ),
                     const SizedBox(height: 12),
                     SizedBox(
@@ -6059,10 +7851,17 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
                         style: FilledButton.styleFrom(
                           backgroundColor: const Color(0xFFDC2626),
                           foregroundColor: Colors.white,
-                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                          padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 14),
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                          padding: const EdgeInsets.symmetric(
+                            vertical: 12,
+                            horizontal: 14,
+                          ),
                         ),
-                        onPressed: _hasAdminSession ? () => unawaited(_showBulkRevokePremiumDialog()) : null,
+                        onPressed: _hasAdminSession
+                            ? () => unawaited(_showBulkRevokePremiumDialog())
+                            : null,
                         icon: const Icon(Icons.filter_list_rounded, size: 18),
                         label: const Text(
                           'Chuja & ondoa premium',
@@ -6074,7 +7873,10 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
                 ),
               ),
               const SizedBox(height: 20),
-              const Text('Jina la tovuti', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600)),
+              const Text(
+                'Jina la tovuti',
+                style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600),
+              ),
               const SizedBox(height: 6),
               TextField(
                 controller: _settingsSiteName,
@@ -6083,20 +7885,30 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
               ),
               SwitchListTile(
                 contentPadding: EdgeInsets.zero,
-                title: const Text('Usajili wa premium umewashwa', style: TextStyle(fontSize: 13)),
+                title: const Text(
+                  'Usajili wa premium umewashwa',
+                  style: TextStyle(fontSize: 13),
+                ),
                 value: _settings.subscriptionEnabled,
-                onChanged: (v) => setState(() => _settings.subscriptionEnabled = v),
+                onChanged: (v) =>
+                    setState(() => _settings.subscriptionEnabled = v),
                 activeThumbColor: AdminColors.accentPrimary,
               ),
               SwitchListTile(
                 contentPadding: EdgeInsets.zero,
-                title: const Text('Hali ya matengenezo', style: TextStyle(fontSize: 13)),
+                title: const Text(
+                  'Hali ya matengenezo',
+                  style: TextStyle(fontSize: 13),
+                ),
                 value: _settings.maintenanceMode,
                 onChanged: (v) => setState(() => _settings.maintenanceMode = v),
                 activeThumbColor: AdminColors.accentPrimary,
               ),
               const SizedBox(height: 16),
-              const Text('WhatsApp (wasiliani)', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600)),
+              const Text(
+                'WhatsApp (wasiliani)',
+                style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600),
+              ),
               const SizedBox(height: 6),
               TextField(
                 controller: _settingsWhatsapp,
@@ -6104,13 +7916,21 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
                 onChanged: (v) => _settings.whatsappNumber = v,
                 decoration: _inputDeco().copyWith(
                   hintText: 'mf. +255712345678 au 0712345678',
-                  prefixIcon: const Icon(Icons.chat_rounded, color: Color(0xFF22C55E), size: 20),
+                  prefixIcon: const Icon(
+                    Icons.chat_rounded,
+                    color: Color(0xFF22C55E),
+                    size: 20,
+                  ),
                 ),
               ),
               const SizedBox(height: 6),
               const Text(
                 'Nambari hii itaonekana kwenye Wasifu katika app ya mtumiaji na kutumika kuthibitisha WhatsApp.',
-                style: TextStyle(fontSize: 11, height: 1.35, color: AdminColors.textSecondary),
+                style: TextStyle(
+                  fontSize: 11,
+                  height: 1.35,
+                  color: AdminColors.textSecondary,
+                ),
               ),
               const SizedBox(height: 22),
               Container(
@@ -6126,12 +7946,18 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
                   children: [
                     const Row(
                       children: [
-                        Icon(Icons.system_update_alt_rounded, color: Color(0xFFFB7185)),
+                        Icon(
+                          Icons.system_update_alt_rounded,
+                          color: Color(0xFFFB7185),
+                        ),
                         SizedBox(width: 10),
                         Expanded(
                           child: Text(
                             'Lazima ku update app',
-                            style: TextStyle(fontSize: 15, fontWeight: FontWeight.w800),
+                            style: TextStyle(
+                              fontSize: 15,
+                              fontWeight: FontWeight.w800,
+                            ),
                           ),
                         ),
                       ],
@@ -6140,19 +7966,28 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
                     const Text(
                       'Washa mtumiaji asiyesasisha hawezi kuona channels wala kulipa — atalazimishwa kwenda Play Store kwanza. '
                       'Baada ya kuchapisha APK mpya, weka Build ya chini = versionCode mpya (sasa 11 kwa 1.0.10+11).',
-                      style: TextStyle(fontSize: 11.5, height: 1.4, color: AdminColors.textSecondary),
+                      style: TextStyle(
+                        fontSize: 11.5,
+                        height: 1.4,
+                        color: AdminColors.textSecondary,
+                      ),
                     ),
                     SwitchListTile(
                       contentPadding: EdgeInsets.zero,
                       value: _settings.forceUpdateEnabled,
-                      onChanged: (v) => setState(() => _settings.forceUpdateEnabled = v),
-                      title: const Text('Lazimisha kusasisha app', style: TextStyle(fontSize: 13)),
+                      onChanged: (v) =>
+                          setState(() => _settings.forceUpdateEnabled = v),
+                      title: const Text(
+                        'Lazimisha kusasisha app',
+                        style: TextStyle(fontSize: 13),
+                      ),
                       activeThumbColor: const Color(0xFFFB7185),
                     ),
                     TextField(
                       controller: _settingsMinBuild,
                       keyboardType: TextInputType.number,
-                      onChanged: (v) => _settings.minAndroidBuild = int.tryParse(v.trim()) ?? 0,
+                      onChanged: (v) => _settings.minAndroidBuild =
+                          int.tryParse(v.trim()) ?? 0,
                       decoration: _inputDeco().copyWith(
                         labelText: 'Build ya chini (versionCode)',
                         hintText: '11',
@@ -6166,13 +8001,17 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
                       decoration: _inputDeco().copyWith(
                         labelText: 'Toleo la chini',
                         hintText: '1.0.10',
-                        prefixIcon: const Icon(Icons.new_releases_outlined, size: 20),
+                        prefixIcon: const Icon(
+                          Icons.new_releases_outlined,
+                          size: 20,
+                        ),
                       ),
                     ),
                     const SizedBox(height: 10),
                     TextField(
                       controller: _settingsLatestVersion,
-                      onChanged: (v) => _settings.latestAndroidVersion = v.trim(),
+                      onChanged: (v) =>
+                          _settings.latestAndroidVersion = v.trim(),
                       decoration: _inputDeco().copyWith(
                         labelText: 'Toleo jipya',
                         hintText: '1.0.10',
@@ -6183,11 +8022,15 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
                     TextField(
                       controller: _settingsLatestBuild,
                       keyboardType: TextInputType.number,
-                      onChanged: (v) => _settings.latestAndroidBuild = int.tryParse(v.trim()) ?? 0,
+                      onChanged: (v) => _settings.latestAndroidBuild =
+                          int.tryParse(v.trim()) ?? 0,
                       decoration: _inputDeco().copyWith(
                         labelText: 'Build jipya (hiari)',
                         hintText: '11',
-                        prefixIcon: const Icon(Icons.build_circle_outlined, size: 20),
+                        prefixIcon: const Icon(
+                          Icons.build_circle_outlined,
+                          size: 20,
+                        ),
                       ),
                     ),
                     const SizedBox(height: 10),
@@ -6203,14 +8046,18 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
                     TextField(
                       controller: _settingsUpdateTitle,
                       onChanged: (v) => _settings.updateTitle = v.trim(),
-                      decoration: _inputDeco().copyWith(labelText: 'Kichwa cha ujumbe'),
+                      decoration: _inputDeco().copyWith(
+                        labelText: 'Kichwa cha ujumbe',
+                      ),
                     ),
                     const SizedBox(height: 10),
                     TextField(
                       controller: _settingsUpdateMessage,
                       maxLines: 3,
                       onChanged: (v) => _settings.updateMessage = v.trim(),
-                      decoration: _inputDeco().copyWith(labelText: 'Ujumbe kwa mtumiaji'),
+                      decoration: _inputDeco().copyWith(
+                        labelText: 'Ujumbe kwa mtumiaji',
+                      ),
                     ),
                   ],
                 ),
@@ -6222,14 +8069,19 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
                 onTap: () async {
                   final wa = _settingsWhatsapp.text.trim();
                   _settings.whatsappNumber = wa;
-                  _settings.minAndroidBuild = int.tryParse(_settingsMinBuild.text.trim()) ?? 0;
+                  _settings.minAndroidBuild =
+                      int.tryParse(_settingsMinBuild.text.trim()) ?? 0;
                   _settings.minAndroidVersion = _settingsMinVersion.text.trim();
-                  _settings.latestAndroidVersion = _settingsLatestVersion.text.trim();
-                  _settings.latestAndroidBuild = int.tryParse(_settingsLatestBuild.text.trim()) ?? 0;
-                  _settings.playStoreUrl = _settingsPlayStoreUrl.text.trim().isEmpty
+                  _settings.latestAndroidVersion = _settingsLatestVersion.text
+                      .trim();
+                  _settings.latestAndroidBuild =
+                      int.tryParse(_settingsLatestBuild.text.trim()) ?? 0;
+                  _settings.playStoreUrl =
+                      _settingsPlayStoreUrl.text.trim().isEmpty
                       ? 'https://play.google.com/store/apps/details?id=com.washatv'
                       : _settingsPlayStoreUrl.text.trim();
-                  _settings.updateTitle = _settingsUpdateTitle.text.trim().isEmpty
+                  _settings.updateTitle =
+                      _settingsUpdateTitle.text.trim().isEmpty
                       ? 'Sasisha WASHA TV'
                       : _settingsUpdateTitle.text.trim();
                   _settings.updateMessage = _settingsUpdateMessage.text.trim();
@@ -6243,14 +8095,19 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
                             headers: _adminHeaders(),
                             body: jsonEncode({
                               'site_name': _settingsSiteName.text.trim(),
-                              'subscription_enabled': _settings.subscriptionEnabled,
+                              'subscription_enabled':
+                                  _settings.subscriptionEnabled,
                               'maintenance_mode': _settings.maintenanceMode,
                               'whatsapp_number': wa,
-                              'force_update_enabled': _settings.forceUpdateEnabled,
+                              'force_update_enabled':
+                                  _settings.forceUpdateEnabled,
                               'min_android_build': _settings.minAndroidBuild,
-                              'min_android_version': _settings.minAndroidVersion,
-                              'latest_android_version': _settings.latestAndroidVersion,
-                              'latest_android_build': _settings.latestAndroidBuild,
+                              'min_android_version':
+                                  _settings.minAndroidVersion,
+                              'latest_android_version':
+                                  _settings.latestAndroidVersion,
+                              'latest_android_build':
+                                  _settings.latestAndroidBuild,
                               'play_store_url': _settings.playStoreUrl,
                               'update_title': _settings.updateTitle,
                               'update_message': _settings.updateMessage,
@@ -6262,7 +8119,10 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
                       }
                     } catch (_) {
                       if (!mounted) return;
-                      _showToast('Imeshindikana kuhifadhi mipangilio kwenye server.', _ToastType.error);
+                      _showToast(
+                        'Imeshindikana kuhifadhi mipangilio kwenye server.',
+                        _ToastType.error,
+                      );
                       return;
                     }
                   }
@@ -6282,16 +8142,31 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        const Text('Kumbukumbu za shughuli', style: TextStyle(fontSize: 24, fontWeight: FontWeight.w800)),
+        const Text(
+          'Kumbukumbu za shughuli',
+          style: TextStyle(fontSize: 24, fontWeight: FontWeight.w800),
+        ),
         const SizedBox(height: 12),
         _tableWrap(
           columns: const ['ID', 'Msimamizi', 'Kitendo', 'Tarehe'],
           rows: _logs.take(30).map((l) {
             return [
-              Text(l.id, style: const TextStyle(fontSize: 12, color: AdminColors.textSecondary)),
+              Text(
+                l.id,
+                style: const TextStyle(
+                  fontSize: 12,
+                  color: AdminColors.textSecondary,
+                ),
+              ),
               Text(l.adminName, style: const TextStyle(fontSize: 12)),
               _badge(_swLogAction(l.action), AdminColors.accentPrimary),
-              Text(_formatLogDateTime(l.createdAt), style: const TextStyle(fontSize: 12, color: AdminColors.textSecondary)),
+              Text(
+                _formatLogDateTime(l.createdAt),
+                style: const TextStyle(
+                  fontSize: 12,
+                  color: AdminColors.textSecondary,
+                ),
+              ),
             ];
           }).toList(),
         ),
@@ -6299,7 +8174,10 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
     );
   }
 
-  Widget _tableWrap({required List<String> columns, required List<List<Widget>> rows}) {
+  Widget _tableWrap({
+    required List<String> columns,
+    required List<List<Widget>> rows,
+  }) {
     return Container(
       decoration: BoxDecoration(
         color: AdminColors.bgTertiary,
@@ -6316,14 +8194,28 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
               child: ConstrainedBox(
                 constraints: BoxConstraints(minWidth: constraints.maxWidth),
                 child: DataTable(
-                  headingRowColor: MaterialStateProperty.all(AdminColors.bgSecondary),
+                  headingRowColor: MaterialStateProperty.all(
+                    AdminColors.bgSecondary,
+                  ),
                   headingRowHeight: 42,
                   dataRowMinHeight: 44,
                   horizontalMargin: 8,
                   columnSpacing: 10,
-                  headingTextStyle: const TextStyle(color: AdminColors.textSecondary, fontSize: 10, fontWeight: FontWeight.w600),
-                  columns: columns.map((c) => DataColumn(label: Text(c.toUpperCase()))).toList(),
-                  rows: rows.map((cells) => DataRow(cells: cells.map((w) => DataCell(w)).toList())).toList(),
+                  headingTextStyle: const TextStyle(
+                    color: AdminColors.textSecondary,
+                    fontSize: 10,
+                    fontWeight: FontWeight.w600,
+                  ),
+                  columns: columns
+                      .map((c) => DataColumn(label: Text(c.toUpperCase())))
+                      .toList(),
+                  rows: rows
+                      .map(
+                        (cells) => DataRow(
+                          cells: cells.map((w) => DataCell(w)).toList(),
+                        ),
+                      )
+                      .toList(),
                 ),
               ),
             ),
@@ -6333,7 +8225,11 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
     );
   }
 
-  Widget _pageTitleRow({required String title, required String subtitle, Widget? action}) {
+  Widget _pageTitleRow({
+    required String title,
+    required String subtitle,
+    Widget? action,
+  }) {
     return Row(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -6341,9 +8237,21 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Text(title, style: const TextStyle(fontSize: 24, fontWeight: FontWeight.w800)),
+              Text(
+                title,
+                style: const TextStyle(
+                  fontSize: 24,
+                  fontWeight: FontWeight.w800,
+                ),
+              ),
               const SizedBox(height: 4),
-              Text(subtitle, style: const TextStyle(fontSize: 12, color: AdminColors.textSecondary)),
+              Text(
+                subtitle,
+                style: const TextStyle(
+                  fontSize: 12,
+                  color: AdminColors.textSecondary,
+                ),
+              ),
             ],
           ),
         ),
@@ -6353,21 +8261,39 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
   }
 
   InputDecoration _inputDeco() => InputDecoration(
-        filled: true,
-        fillColor: AdminColors.bgPrimary,
-        contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-        enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: const BorderSide(color: Color(0x1AFFFFFF))),
-        focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: const BorderSide(color: AdminColors.accentPrimary)),
-      );
+    filled: true,
+    fillColor: AdminColors.bgPrimary,
+    contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+    enabledBorder: OutlineInputBorder(
+      borderRadius: BorderRadius.circular(12),
+      borderSide: const BorderSide(color: Color(0x1AFFFFFF)),
+    ),
+    focusedBorder: OutlineInputBorder(
+      borderRadius: BorderRadius.circular(12),
+      borderSide: const BorderSide(color: AdminColors.accentPrimary),
+    ),
+  );
 
-  Widget _btnPrimary({required String label, required IconData icon, required VoidCallback onTap, bool small = false}) {
+  Widget _btnPrimary({
+    required String label,
+    required IconData icon,
+    required VoidCallback onTap,
+    bool small = false,
+  }) {
     return InkWell(
       onTap: onTap,
       borderRadius: BorderRadius.circular(12),
       child: Container(
-        padding: EdgeInsets.symmetric(horizontal: small ? 12 : 16, vertical: small ? 8 : 10),
+        padding: EdgeInsets.symmetric(
+          horizontal: small ? 12 : 16,
+          vertical: small ? 8 : 10,
+        ),
         decoration: BoxDecoration(
-          gradient: const LinearGradient(colors: [Color(0xFF6366F1), Color(0xFF8B5CF6)], begin: Alignment.topLeft, end: Alignment.bottomRight),
+          gradient: const LinearGradient(
+            colors: [Color(0xFF6366F1), Color(0xFF8B5CF6)],
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
+          ),
           borderRadius: BorderRadius.circular(12),
         ),
         child: Row(
@@ -6375,14 +8301,25 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
           children: [
             Icon(icon, size: small ? 14 : 16, color: Colors.white),
             SizedBox(width: small ? 6 : 8),
-            Text(label, style: TextStyle(fontSize: small ? 12 : 13, fontWeight: FontWeight.w600, color: Colors.white)),
+            Text(
+              label,
+              style: TextStyle(
+                fontSize: small ? 12 : 13,
+                fontWeight: FontWeight.w600,
+                color: Colors.white,
+              ),
+            ),
           ],
         ),
       ),
     );
   }
 
-  Widget _btnOutline({required String label, required IconData icon, required VoidCallback onTap}) {
+  Widget _btnOutline({
+    required String label,
+    required IconData icon,
+    required VoidCallback onTap,
+  }) {
     return OutlinedButton.icon(
       onPressed: onTap,
       style: OutlinedButton.styleFrom(
@@ -6392,7 +8329,10 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
         padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
       ),
       icon: Icon(icon, size: 14),
-      label: Text(label, style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600)),
+      label: Text(
+        label,
+        style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600),
+      ),
     );
   }
 
@@ -6416,8 +8356,13 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
       builder: (ctx) => StatefulBuilder(
         builder: (ctx, setLocal) => AlertDialog(
           backgroundColor: AdminColors.bgSecondary,
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-          title: const Text('Tuma arifa', style: TextStyle(fontWeight: FontWeight.w800)),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(20),
+          ),
+          title: const Text(
+            'Tuma arifa',
+            style: TextStyle(fontWeight: FontWeight.w800),
+          ),
           content: SizedBox(
             width: 460,
             child: SingleChildScrollView(
@@ -6425,7 +8370,10 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
                 mainAxisSize: MainAxisSize.min,
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  const Text('Tuma kwa', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600)),
+                  const Text(
+                    'Tuma kwa',
+                    style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600),
+                  ),
                   const SizedBox(height: 8),
                   Wrap(
                     spacing: 8,
@@ -6434,7 +8382,9 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
                       return ChoiceChip(
                         label: Text(t.$2),
                         selected: target == t.$1,
-                        onSelected: sending ? null : (_) => setLocal(() => target = t.$1),
+                        onSelected: sending
+                            ? null
+                            : (_) => setLocal(() => target = t.$1),
                       );
                     }).toList(),
                   ),
@@ -6442,7 +8392,9 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
                     const SizedBox(height: 12),
                     TextField(
                       controller: device,
-                      decoration: _inputDeco().copyWith(labelText: 'Device ID au USR id ya mtumiaji'),
+                      decoration: _inputDeco().copyWith(
+                        labelText: 'Device ID au USR id ya mtumiaji',
+                      ),
                     ),
                   ],
                   const SizedBox(height: 12),
@@ -6463,21 +8415,31 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
             ),
           ),
           actions: [
-            TextButton(onPressed: sending ? null : () => Navigator.pop(ctx), child: const Text('Ghairi')),
+            TextButton(
+              onPressed: sending ? null : () => Navigator.pop(ctx),
+              child: const Text('Ghairi'),
+            ),
             FilledButton.icon(
               onPressed: sending
                   ? null
                   : () async {
-                      if (title.text.trim().isEmpty || msg.text.trim().isEmpty) {
+                      if (title.text.trim().isEmpty ||
+                          msg.text.trim().isEmpty) {
                         _showToast('Andika kichwa na ujumbe', _ToastType.error);
                         return;
                       }
                       if (target == 'user' && device.text.trim().isEmpty) {
-                        _showToast('Weka Device ID ya mtumiaji', _ToastType.error);
+                        _showToast(
+                          'Weka Device ID ya mtumiaji',
+                          _ToastType.error,
+                        );
                         return;
                       }
                       if (!_hasAdminSession) {
-                        _showToast('Hakuna kikao cha msimamizi', _ToastType.error);
+                        _showToast(
+                          'Hakuna kikao cha msimamizi',
+                          _ToastType.error,
+                        );
                         return;
                       }
                       setLocal(() => sending = true);
@@ -6495,7 +8457,11 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
                       }
                     },
               icon: sending
-                  ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2))
+                  ? const SizedBox(
+                      width: 16,
+                      height: 16,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
                   : const Icon(Icons.send_rounded, size: 16),
               label: Text(sending ? 'Inatuma…' : 'Tuma'),
             ),
@@ -6531,7 +8497,11 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
         return false;
       }
       if (res.statusCode < 200 || res.statusCode >= 300) {
-        _showToast(_readApiError(res.body) ?? 'Kutuma kumeshindikana (${res.statusCode}).', _ToastType.error);
+        _showToast(
+          _readApiError(res.body) ??
+              'Kutuma kumeshindikana (${res.statusCode}).',
+          _ToastType.error,
+        );
         return false;
       }
       final out = (jsonDecode(res.body) as Map).cast<String, dynamic>();
@@ -6539,13 +8509,22 @@ class _AdminScaffoldState extends State<AdminScaffold> with WidgetsBindingObserv
       final err = _s(out['error']);
       switch (delivery) {
         case 'sent':
-          _showToast(target == 'user' ? 'Arifa imemfikia mtumiaji.' : 'Arifa imetumwa!', _ToastType.success);
+          _showToast(
+            target == 'user' ? 'Arifa imemfikia mtumiaji.' : 'Arifa imetumwa!',
+            _ToastType.success,
+          );
         case 'bridge':
           _showToast('Arifa imetumwa kupitia Supasoka.', _ToastType.success);
         case 'not_configured':
-          _showToast(err.isNotEmpty ? err : 'FCM haijasanidiwa kwenye seva.', _ToastType.warning);
+          _showToast(
+            err.isNotEmpty ? err : 'FCM haijasanidiwa kwenye seva.',
+            _ToastType.warning,
+          );
         default:
-          _showToast(err.isNotEmpty ? 'Haikufika: $err' : 'Arifa haikufika.', _ToastType.error);
+          _showToast(
+            err.isNotEmpty ? 'Haikufika: $err' : 'Arifa haikufika.',
+            _ToastType.error,
+          );
       }
       unawaited(_reloadNotifications());
       return true;
@@ -6577,10 +8556,26 @@ class _HamburgerButton extends StatelessWidget {
       child: Container(
         width: 36,
         height: 36,
-        decoration: BoxDecoration(color: const Color(0x0DFFFFFF), borderRadius: BorderRadius.circular(10), border: Border.all(color: const Color(0x14FFFFFF))),
+        decoration: BoxDecoration(
+          color: const Color(0x0DFFFFFF),
+          borderRadius: BorderRadius.circular(10),
+          border: Border.all(color: const Color(0x14FFFFFF)),
+        ),
         child: AnimatedSwitcher(
           duration: const Duration(milliseconds: 200),
-          child: open ? const Icon(Icons.close, key: ValueKey('c'), size: 18, color: Color(0xFF94A3B8)) : const Icon(Icons.menu_rounded, key: ValueKey('m'), size: 18, color: Color(0xFF94A3B8)),
+          child: open
+              ? const Icon(
+                  Icons.close,
+                  key: ValueKey('c'),
+                  size: 18,
+                  color: Color(0xFF94A3B8),
+                )
+              : const Icon(
+                  Icons.menu_rounded,
+                  key: ValueKey('m'),
+                  size: 18,
+                  color: Color(0xFF94A3B8),
+                ),
         ),
       ),
     );
@@ -6594,12 +8589,14 @@ class _PulseDot extends StatefulWidget {
   State<_PulseDot> createState() => _PulseDotState();
 }
 
-class _PulseDotState extends State<_PulseDot> with SingleTickerProviderStateMixin {
+class _PulseDotState extends State<_PulseDot>
+    with SingleTickerProviderStateMixin {
   late AnimationController _c;
   @override
   void initState() {
     super.initState();
-    _c = AnimationController(vsync: this, duration: const Duration(seconds: 1))..repeat(reverse: true);
+    _c = AnimationController(vsync: this, duration: const Duration(seconds: 1))
+      ..repeat(reverse: true);
   }
 
   @override
@@ -6612,7 +8609,14 @@ class _PulseDotState extends State<_PulseDot> with SingleTickerProviderStateMixi
   Widget build(BuildContext context) {
     return FadeTransition(
       opacity: Tween(begin: 0.5, end: 1.0).animate(_c),
-      child: Container(width: 6, height: 6, decoration: const BoxDecoration(color: Color(0xFFEF4444), shape: BoxShape.circle)),
+      child: Container(
+        width: 6,
+        height: 6,
+        decoration: const BoxDecoration(
+          color: Color(0xFFEF4444),
+          shape: BoxShape.circle,
+        ),
+      ),
     );
   }
 }
